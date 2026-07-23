@@ -95,6 +95,11 @@ const POLL_INTERVAL_MS = 10_000; // v3.7.8: aumentado de 3s para 10s — comando
 const POLLING_GAP_AFTER_RX_MS = 3_000;
 const POLLING_GAP_AFTER_TIMEOUT_MS = 3_000;
 const MANUAL_FIRST_TX_GAP_MS = 3_000; // v3.8.13: gap mínimo entre último TX da mesma PLC e primeiro TX manual
+// v3.25.7: quando há OUTROS manuais pendentes na fila, não segura o barramento os
+// 13s completos esperando o RX deste manual — libera após 3s para o próximo manual
+// sair em ~3s (TX_MIN_GAP_MS). A confirmação física deste comando continua garantida
+// pelos reforços TX (+15/30/45s) e pela janela de late-RX/safety de 120s no backend.
+const MANUAL_QUEUED_HOLD_MS = 3_000;
 let lastPollingEndAt = 0;             // timestamp do último RX/timeout de polling
 let lastPollingEndedWithTimeout = false; // true se o último polling acabou em timeout
 const lastTxByTsnn = new Map(); // TSNN -> { at, type, cmdId, frame }
@@ -4524,6 +4529,22 @@ async function processNextCommand() {
         serialTimeoutMs = 5_000;
         pushLog("warn", "system",
           `[TIMEOUT] Reduzido para TSNN ${expectedTsnn} (offline há ${backoffOff.failures} tentativas) -> 5000ms`);
+      }
+    }
+
+    // v3.25.7 FIX lentidão manual: se há OUTROS manuais pendentes na fila (já
+    // buscados em `data`), não segura a serial os 13s completos esperando o RX
+    // deste manual — libera após MANUAL_QUEUED_HOLD_MS (3s) para o próximo manual
+    // sair em ~3s. Não afeta manual isolado, polling nem reset. A confirmação
+    // física deste comando segue garantida pelos reforços TX e pela janela de 120s.
+    if (cmd.type === "manual" && (cmd.priority ?? 5) > 0) {
+      const otherPendingManuals = data.filter(
+        (d) => d.type === "manual" && d.id !== cmd.id,
+      ).length;
+      if (otherPendingManuals > 0 && serialTimeoutMs > MANUAL_QUEUED_HOLD_MS) {
+        serialTimeoutMs = MANUAL_QUEUED_HOLD_MS;
+        pushLog("info", "system",
+          `[FILA MANUAL] ${otherPendingManuals} manual(is) pendente(s) — hold serial reduzido para ${MANUAL_QUEUED_HOLD_MS}ms (TSNN=${expectedTsnn})`);
       }
     }
 
