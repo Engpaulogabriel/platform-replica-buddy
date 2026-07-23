@@ -1916,6 +1916,7 @@ export type Database = {
           flow_total_m3: number
           fonte_id: string | null
           fonte_tipo: string | null
+          forced_shutdown_enabled: boolean
           horas_pico: string | null
           hw_id: string
           id: string
@@ -1987,6 +1988,7 @@ export type Database = {
           flow_total_m3?: number
           fonte_id?: string | null
           fonte_tipo?: string | null
+          forced_shutdown_enabled?: boolean
           horas_pico?: string | null
           hw_id: string
           id?: string
@@ -2058,6 +2060,7 @@ export type Database = {
           flow_total_m3?: number
           fonte_id?: string | null
           fonte_tipo?: string | null
+          forced_shutdown_enabled?: boolean
           horas_pico?: string | null
           hw_id?: string
           id?: string

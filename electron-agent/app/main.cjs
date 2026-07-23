@@ -100,6 +100,12 @@ const MANUAL_FIRST_TX_GAP_MS = 3_000; // v3.8.13: gap mínimo entre último TX d
 // sair em ~3s (TX_MIN_GAP_MS). A confirmação física deste comando continua garantida
 // pelos reforços TX (+15/30/45s) e pela janela de late-RX/safety de 120s no backend.
 const MANUAL_QUEUED_HOLD_MS = 3_000;
+// v3.25.7: desligamento forçado de bomba ligada localmente. Quando o operador
+// desliga (bit=0) pela plataforma uma bomba com last_actuation_origin='local' e
+// forced_shutdown_enabled=true, o agente executa {1} -> espera RX -> estabiliza -> {0}
+// UMA ÚNICA VEZ (sem reforços/safety). Ver runForcedShutdownSequence().
+const FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS = 13_000; // espera do RX confirmando o {1} (mesma janela do manual)
+const FORCED_SHUTDOWN_STABILIZE_MS = POLL_INTERVAL_MS; // 10s p/ firmware/LoRa estabilizar antes do {0}
 let lastPollingEndAt = 0;             // timestamp do último RX/timeout de polling
 let lastPollingEndedWithTimeout = false; // true se o último polling acabou em timeout
 const lastTxByTsnn = new Map(); // TSNN -> { at, type, cmdId, frame }
@@ -787,6 +793,32 @@ let inflightTimer = null;     // timer de timeout
 // para decidir 1 retry imediato no timeout (Camada 3).
 let inflightSpontaneousSeen = false;
 let inflightRetryCount = 0;
+
+// v3.25.7: estado da sequência de desligamento forçado ({1}->RX->10s->{0}).
+// forcedShutdownActive segura a fila (processNextCommand retorna cedo) durante
+// os ~23-36s da sequência, neutralizando o PROCESSING_STUCK_RESET_MS e o pollTimer.
+// forcedShutdownRxWaiter é um waiter one-shot resolvido pelo processTelemFrame
+// quando o RX confirma o bit alvo esperado.
+let forcedShutdownActive = false;
+let forcedShutdownRxWaiter = null;    // { tsnn, targetIndex, wantBit, resolve }
+
+// Aguarda um RX confirmando `wantBit` na saída `targetIndex` do `tsnn`, ou expira.
+// Resolve com "rx" (confirmado) ou "timeout".
+function forcedShutdownWaitRx(tsnn, targetIndex, wantBit, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    const finish = (how) => {
+      if (done) return;
+      done = true;
+      forcedShutdownRxWaiter = null;
+      if (timer) clearTimeout(timer);
+      resolve(how);
+    };
+    timer = setTimeout(() => finish("timeout"), timeoutMs);
+    forcedShutdownRxWaiter = { tsnn: String(tsnn), targetIndex, wantBit, resolve: () => finish("rx") };
+  });
+}
 
 // Comando recente por TSNN — usado para casar RX que chega APOS o timeout
 // do comando (frames atrasados continuam sendo telemetria do comando original,
@@ -3532,6 +3564,18 @@ function processTelemFrame(frame) {
   // Backoff: qualquer RX desta PLC zera o contador de falhas consecutivas
   noteBackoffSuccess(rxTsnn);
 
+  // v3.25.7: sequência de desligamento forçado — resolve o waiter se este RX
+  // confirma o bit alvo esperado. NÃO retorna: a telemetria continua sendo
+  // gravada normalmente (queremos registrar os estados {1} e {0}).
+  if (forcedShutdownRxWaiter && forcedShutdownRxWaiter.tsnn === rxTsnn) {
+    const w = forcedShutdownRxWaiter;
+    const rx = String(rxPayload || "");
+    if (/^[01]{1,6}$/.test(rx)) {
+      const bit = rx.length === 1 ? rx[0] : (w.targetIndex < rx.length ? rx[w.targetIndex] : null);
+      if (bit === w.wantBit) w.resolve();
+    }
+  }
+
   // Camada 1: se ha um inflightCmd aguardando OUTRO TSNN, este RX eh
   // espontaneo de outro equipamento. Processa normalmente (codigo abaixo),
   // mas marca para que o timeout possa decidir retry e NAO encerra o timer
@@ -4273,7 +4317,83 @@ async function fastPathReset(cmd) {
 }
 
 // --- Command processing ---
+// v3.25.7: constrói o frame ON a partir do frame OFF, setando apenas o bit da
+// saída alvo (targetIndex) para '1' e preservando as demais saídas. Reusa
+// TX_PAYLOAD_RE para localizar o grupo {payload} no frame. Não injeta sufixo RV.
+function buildForcedOnFrame(offFrame, targetIndex) {
+  return String(offFrame).replace(TX_PAYLOAD_RE, (match, payload) => {
+    if (targetIndex < 0 || targetIndex >= payload.length) return match;
+    const onPayload = payload.substring(0, targetIndex) + "1" + payload.substring(targetIndex + 1);
+    return match.replace(payload, onPayload);
+  });
+}
+
+// v3.25.7: sequência de desligamento forçado para bomba ligada localmente.
+// Executa UMA ÚNICA VEZ: TX {1} -> espera RX (13s) -> estabiliza (10s) -> TX {0}.
+// NÃO seta inflightCmd (evita que o matching de RX em processTelemFrame trate o
+// {1} como divergente e arme safety). NÃO agenda reforços nem safety timer — assim
+// o pessoal no campo continua podendo desligar pela botoeira. O rate-limiter
+// anti-colisão (TX_MIN_GAP_MS/RX_AVOID_GAP_MS) do processTxQueue permanece ativo.
+async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetIndex) {
+  forcedShutdownActive = true;
+  processing = true;
+  processingSince = Date.now();
+  try {
+    const onFrame = buildForcedOnFrame(offFrame, targetIndex);
+    pushLog("warn", "system",
+      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} saida=${targetIndex + 1}: bomba local -> sequência {1}->RX->${FORCED_SHUTDOWN_STABILIZE_MS}ms->{0}`);
+
+    // Passo 1: TX {1} (assume controle remoto)
+    pushLog("info", "tx", formatTxWithOrigin(cmd, onFrame, " [FORCED OFF: {1}]"), onFrame);
+    sendTxFrame(onFrame, { priority: "manual" });
+    rememberTxForTsnn(expectedTsnn, "forced-on", cmd.id, onFrame);
+    const r1 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "1", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
+    pushLog("info", "system",
+      `[FORCED OFF] {1} ${r1 === "rx" ? "confirmado pelo RX" : "sem RX no timeout — prosseguindo mesmo assim"}; estabilizando ${FORCED_SHUTDOWN_STABILIZE_MS}ms antes do {0}`);
+
+    // Passo 2: estabilização (10s) para o firmware/LoRa processar
+    await new Promise((res) => setTimeout(res, FORCED_SHUTDOWN_STABILIZE_MS));
+
+    // Passo 3: TX {0} (desliga de fato)
+    pushLog("info", "tx", formatTxWithOrigin(cmd, offFrame, " [FORCED OFF: {0}]"), offFrame);
+    sendTxFrame(offFrame, { priority: "manual" });
+    rememberTxForTsnn(expectedTsnn, "forced-off", cmd.id, offFrame);
+    const r0 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "0", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
+    pushLog(r0 === "rx" ? "info" : "warn", "system",
+      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} -> {0} ${r0 === "rx" ? "confirmado pelo RX (desligado)" : "enviado sem confirmação no timeout"}`);
+
+    // Grava o resultado no banco. Sem safety/reforço: sequência é executada uma vez.
+    try {
+      await withCloudTimeout(
+        supabase
+          .from("commands")
+          .update({
+            status: r0 === "rx" ? "executed" : "sent",
+            response: r0 === "rx" ? "(desligamento forçado confirmado)" : "(desligamento forçado enviado, sem confirmação serial)",
+            responded_at: new Date().toISOString(),
+          })
+          .eq("id", cmd.id),
+        "forced-shutdown result",
+        CLOUD_WRITE_TIMEOUT_MS,
+      );
+    } catch (e) {
+      pushLog("warn", "cloud", `[FORCED OFF] gravação do resultado falhou: ${e.message}`);
+    }
+  } catch (e) {
+    pushLog("error", "system", `[FORCED OFF] sequência falhou: ${e.message}`);
+  } finally {
+    forcedShutdownActive = false;
+    processing = false;
+    // Libera a fila e pega o próximo comando imediatamente
+    setImmediate(() => { void processNextCommand(); });
+  }
+}
+
 async function processNextCommand() {
+  // v3.25.7: sequência de desligamento forçado em curso segura a fila. Evita que
+  // o PROCESSING_STUCK_RESET_MS (15s) ou o pollTimer reentrem durante os ~23-36s
+  // da sequência (que roda com processing=true e inflightCmd=null).
+  if (forcedShutdownActive) return;
   if (processing) {
     if (processingSince && Date.now() - processingSince > PROCESSING_STUCK_RESET_MS && !inflightCmd && !inflightManual) {
       pushLog("warn", "system", `Processamento preso ha ${Math.round((Date.now() - processingSince) / 1000)}s sem comando inflight; liberando fila`);
@@ -4510,6 +4630,40 @@ async function processNextCommand() {
     if (!updatedRows || updatedRows.length === 0) {
       processing = false;
       return;
+    }
+
+    // v3.25.7: DESLIGAMENTO FORÇADO. Se este é um manual de DESLIGAR (bit alvo=0)
+    // para uma bomba que está ligada localmente (last_actuation_origin='local') e
+    // com forced_shutdown_enabled=true, executa a sequência {1}->RX->10s->{0} uma
+    // única vez (sem reforços/safety) em vez de mandar {0} direto. last_actuation_origin
+    // muda em runtime, por isso consultamos o estado fresco no banco (não o cache).
+    if (cmd.type === "manual" && (cmd.priority ?? 5) > 0 && !isBackendResetCommand(cmd, frame)) {
+      const fsPayload = extractTxPayload(frame);
+      if (fsPayload && /^[01]{1,6}$/.test(fsPayload) && expectedTsnn && cmd.equipment_id) {
+        const fsEqMeta = equipmentById.get(String(cmd.equipment_id));
+        const fsTargetIndex = Math.max(0, Math.min(fsPayload.length - 1, (fsEqMeta?.saida || fsPayload.length) - 1));
+        if (fsPayload[fsTargetIndex] === "0") {
+          let fsEqRow = null;
+          try {
+            const { data } = await withCloudTimeout(
+              supabase
+                .from("equipments")
+                .select("last_actuation_origin,forced_shutdown_enabled")
+                .eq("id", cmd.equipment_id)
+                .maybeSingle(),
+              "forced-shutdown check",
+              CLOUD_READ_TIMEOUT_MS,
+            );
+            fsEqRow = data;
+          } catch (e) {
+            pushLog("warn", "system", `[FORCED OFF] consulta de estado falhou: ${e.message}; seguindo com {0} direto`);
+          }
+          if (fsEqRow && fsEqRow.forced_shutdown_enabled === true && fsEqRow.last_actuation_origin === "local") {
+            await runForcedShutdownSequence(cmd, frame, expectedTsnn, fsTargetIndex);
+            return; // a sequência assume o controle; NÃO segue para o TX {0} direto nem agenda reforços
+          }
+        }
+      }
     }
 
     // Manual aguarda a janela física completa: RX divergente nao fecha o comando,

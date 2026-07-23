@@ -109,6 +109,7 @@ interface EquipFormState {
   /** Override por equipamento — "default" = usa global, "on" = via repetidor, "off" = direto. */
   rf_via_rep: "default" | "on" | "off";
   participates_night_cycle: boolean;
+  forced_shutdown_enabled: boolean;
   vazao_mode: "off" | "estimated" | "real";
   vazao_cadastrada_m3h: string;
   vazao_m3_por_pulso: string;
@@ -122,6 +123,7 @@ const emptyEquipForm: EquipFormState = {
   fonte_tipo: "", fonte_id: "", alimenta_id: "", sector_id: "",
   rf_radio: "", rf_via_rep: "default",
   participates_night_cycle: true,
+  forced_shutdown_enabled: false,
   vazao_mode: "off",
   vazao_cadastrada_m3h: "",
   vazao_m3_por_pulso: "1",
@@ -285,6 +287,7 @@ export const Cadastros = () => {
       rf_radio: (e.rf_radio ?? "") as "" | "R1" | "R2" | "R3",
       rf_via_rep: e.rf_via_rep == null ? "default" : (e.rf_via_rep ? "on" : "off"),
       participates_night_cycle: e.participates_night_cycle !== false,
+      forced_shutdown_enabled: e.forced_shutdown_enabled === true,
       vazao_mode: ((e as unknown as { vazao_mode?: string }).vazao_mode as "off" | "estimated" | "real") ?? "off",
       vazao_cadastrada_m3h: (e as unknown as { vazao_cadastrada_m3h?: number | null }).vazao_cadastrada_m3h != null
         ? String((e as unknown as { vazao_cadastrada_m3h?: number | null }).vazao_cadastrada_m3h)
@@ -324,6 +327,7 @@ export const Cadastros = () => {
       rf_radio: equipForm.rf_radio === "" ? null : equipForm.rf_radio,
       rf_via_rep: equipForm.rf_via_rep === "default" ? null : equipForm.rf_via_rep === "on",
       participates_night_cycle: equipForm.type === "nivel" ? true : equipForm.participates_night_cycle,
+      forced_shutdown_enabled: equipForm.type === "nivel" ? false : equipForm.forced_shutdown_enabled,
       vazao_mode: equipForm.type === "nivel" ? "off" : equipForm.vazao_mode,
       vazao_cadastrada_m3h: equipForm.type === "nivel" || equipForm.vazao_mode !== "estimated"
         ? 0
@@ -1054,6 +1058,26 @@ export const Cadastros = () => {
                   </Label>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
                     Marque para incluir esta bomba no cálculo de eficiência energética (ciclo 21h→18h). Desmarque para bombas de reserva, irrigação diurna ou que não operam à noite.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {equipForm.type !== "nivel" && equipForm.type !== "repetidor" && (
+              <div className="flex items-start gap-3 rounded-md border border-border bg-secondary/30 p-3">
+                <input
+                  id="forced_shutdown_enabled"
+                  type="checkbox"
+                  checked={equipForm.forced_shutdown_enabled}
+                  onChange={(e) => setEquipForm({ ...equipForm, forced_shutdown_enabled: e.target.checked })}
+                  className="mt-1 h-4 w-4 accent-primary"
+                />
+                <div className="flex-1">
+                  <Label htmlFor="forced_shutdown_enabled" className="text-foreground cursor-pointer">
+                    Desligamento forçado (bomba ligada localmente)
+                  </Label>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Quando marcado, desligar pela plataforma uma bomba que foi ligada localmente (badge LOCAL) executa a sequência {"{1}"}→espera resposta→10s→{"{0}"} uma única vez, em vez de enviar o desligar direto. Use quando o desligar simples não funciona em bombas travadas pelo acionamento local.
                   </p>
                 </div>
               </div>

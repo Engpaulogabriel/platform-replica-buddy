@@ -58,6 +58,8 @@ export interface CloudEquipamento {
   active: boolean;
   /** Se true (default), entra no cálculo de eficiência do ciclo noturno. */
   participates_night_cycle?: boolean;
+  /** Se true, desligar pela plataforma uma bomba ligada localmente executa a sequência {1}→espera RX→10s→{0} (uma vez) em vez de {0} direto. Default false. */
+  forced_shutdown_enabled?: boolean;
   last_communication: string | null;
   last_outputs_state: string | null;
   last_signal_bars: number | null;
@@ -128,7 +130,7 @@ const EQUIP_COLS =
   "alarm_low,alarm_high,fonte_tipo,fonte_id,alimenta_id,active," +
   "last_communication,last_outputs_state,last_signal_bars,last_actuation_origin," +
   "local_ack_at,command_blocked_until,pending_command_id,desired_running," +
-  "polling_interval_seconds,rf_radio,rf_via_rep," +
+  "polling_interval_seconds,rf_radio,rf_via_rep,forced_shutdown_enabled," +
   "level_last_raw,level_last_raw_at,level_cal_digital,level_cal_meters," +
   "level_max_meters,level_sensor_index," +
   "flow_accum_m3,flow_accum_at,flow_daily_start_m3,flow_daily_start_at";
@@ -523,6 +525,7 @@ export function useCadastrosCloud() {
     alimenta_id?: string | null;
     output_count?: number;
     participates_night_cycle?: boolean;
+    forced_shutdown_enabled?: boolean;
   };
 
   const syncPlcOutputCount = async (plcGroupId: string, type: EquipTipo, outputCount?: number) => {
@@ -560,6 +563,7 @@ export function useCadastrosCloud() {
       alimenta_id: input.alimenta_id ?? null,
       active: true,
       participates_night_cycle: input.participates_night_cycle ?? true,
+      forced_shutdown_enabled: input.forced_shutdown_enabled ?? false,
     };
   };
 
@@ -631,6 +635,7 @@ export function useCadastrosCloud() {
     if (input.fonte_id !== undefined) (patch as Record<string, unknown>).fonte_id = input.fonte_id;
     if (input.alimenta_id !== undefined) patch.alimenta_id = input.alimenta_id;
     if (input.participates_night_cycle !== undefined) patch.participates_night_cycle = input.participates_night_cycle;
+    if (input.forced_shutdown_enabled !== undefined) patch.forced_shutdown_enabled = input.forced_shutdown_enabled;
 
     const label = patch.name ?? current.name;
     if (!isOnline()) {
