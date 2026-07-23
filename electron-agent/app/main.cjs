@@ -4437,28 +4437,54 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
 // Em erro/dúvida retorna false (NÃO descarta) — segurança: nunca sumir com polling
 // por falha de query.
 async function isPollingFrameStale(frame, tsnn) {
+  // v3.25.13: DIAGNÓSTICO — logs detalhados em cada ponto de decisão para
+  // entender por que pollings stale não estão sendo descartados. Remover/reduzir
+  // depois que a causa raiz for identificada.
   try {
-    if (!supabase || !farmId || !tsnn) return false;
+    if (!supabase || !farmId || !tsnn) {
+      pushLog("info", "system", `[STALE CHECK] skip: pré-condição ausente (supabase=${!!supabase} farmId=${!!farmId} tsnn=${tsnn})`);
+      return false;
+    }
     const payload = extractTxPayload(frame);
-    if (!payload || !/^[01]{1,6}$/.test(payload)) return false;
-    const { data } = await withCloudTimeout(
+    if (!payload || !/^[01]{1,6}$/.test(payload)) {
+      pushLog("info", "system", `[STALE CHECK] payload inválido/ausente: payload=${JSON.stringify(payload)} frame=${JSON.stringify(String(frame))}`);
+      return false;
+    }
+    const { data, error } = await withCloudTimeout(
       supabase
         .from("equipments")
-        .select("saida, desired_running")
+        .select("saida, desired_running, hw_id")
         .eq("farm_id", farmId)
         .ilike("hw_id", `${String(tsnn)}%`),
       "polling stale check",
       CLOUD_READ_TIMEOUT_MS,
     );
-    if (!Array.isArray(data) || data.length === 0) return false;
+    if (error) {
+      pushLog("warn", "system", `[STALE CHECK] query ERRO: ${error.message} — não descarta (tsnn=${tsnn})`);
+      return false;
+    }
+    if (!Array.isArray(data) || data.length === 0) {
+      pushLog("info", "system", `[STALE CHECK] query VAZIA: ilike hw_id '${tsnn}%' não encontrou equipamento — não descarta`);
+      return false;
+    }
+    const detalhe = data.map((e) => `[saida=${e.saida} hw=${e.hw_id} desired=${e.desired_running}]`).join(" ");
+    pushLog("info", "system", `[STALE CHECK] payload=${payload} tsnn=${tsnn} eqs=${data.length}: ${detalhe}`);
     for (const eq of data) {
       const saida = Number(eq.saida) || 0;
-      if (saida < 1 || saida > payload.length) continue;
+      if (saida < 1 || saida > payload.length) {
+        pushLog("info", "system", `[STALE CHECK] saida=${saida} fora do range do payload (len=${payload.length}) — pulando este eq`);
+        continue;
+      }
       const wantBit = eq.desired_running ? "1" : "0";
-      if (payload[saida - 1] !== wantBit) return true; // diverge do desired atual → stale
+      if (payload[saida - 1] !== wantBit) {
+        pushLog("info", "system", `[STALE CHECK] STALE detectado: saida=${saida} payload_bit=${payload[saida - 1]} != desired_bit=${wantBit} (desired_running=${eq.desired_running})`);
+        return true; // diverge do desired atual → stale
+      }
     }
+    pushLog("info", "system", `[STALE CHECK] OK: payload bate com desired_running de todos os eqs`);
     return false;
-  } catch (_) {
+  } catch (e) {
+    pushLog("warn", "system", `[STALE CHECK] EXCEÇÃO: ${(e && e.message) || e} — não descarta`);
     return false;
   }
 }
@@ -4598,7 +4624,13 @@ async function processNextCommand() {
       // mais com o desired_running atual (atuação local mudou o desired depois deste
       // polling ter sido enfileirado), cancela sem TX — fecha a corrida em que
       // pollings antigos com payload {1} seguiam sendo enviados por ~90s.
-      if (await isPollingFrameStale(frame, expectedTsnn)) {
+      // v3.25.13: logs de diagnóstico antes/depois da checagem.
+      pushLog("info", "system",
+        `[STALE CHECK] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} payload=${extractTxPayload(frame)} — checando...`);
+      const staleResult = await isPollingFrameStale(frame, expectedTsnn);
+      pushLog("info", "system",
+        `[STALE CHECK] cmd ${cmd.id.substring(0, 8)} resultado: ${staleResult ? "STALE → descartando" : "OK → transmitindo"}`);
+      if (staleResult) {
         try {
           await supabase
             .from("commands")
