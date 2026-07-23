@@ -1,0 +1,69 @@
+# electron-builder config — Renov Agent
+# IMPORTANTE: troque `owner` pelo seu usuário/org GitHub antes do primeiro release.
+appId: com.renovtecnologia.gestor-de-bombas-key
+productName: Gestor de Bombas Key
+copyright: © Renov Tecnologia Agrícola®
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  # v3.9.1: empacotar o fonte CommonJS diretamente. O build v3.9.0 com
+  # bytenode/ofuscação quebrava antes de inicializar o Electron em alguns PCs.
+  - "main.cjs"
+  # NÃO incluir serial_bridge_persistent.py aqui — Python não consegue executar
+  # arquivos dentro de app.asar. Ele vai como extraResources (solto em resources/).
+  - "setup.html"
+  - "setup-preload.cjs"
+  - "log.html"
+  - "log-preload.cjs"
+  - "config.html"
+  - "config-preload.cjs"
+  - "icon.png"
+  - "icon.ico"
+  - "package.json"
+  - "node_modules/**/*"
+  - "!main.jsc"
+  - "!main.obf.tmp.cjs"
+  - "!main.original.cjs"  # backup do fonte — NUNCA empacotar
+
+extraResources:
+  - from: "serial_bridge_persistent.py"
+    to: "serial_bridge_persistent.py"
+  # Hash SHA-256 do app.asar — gerado pelo build-agent.bat ANTES do empacotamento.
+  # Estará em resources/asar-hash.txt no instalador final.
+  - from: "asar-hash.txt"
+    to: "asar-hash.txt"
+
+asar: true
+# asarIntegrity (electron-builder): grava assinatura do app.asar no header
+# do executável. Se alguém extrair e reempacotar, o Electron recusa carregar.
+# Camada 1+3 do plano de proteção.
+
+win:
+  target:
+    - target: nsis
+      arch: x64
+  icon: icon.ico
+  artifactName: "GestorDeBombasKey-Setup-${version}.${ext}"
+  # Sem code signing por enquanto (cliente vai comprar certificado depois).
+  # Quando tiver, descomente e adicione CSC_LINK + CSC_KEY_PASSWORD como env vars:
+  # certificateFile: "build/certificate.pfx"
+  # certificatePassword: "${env.CSC_KEY_PASSWORD}"
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  deleteAppDataOnUninstall: false
+  installerIcon: icon.ico
+  uninstallerIcon: icon.ico
+
+# Auto-update: GitHub Releases público.
+# TROQUE `owner` pelo seu usuário ou org do GitHub antes do primeiro release.
+publish:
+  provider: github
+  owner: renovtec
+  repo: renov-agent-releases
+  releaseType: release

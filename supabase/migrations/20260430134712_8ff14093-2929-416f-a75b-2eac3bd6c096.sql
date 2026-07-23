@@ -1,0 +1,1 @@
+DROP FUNCTION public.apply_pump_telemetry(uuid, text, text, smallint, uuid, text);

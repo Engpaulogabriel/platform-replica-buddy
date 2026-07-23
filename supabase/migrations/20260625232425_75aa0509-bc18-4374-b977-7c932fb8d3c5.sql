@@ -1,0 +1,2 @@
+ALTER TABLE public.whatsapp_operators ADD COLUMN IF NOT EXISTS can_control BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE public.whatsapp_operators ADD COLUMN IF NOT EXISTS can_schedule BOOLEAN NOT NULL DEFAULT TRUE;

@@ -1,0 +1,1 @@
+ALTER TABLE public.agent_releases ALTER COLUMN download_url DROP NOT NULL;

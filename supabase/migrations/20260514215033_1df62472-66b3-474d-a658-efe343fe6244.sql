@@ -1,0 +1,1 @@
+ALTER TABLE public.equipments ADD COLUMN IF NOT EXISTS power_cv numeric(8,2);

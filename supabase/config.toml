@@ -1,0 +1,39 @@
+project_id = "dnyukgfedredvxpzjpqz"
+
+[functions.cleanup-agent-logs]
+verify_jwt = false
+
+[functions.automation-tick]
+verify_jwt = false
+
+[functions.bridge-heartbeat]
+verify_jwt = false
+
+[functions.whatsapp-automation-notify]
+verify_jwt = false
+
+[functions.whatsapp-webhook]
+verify_jwt = false
+
+[functions.whatsapp-alerts]
+verify_jwt = false
+
+[functions.offline-daily-report]
+verify_jwt = false
+
+[functions.critical-alerts-tick]
+verify_jwt = false
+
+[functions.command-verifier]
+verify_jwt = false
+
+[functions.agent-release-signed-url]
+verify_jwt = false
+
+[functions.agent-logs-cleanup]
+verify_jwt = false
+
+
+
+
+

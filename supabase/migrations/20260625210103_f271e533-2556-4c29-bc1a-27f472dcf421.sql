@@ -1,0 +1,1 @@
+ALTER TABLE public.whatsapp_operators ADD COLUMN IF NOT EXISTS audio_enabled BOOLEAN NOT NULL DEFAULT FALSE;

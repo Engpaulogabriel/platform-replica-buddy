@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>RENOV Agent - Configurações</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --primary: #429350;
+      --primary-hover: #357d42;
+      --danger: #dc2626;
+      --danger-hover: #b91c1c;
+      --warn: #d97706;
+      --ok: #10b981;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 13px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+    }
+    h1 {
+      font-size: 15px;
+      margin: 0 0 12px;
+      color: var(--primary);
+      letter-spacing: .3px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .card h2 {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--muted);
+      margin: 0 0 10px;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+      gap: 8px;
+    }
+    .row span:first-child { color: var(--muted); }
+    .row span:last-child {
+      font-family: "JetBrains Mono", Consolas, monospace;
+      color: var(--text);
+      font-size: 12px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge.ok { background: rgba(16,185,129,.15); color: var(--ok); }
+    .badge.off { background: rgba(220,38,38,.15); color: var(--danger); }
+    .badge.warn { background: rgba(217,119,6,.18); color: var(--warn); }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    select, button {
+      font: inherit;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #0b1220;
+      color: var(--text);
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+    select { flex: 1; min-width: 140px; }
+    button { font-weight: 600; }
+    button.primary { background: var(--primary); border-color: var(--primary); color: white; }
+    button.primary:hover:not(:disabled) { background: var(--primary-hover); }
+    button.danger { background: var(--danger); border-color: var(--danger); color: white; }
+    button.danger:hover:not(:disabled) { background: var(--danger-hover); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    .status-msg {
+      font-size: 12px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      margin-top: 8px;
+      min-height: 18px;
+    }
+    .status-msg.ok { background: rgba(16,185,129,.1); color: var(--ok); }
+    .status-msg.err { background: rgba(220,38,38,.1); color: var(--danger); }
+    .status-msg.info { background: rgba(148,163,184,.1); color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>⚙️ RENOV Agent — Configurações</h1>
+
+  <div class="card">
+    <h2>Status do Agente</h2>
+    <div class="row"><span>Versão</span><span id="version">—</span></div>
+    <div class="row"><span>Usuário</span><span id="email">—</span></div>
+    <div class="row"><span>Fazenda (ID)</span><span id="farm">—</span></div>
+    <div class="row"><span>Polling</span><span id="poll">—</span></div>
+    <div class="row"><span>Comando em curso</span><span id="inflight">—</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Porta Serial (COM)</h2>
+    <div class="row">
+      <span>Porta atual</span>
+      <span id="port-current">—</span>
+    </div>
+    <div class="row">
+      <span>Bridge</span>
+      <span id="bridge-status">—</span>
+    </div>
+
+    <div class="controls">
+      <select id="port-select">
+        <option value="">Carregando portas…</option>
+      </select>
+      <button id="btn-refresh" title="Atualizar lista">↻</button>
+    </div>
+
+    <div class="controls">
+      <button id="btn-open" class="primary">Abrir / Trocar porta</button>
+      <button id="btn-close" class="danger">Fechar porta COM</button>
+    </div>
+
+    <div id="status-msg" class="status-msg info">Pronto.</div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const portSelect = $("port-select");
+    const statusMsg = $("status-msg");
+
+    function setMsg(text, kind = "info") {
+      statusMsg.textContent = text;
+      statusMsg.className = "status-msg " + kind;
+    }
+
+    async function refreshStatus() {
+      const s = await window.configAPI.getStatus();
+      $("version").textContent = "v" + s.version;
+      $("email").textContent = s.email || "(não logado)";
+      $("farm").textContent = s.farmId ? s.farmId.substring(0, 8) + "…" : "—";
+      $("poll").textContent = (s.pollIntervalMs / 1000) + "s";
+      $("inflight").textContent = s.inflight ? s.inflight : "(nenhum)";
+      $("port-current").textContent = s.comPort || "—";
+
+      const bs = $("bridge-status");
+      if (s.portManuallyClosed) {
+        bs.innerHTML = '<span class="badge warn">FECHADA (manual)</span>';
+      } else if (s.bridgeReady) {
+        bs.innerHTML = '<span class="badge ok">CONECTADA</span>';
+      } else {
+        bs.innerHTML = '<span class="badge off">DESCONECTADA</span>';
+      }
+    }
+
+    async function refreshPorts() {
+      portSelect.innerHTML = '<option value="">Buscando…</option>';
+      const ports = await window.configAPI.listPorts();
+      const status = await window.configAPI.getStatus();
+      const current = status.comPort;
+
+      if (!ports.length) {
+        portSelect.innerHTML = '<option value="">Nenhuma porta encontrada</option>';
+        return;
+      }
+
+      portSelect.innerHTML = "";
+      for (const p of ports) {
+        const opt = document.createElement("option");
+        opt.value = p.path;
+        opt.textContent = `${p.path} — ${p.description}`;
+        if (p.path === current) opt.selected = true;
+        portSelect.appendChild(opt);
+      }
+    }
+
+    $("btn-refresh").addEventListener("click", () => {
+      refreshPorts();
+      setMsg("Lista de portas atualizada.", "info");
+    });
+
+    $("btn-close").addEventListener("click", async () => {
+      setMsg("Fechando porta…", "info");
+      const r = await window.configAPI.closePort();
+      if (r.success) setMsg("Porta COM fechada com sucesso.", "ok");
+      else setMsg("Erro ao fechar: " + (r.error || "?"), "err");
+      await refreshStatus();
+    });
+
+    $("btn-open").addEventListener("click", async () => {
+      const port = portSelect.value;
+      if (!port) { setMsg("Selecione uma porta.", "err"); return; }
+      setMsg(`Abrindo ${port}…`, "info");
+      const r = await window.configAPI.openPort(port);
+      if (r.success) setMsg(`Porta ${port} aberta com sucesso.`, "ok");
+      else setMsg("Erro ao abrir: " + (r.error || "?"), "err");
+      await refreshStatus();
+    });
+
+    // Inicial
+    refreshStatus();
+    refreshPorts();
+    // Auto-refresh status a cada 3s
+    setInterval(refreshStatus, 3000);
+  </script>
+</body>
+</html>

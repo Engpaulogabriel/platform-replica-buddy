@@ -1,0 +1,3 @@
+#!/bin/sh
+# Bloqueia commits com arquivos > 100 MB
+node scripts/check-large-files.cjs staged

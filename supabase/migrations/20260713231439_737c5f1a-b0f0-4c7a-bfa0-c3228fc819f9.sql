@@ -1,0 +1,1 @@
+ALTER TYPE command_type ADD VALUE IF NOT EXISTS 'automation';

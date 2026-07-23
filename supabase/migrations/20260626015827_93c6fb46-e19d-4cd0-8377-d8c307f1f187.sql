@@ -1,0 +1,1 @@
+ALTER TABLE public.whatsapp_operators ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ;

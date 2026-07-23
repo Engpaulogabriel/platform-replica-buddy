@@ -1,0 +1,4 @@
+UPDATE agent_releases SET is_latest=false WHERE is_latest=true;
+INSERT INTO agent_releases (version, artifact_type, storage_path, file_hash, file_size_bytes, is_latest, mandatory, release_notes)
+VALUES ('3.25.7','asar','3.25.7/app.asar','8027a168dc223af663256135533864800d98ca23c08d306d8547429998430338',11554012,true,false,'Reduz TX_MIN_GAP_MS 5s→3s e POLLING_GAP_AFTER_RX_MS 8s→3s; suspende polling enquanto houver comandos manuais pendentes.')
+ON CONFLICT (version) DO UPDATE SET storage_path=EXCLUDED.storage_path, file_hash=EXCLUDED.file_hash, file_size_bytes=EXCLUDED.file_size_bytes, is_latest=true, release_notes=EXCLUDED.release_notes, artifact_type=EXCLUDED.artifact_type;

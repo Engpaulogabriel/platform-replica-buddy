@@ -1,0 +1,17 @@
+*.exe
+*.asar
+*.msi
+*.dmg
+*.AppImage
+node_modules/
+dist/
+build/
+releases/
+electron-builds/
+*.exe
+*.asar
+*.msi
+*.dmg
+node_modules/
+dist/
+release/

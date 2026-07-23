@@ -1,0 +1,1 @@
+ALTER TYPE public.agent_cmd_kind ADD VALUE IF NOT EXISTS 'force_reboot';

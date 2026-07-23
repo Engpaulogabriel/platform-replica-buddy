@@ -1,0 +1,3 @@
+#!/bin/sh
+# Bloqueia pushes com arquivos > 100 MB em qualquer arquivo versionado
+node scripts/check-large-files.cjs tracked

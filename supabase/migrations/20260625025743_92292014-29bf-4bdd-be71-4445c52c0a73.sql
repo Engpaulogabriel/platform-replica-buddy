@@ -1,0 +1,1 @@
+ALTER TABLE public.whatsapp_config ADD COLUMN IF NOT EXISTS api_token text; ALTER TABLE public.whatsapp_config ADD COLUMN IF NOT EXISTS phone_number_id text;

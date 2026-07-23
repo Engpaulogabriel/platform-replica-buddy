@@ -1,0 +1,1 @@
+ALTER TABLE public.equipments ADD COLUMN IF NOT EXISTS fonte_id uuid REFERENCES public.equipments(id) ON DELETE SET NULL;

@@ -1,0 +1,310 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Renov brand palette — Navy blue + Natural green */
+  :root {
+    --background: 210 20% 96%;
+    --foreground: 210 50% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 210 50% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 210 50% 15%;
+
+    --primary: 142 76% 36%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 15% 92%;
+    --secondary-foreground: 210 50% 15%;
+
+    --muted: 215 10% 80%;
+    --muted-foreground: 215 12% 35%;
+
+    --accent: 210 55% 25%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --warning: 38 100% 50%;
+    --warning-foreground: 0 0% 0%;
+
+    --success: 142 76% 36%;
+    --success-foreground: 0 0% 100%;
+
+    --info: 210 90% 50%;
+    --info-foreground: 0 0% 100%;
+
+    --border: 210 15% 88%;
+    --input: 210 15% 88%;
+    --ring: 142 76% 36%;
+
+    --radius: 0.75rem;
+
+    --sidebar-background: 210 20% 97%;
+    --sidebar-foreground: 210 50% 15%;
+    --sidebar-primary: 145 55% 38%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 210 15% 92%;
+    --sidebar-accent-foreground: 210 50% 15%;
+    --sidebar-border: 210 15% 88%;
+    --sidebar-ring: 145 55% 38%;
+
+    --chart-1: 145 55% 38%;
+    --chart-2: 207 80% 48%;
+    --chart-3: 40 95% 50%;
+    --chart-4: 4 80% 55%;
+    --chart-5: 280 60% 55%;
+  }
+
+  .dark {
+    --background: 210 25% 8%;
+    --foreground: 210 20% 92%;
+
+    --card: 210 25% 11%;
+    --card-foreground: 210 20% 92%;
+
+    --popover: 210 25% 11%;
+    --popover-foreground: 210 20% 92%;
+
+    --primary: 142 85% 48%;
+    --primary-foreground: 0 0% 0%;
+
+    --secondary: 210 20% 16%;
+    --secondary-foreground: 210 20% 88%;
+
+    --muted: 215 12% 28%;
+    --muted-foreground: 215 10% 70%;
+
+    --accent: 210 40% 30%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 90% 58%;
+    --destructive-foreground: 0 0% 100%;
+
+    --warning: 38 100% 55%;
+    --warning-foreground: 0 0% 0%;
+
+    --success: 142 85% 48%;
+    --success-foreground: 0 0% 0%;
+
+    --info: 210 95% 58%;
+    --info-foreground: 0 0% 100%;
+
+    --border: 210 20% 20%;
+    --input: 210 20% 20%;
+    --ring: 142 85% 48%;
+
+    --sidebar-background: 210 25% 9%;
+    --sidebar-foreground: 210 20% 88%;
+    --sidebar-primary: 145 55% 42%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 210 20% 16%;
+    --sidebar-accent-foreground: 210 20% 88%;
+    --sidebar-border: 210 20% 18%;
+    --sidebar-ring: 145 55% 42%;
+
+    --chart-1: 145 55% 42%;
+    --chart-2: 207 80% 52%;
+    --chart-3: 40 95% 50%;
+    --chart-4: 4 80% 55%;
+    --chart-5: 280 60% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', 'Roboto', system-ui, sans-serif;
+  }
+}
+
+/* Premium tech-botanical background */
+.app-botanical-bg {
+  position: relative;
+  background: hsl(var(--background));
+  overflow: hidden;
+}
+
+/* Layer 1: Animated hex grid */
+.app-botanical-bg::before {
+  content: '';
+  position: fixed;
+  inset: -50%;
+  width: 200%;
+  height: 200%;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='104' viewBox='0 0 60 104'%3E%3Cpath d='M30 0 L60 17.3 L60 52 L30 69.3 L0 52 L0 17.3Z' fill='none' stroke='%23429350' stroke-width='0.5'/%3E%3Cpath d='M30 34.6 L60 52 L60 86.6 L30 104 L0 86.6 L0 52Z' fill='none' stroke='%23429350' stroke-width='0.3'/%3E%3Ccircle cx='30' cy='0' r='1.5' fill='%23429350' opacity='0.6'/%3E%3Ccircle cx='60' cy='17.3' r='1' fill='%23429350' opacity='0.4'/%3E%3Ccircle cx='0' cy='17.3' r='1' fill='%23429350' opacity='0.4'/%3E%3Ccircle cx='60' cy='52' r='1.5' fill='%23429350' opacity='0.6'/%3E%3Ccircle cx='0' cy='52' r='1.5' fill='%23429350' opacity='0.6'/%3E%3Ccircle cx='30' cy='69.3' r='1' fill='%23429350' opacity='0.4'/%3E%3C/svg%3E");
+  background-size: 60px 104px;
+  animation: hex-drift 120s linear infinite;
+}
+
+/* Layer 2: Glowing radial depth + scanning line */
+.app-botanical-bg::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    /* Central tech glow */
+    radial-gradient(ellipse 60% 50% at 50% 40%, hsl(145 55% 38% / 0.06), transparent 70%),
+    /* Corner accent glows */
+    radial-gradient(circle at 0% 0%, hsl(210 55% 25% / 0.08), transparent 40%),
+    radial-gradient(circle at 100% 100%, hsl(210 55% 25% / 0.06), transparent 40%),
+    radial-gradient(circle at 100% 0%, hsl(145 55% 38% / 0.03), transparent 35%),
+    radial-gradient(circle at 0% 100%, hsl(145 55% 38% / 0.03), transparent 35%),
+    /* Vignette */
+    radial-gradient(ellipse 80% 80% at 50% 50%, transparent 50%, hsl(210 25% 8% / 0.06) 100%);
+}
+
+.app-botanical-bg > * {
+  position: relative;
+  z-index: 1;
+}
+
+
+
+/* Header sweep animation */
+@keyframes sweep {
+  0%, 100% { transform: translateX(-100%); }
+  50% { transform: translateX(200%); }
+}
+
+/* Scrollbar matching brand */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: hsl(210 20% 96%);
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(210 15% 78%);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(210 15% 65%);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Sidebar como OVERLAY em tablets (≤1024px)
+ *
+ * No iPad o sidebar shadcn `collapsible="icon"` continua sempre visível
+ * como tira de ícones (≥768px usa o modo desktop). O problema: ao
+ * expandir, o "gap div" cresce de 3rem → 16rem e empurra o conteúdo,
+ * cortando a 4ª coluna de cards.
+ *
+ * Fix: em ≤1024px, força o gap div a permanecer em --sidebar-width-icon
+ * mesmo quando data-state="expanded". O painel fixo (segundo filho do
+ * `.peer`) continua animando para 16rem por cima do conteúdo, com
+ * z-index elevado. Backdrop é renderizado em AppSidebar.tsx.
+ * ────────────────────────────────────────────────────────────────────────── */
+@media (min-width: 768px) and (max-width: 1024px) {
+  .peer[data-variant="sidebar"][data-state="expanded"] > div:first-child {
+    width: var(--sidebar-width-icon) !important;
+  }
+  .peer[data-variant="sidebar"][data-state="expanded"] > div:nth-child(2) {
+    z-index: 50 !important;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.35);
+  }
+  /* Garante background SÓLIDO no painel expandido (sem mistura com conteúdo) */
+  .peer[data-variant="sidebar"][data-state="expanded"] [data-sidebar="sidebar"] {
+    background-color: hsl(var(--sidebar-background)) !important;
+  }
+}
+
+
+@keyframes pulse-alert {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-alert {
+  animation: pulse-alert 1.5s ease-in-out infinite;
+}
+
+/* Running pump glow pulse */
+@keyframes pump-glow {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(145 55% 38% / 0.4); }
+  50% { box-shadow: 0 0 0 6px hsl(145 55% 38% / 0); }
+}
+.animate-pump-glow {
+  animation: pump-glow 2s ease-in-out infinite;
+}
+
+/* Status dot pulse */
+@keyframes dot-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.6; }
+}
+.animate-dot-pulse {
+  animation: dot-pulse 1.5s ease-in-out infinite;
+}
+
+/* Leaflet fixes */
+.leaflet-container {
+  width: 100%;
+  z-index: 0;
+}
+
+.leaflet-control-container .leaflet-top,
+.leaflet-control-container .leaflet-bottom {
+  z-index: 999;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Performance em mobile/tablet (≤1024px, ex.: iPad)
+ *
+ * Animações de pulso/glow nos cards de bomba e sombras grandes custam caro
+ * no compositor do Safari iOS. Em telas pequenas, desligamos os efeitos
+ * pesados para manter scroll/interação fluidos. Usuários com
+ * `prefers-reduced-motion` também recebem o mesmo tratamento em qualquer
+ * tamanho de tela.
+ * ────────────────────────────────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  /* iPad/tablet: hardware fraco demais para layout desktop completo.
+     Mata TODAS as animações e transições para manter scroll/interação fluidos. */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+  }
+  .animate-pump-glow,
+  .animate-dot-pulse,
+  .animate-pulse-alert,
+  .animate-pulse,
+  .animate-spin,
+  .animate-bounce,
+  .animate-ping {
+    animation: none !important;
+  }
+  /* Sombras grandes (lg/xl/2xl) viram sombras leves; mantém hierarquia visual
+     sem custo de blur em GPU. */
+  .shadow-lg,
+  .shadow-xl,
+  .shadow-2xl {
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.08) !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

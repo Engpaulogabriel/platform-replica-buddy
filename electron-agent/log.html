@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<title>Log — Renov Tecnologia Agrícola</title>
+<style>
+  body { font-family: Consolas, monospace; background:#020617; color:#e2e8f0; margin:0; padding:8px; font-size:12px; }
+  #log { white-space:pre-wrap; }
+  .tx { color:#60a5fa; }
+  .rx { color:#4ade80; }
+  .info { color:#94a3b8; }
+  .error { color:#f87171; }
+  .ts { color:#475569; margin-right:6px; }
+</style>
+</head>
+<body>
+<div id="log"></div>
+<script>
+  const box = document.getElementById("log");
+  function fmt(e) {
+    const t = new Date(e.ts).toLocaleTimeString();
+    const arrow = e.dir === "tx" ? "TX→" : e.dir === "rx" ? "RX←" : e.dir === "error" ? "ERR" : "INF";
+    return `<div><span class="ts">[${t}]</span><span class="${e.dir}">${arrow} ${escape(e.text)}</span></div>`;
+  }
+  function escape(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+  window.logAPI.getAll().then(all => { box.innerHTML = all.map(fmt).join(""); window.scrollTo(0, document.body.scrollHeight); });
+  window.logAPI.onLine(e => { box.insertAdjacentHTML("beforeend", fmt(e)); window.scrollTo(0, document.body.scrollHeight); });
+</script>
+</body>
+</html>

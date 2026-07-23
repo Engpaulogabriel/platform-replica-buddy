@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+agent-config.json
+asar-hash.txt
+# Artefatos do pipeline de proteção (Camada 1)
+main.jsc
+main.original.cjs
+main.obf.tmp.cjs

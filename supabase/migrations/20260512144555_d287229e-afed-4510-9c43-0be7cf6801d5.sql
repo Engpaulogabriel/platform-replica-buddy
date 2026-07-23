@@ -1,0 +1,1 @@
+ALTER TABLE public.commands ADD COLUMN IF NOT EXISTS reinforcement boolean NOT NULL DEFAULT false;

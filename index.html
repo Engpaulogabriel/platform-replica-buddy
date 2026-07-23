@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- F2: SEO block + anti-embed hints -->
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
+    <meta name="googlebot" content="noindex, nofollow" />
+    <meta http-equiv="X-Frame-Options" content="DENY" />
+    <meta http-equiv="Content-Security-Policy" content="frame-ancestors 'none'" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <link rel="icon" href="/favicon.png" type="image/png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#429350" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Renov" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>Gestor de Bombas - Renov Tecnologia Agrícola</title>
+    <meta name="description" content="Sistema de controle e monitoramento remoto de bombas hidráulicas - Renov Tecnologia Agrícola" />
+    <meta name="author" content="Renov Tecnologia Agrícola" />
+    <link rel="canonical" href="https://gestor.renovtecnologia.com.br/" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Renov Tecnologia Agrícola" />
+    <meta property="og:title" content="Gestor de Bombas - Renov Tecnologia Agrícola" />
+    <meta property="og:description" content="Sistema de controle e monitoramento remoto de bombas hidráulicas" />
+    <meta property="og:url" content="https://gestor.renovtecnologia.com.br/" />
+    <meta property="og:image" content="https://gestor.renovtecnologia.com.br/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Gestor de Bombas - Renov Tecnologia Agrícola" />
+    <meta name="twitter:description" content="Sistema de controle e monitoramento remoto de bombas hidráulicas" />
+    <meta name="twitter:image" content="https://gestor.renovtecnologia.com.br/og-image.png" />
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script>
+      // F2 — Frame-buster: se este app for carregado dentro de iframe, quebra.
+      try {
+        if (window.top && window.top !== window.self) {
+          window.top.location = window.self.location.href;
+        }
+      } catch (_e) {
+        // Cross-origin bloqueou o acesso → estamos em iframe hostil, esconder UI.
+        document.documentElement.style.display = "none";
+      }
+    </script>
+    <script>
+      // Remover após 2026-06-17. Roda no HTML estático, antes do bundle.
+      (function () {
+        if ("serviceWorker" in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function (regs) {
+            regs.forEach(function (reg) {
+              var url =
+                (reg.active && reg.active.scriptURL) ||
+                (reg.installing && reg.installing.scriptURL) ||
+                (reg.waiting && reg.waiting.scriptURL) ||
+                "";
+              // Só o SW do app — não toca em workers de mensageria (ex. FCM)
+              if (url.indexOf("/sw.js") !== -1 || url === "") {
+                reg.unregister();
+              }
+            });
+          });
+        }
+        if ("caches" in window) {
+          caches.keys().then(function (names) {
+            names.forEach(function (name) {
+              if (
+                /(^|-)precache-|(^|-)runtime-/.test(name) ||
+                ["html-cache", "api-cache", "static-media", "static-code"].indexOf(name) !== -1
+              ) {
+                caches.delete(name);
+              }
+            });
+          });
+        }
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

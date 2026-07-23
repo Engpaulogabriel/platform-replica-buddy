@@ -1,0 +1,1 @@
+ALTER TABLE public.equipments ADD COLUMN IF NOT EXISTS vazao_reset_pending boolean NOT NULL DEFAULT false;

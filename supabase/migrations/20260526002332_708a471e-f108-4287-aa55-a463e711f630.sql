@@ -1,0 +1,1 @@
+ALTER TABLE public.equipments ADD COLUMN IF NOT EXISTS communication_status TEXT NOT NULL DEFAULT 'unknown';

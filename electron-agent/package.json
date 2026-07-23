@@ -1,0 +1,35 @@
+{
+  "name": "gestor-de-bombas-key",
+  "productName": "Gestor de Bombas Key",
+  "version": "3.25.4",
+  "description": "Gestor de Bombas Key — Bridge Serial RS-232 (Renov Tecnologia Agrícola®)",
+  "main": "main.cjs",
+  "author": {
+    "name": "Renov Tecnologia Agrícola®",
+    "email": "contato@renovtecnologia.com.br",
+    "url": "https://renovtecnologia.com.br"
+  },
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "protect": "node scripts/protect-build.cjs",
+    "protect:restore": "node scripts/protect-restore.cjs",
+    "build": "node scripts/protect-build.cjs",
+    "publish:ota": "node scripts/publish-release.cjs",
+    "build:installer": "electron-builder --win nsis --x64 --publish never",
+    "build:unprotected": "electron-builder --win nsis --x64 --publish never",
+    "release": "electron-builder --win nsis --x64 --publish always",
+    "release:protected": "node scripts/protect-build.cjs && electron-builder --win nsis --x64 --publish always && node scripts/protect-restore.cjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.0.0",
+    "bytenode": "^1.5.7",
+    "electron": "^42.0.1",
+    "electron-builder": "^25.1.8",
+    "javascript-obfuscator": "^4.2.2"
+  }
+}

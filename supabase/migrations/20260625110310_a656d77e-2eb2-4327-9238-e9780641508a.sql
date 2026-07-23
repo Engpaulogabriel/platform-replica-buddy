@@ -1,0 +1,2 @@
+ALTER TABLE public.automation_execution_log ADD COLUMN IF NOT EXISTS notified_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_aexec_notify_pending ON public.automation_execution_log (executed_at) WHERE notified_at IS NULL;

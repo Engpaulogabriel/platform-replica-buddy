@@ -1,0 +1,87 @@
+# Project Memory
+
+## Core
+- SaaS 'Gestor de Bombas Renov'. Dual env: Electron .exe (local comms, SQLite for unstable net) and Web Panel (port 2213, Cloudflare tunnel).
+- Dark theme (#020617), brand green (#429350), tech-botanical identity. Large icons and semantic colors for accessibility.
+- Comunicação com bombas é via rádio RS-232 do PC com Electron .exe — NÃO depende de internet. Único indicador visual de "online" no Dashboard é a barra de sinal RF (sem badge Online/Offline separado).
+- Telemetry is currently simulated (15s polling) pending final RS-485 serial communication protocol.
+- Lovable Cloud ativo. Multi-tenant por farm_id. Auth real Supabase. Public signup desabilitado.
+- hw_id de equipamento na nuvem = "<plcHex><saida 2 dígitos>". Ex: PLC 2101 saída 3 → "210103". Único por (farm_id, hw_id).
+- PROTOCOLO RENOV: frame Serial termina em `\r`. Comando bomba é payload POSICIONAL: nº dígitos=saída, último dígito=ação. Detalhes em `protocolo-renov-oficial`.
+- `equipments.last_outputs_state` SÓ é atualizado pelo Electron com o payload exato recebido em frame RX `_[TSNN_0_]{PAYLOAD}[TSNN_ETX_]`. NUNCA injetar valores fictícios via UPDATE manual ou seed — leva bombas a aparecerem ligadas falsamente no Dashboard.
+- Automático roda 100% na nuvem (edge function `automation-tick` + pg_cron a cada 1 min). Não existe mais `automationScheduler.ts` no cliente. Detalhes em `cloud-automation-engine`.
+- Bomba offline > 15 min com último estado=LIGADA recebe TX 0 ativo enfileirado (timeout 2h) que aguarda voltar a comunicação. Detalhes em `protective-off-offline`.
+- Geração de .asar pelo Lovable é PERMITIDA e OBRIGATÓRIA quando pedida: rm -rf node_modules → npm install --production → verificar node_modules → npx asar pack → tamanho DEVE ser 10–12 MB (<5 MB = build falhou, repetir install) → SHA-256. NUNCA publicar .asar <5 MB.
+- `equipments.last_communication` é RX-only: só `apply_pump_telemetry` (frame RX real) pode atualizá-lo. NUNCA em TX/safety/timeout. Detalhes em `last-communication-rx-only`.
+- Backend nunca marca comando manual como `error` por RX divergente; Electron decide timeout após reforço de 120s.
+
+## Memories
+- [last_communication RX-only](mem://constraints/last-communication-rx-only) — Campo do badge Online/Offline só pode ser escrito via RX real (apply_pump_telemetry). Bug do safety corrigido 2026-06-09.
+- [Device Authorization](mem://security/device-authorization) — Bloqueio por device fingerprint (FingerprintJS). Tabelas authorized_devices/device_access_attempts/device_audit_log/device_register_links. Painel em Suporte Técnico → Dispositivos.
+- [Agent Auto-Update](mem://features/agent-auto-update) — OTA híbrido v3.10.6: app.asar via bucket privado + URL assinada (preferido) ou .exe legado. Check 30s, SHA-256, rollback automático.
+- [Agent Rollback 1-Clique](mem://features/agent-rollback) — Botão Rollback por fazenda + global em /platform→Atualizações. Comando force_rollback usa app.asar.bak (instantâneo <5s) ou fallback OTA. Coluna farms.agent_previous_version + badge auto_rollback_detected.
+- [Advanced CFG Equipments](mem://features/advanced-cfg-equipments) — Configuração remota por tipo: PumpCfgDialog (bomba), ServerCfgDialog (ESP_A em /diagnostico aba Servidor) e RepeaterCfgDialog (REP:R3 com LOGIN→SET→SAVE→LOGOUT).
+- [Agent Auto-Update OTA](mem://features/agent-auto-update) — OTA híbrido do agente .exe: SHA-256, agent_update_status com progresso realtime, agent_update_history, RPC request_agent_update (guard de fila), watchdog .bat (rollback .exe.bak), painel AgentUpdateStatusPanel no /platform.
+- [Auto-Provisioning](mem://features/auto-provisioning) — Instalação 100% automática via provisioning.json one-shot (30d) + ASAR integrity check com auto-revogação. Tabelas provisioning_tokens/agent_credentials/tampering_events. Edge functions license-provision + report-tampering.
+- [AI Integrations](mem://features/ai-integrations) — WhatsApp Virtual Assistant, QR connection, interaction logs.
+- [Automation Guard](mem://features/automation-guard) — Bomba que desliga fora do horário tem o automático desativado na nuvem (tabela automation_guards) com badge alerta clicável que reativa.
+- [Automation Module](mem://features/automation-module) — Schedules, command modes, and holiday logic per equipment.
+- [Branding](mem://style/branding) — Dynamic header showing Farm Name and City/State.
+- [Cloud Automation Engine](mem://features/cloud-automation-engine) — Motor 24/7 na nuvem (edge function automation-tick + pg_cron). Tabelas automation_schedules/engine/holiday_configs/fired/guards. Migração one-shot localStorage→nuvem.
+- [Cloud ON CONFLICT Fix](mem://features/cloud-on-conflict-fix) — Trigger track_pump_runtime usava ON CONFLICT com WHERE inválido; reescrita com IF NOT EXISTS (v3.8.0). Agente também não trava mais 120s em RX divergente.
+- [Cloud Sync Cadastros](mem://features/cloud-sync-cadastros) — Sync bidirecional + migração automática localStorage→nuvem para PLCs, setores e equipamentos. Regras de hw_id, rollback, backup 30d.
+- [CFG Response Matching](mem://features/cfg-response-matching) — Agente Electron casa frames `_[TSNN_<TAG>_]{...}` (PING/STATUS/DUMP/SAVE/REBOOT/SET_*) com `inflightCmd type='config'`. Timeout servidor 25s, tracker UI 30s.
+- [Configurable Modules](mem://features/configurable-modules) — Vazão and Consumo are optional and factory disabled.
+- [Dashboard Layout & Telemetry](mem://features/dashboard-layout-logic) — Card structures, status icons, popovers, and telemetry visual feedback.
+- [Energy Efficiency](mem://features/energy-efficiency) — Card 24h no Dashboard com índice diário + alertas pré/pós-ponta (17:55, 21:05, 21:15) via automation-tick.
+- [Dashboard Summary](mem://features/dashboard-summary) — Centro de Comando stats for Pumps, Levels, Offline equipments.
+- [Dashboard UI](mem://features/dashboard-ui) — Summary cards, level meters, pump control, hour meters.
+- [Dashboard Views](mem://features/dashboard-views-refactored) — List, Details, and Map views with customizable, persisted layouts.
+- [Deployment Specifications](mem://deployment/specifications) — Minimum specs for Electron and SQLite recommendation.
+- [Critical Bell Alerts](mem://features/critical-bell-alerts) — Edge function critical-alerts-tick (1 min) gera alertas #1 offline / #5 automático não obedecido / #6 falta de energia em farm_notifications 24/7.
+- [Diagnostics](mem://features/diagnostics) — RS-485 debugging, system status, and Diagnostic Mode.
+- [Electron Bridge Status](mem://features/electron-bridge-status) — Badge no header + card no Dashboard com status da bridge .exe (presente/porta COM/heartbeat 30s).
+- [Energy Demand](mem://features/energy-demand-management) — Real-time consumption, kW/MW conversion, priority-based auto-shutdown.
+- [Equipment Management](mem://features/equipment-management) — Central registry logic and PLC security locks.
+- [Farm Backups](mem://features/farm-backups) — Snapshot diário automático + 'Backup agora' por fazenda no /platform. Restauração seletiva (cadastros/automação/usuários/histórico). Retenção 30d. Isolado por farm_id.
+- [Guided Tour](mem://features/guided-tour) — Interactive driver.js tours for main and technical areas.
+- [Hardware Integration](mem://features/hardware-integration) — COM port config (9600 baud) located in tech hub.
+- [Header Design](mem://style/header-design) — Logo sizing, transparent background, and symmetric gradient ornaments.
+- [Help Center](mem://features/help-center) — Step-by-step text/video guides and tech-specific help.
+- [Industrial Protection](mem://security/industrial-protection) — 48h cloud license heartbeat, signed triggers, and remote audit logs.
+- [Agent Code Protection](mem://security/agent-code-protection) — Fase A: bytenode + javascript-obfuscator (main.jsc) + anti-debug watchdog 5s + asarIntegrity. Build via npm run build (auto-restore).
+- [Agent Hardware Fingerprint](mem://security/agent-hardware-fingerprint) — Fase B: tabela agent_hardware + history. Híbrido: 1 mudança=warning, 2+=blocked (app.exit). Reset por platform_admin via aba Hardware em /suporte-tecnico.
+- [Security Hardening 2026-06 (v3.10.7)](mem://security/hardening-2026-06) — Gate fingerprint pré-bridge + license kill-switch a cada heartbeat (72h grace, mantém leitura, desliga bombas antes de exit) + verificação de ofuscação + OTA hash reporta tampering + badges/histórico no /platform Dispositivos.
+- [Internationalization](mem://features/internationalization) — Support for pt-BR, en-US, and es-ES.
+- [Level Calibration N1/N2](mem://features/level-calibration) — Calibração 2 pontos N1/N2 do PLC → metros + %. Colunas em equipments, RPC apply_level_telemetry, parser no agente, LevelCalibrationCard em Cadastros/Diagnóstico, Dashboard mostra metros calibrados.
+- [Licensing Admin](mem://features/licensing-admin) — Hardware anti-clone keys and Supabase 2FA integration.
+- [Map Implementation](mem://features/map-implementation) — Leaflet + OSM positioning via Lat/Lng from equipments.
+- [Network Monitoring](mem://features/network-monitoring) — 30s Cloudflare polling, rural scale classification, auto-detect connection type.
+- [Notification Center](mem://features/notification-center) — Header system alerts classified by severity.
+- [Offline Behavior](mem://features/offline-behavior) — Offline pausa horímetro e mostra badge; NÃO mexe em desired_running, NÃO gera log no relatório, NÃO desliga nada. Retomada automática quando RX volta.
+- [Onboarding UX](mem://ux/onboarding) — Wizard fires via sessionStorage after successful login.
+- [Offline Thresholds](mem://features/offline-thresholds) — Relatório de Comunicação registra desde a 1ª falha; badge OFFLINE da UI só após 15 min. Camadas independentes — não unificar. Aba Comunicação vive em /suporte-tecnico.
+- [Polling Backoff](mem://features/polling-backoff) — Backoff in-memory no Electron: PLCs sem resposta passam a 1x/3 rodadas (5+ falhas) e 1x/10 rodadas (10+). Reset ao 1o RX. Manuais nunca bloqueados.
+- [Pro/Lite Plans](mem://features/pro-lite-plans) — Feature flags restricting advanced modules in Lite version.
+- [Platform Users Management](mem://features/platform-users-management) — Aba 'Usuários' no /platform: lista cross-farm, atribuir/remover papéis, criar/excluir/resetar via edge function platform-user-admin (service role).
+- [Protective OFF Offline](mem://features/protective-off-offline) — Bomba offline > 15 min com estado=LIGADA recebe TX 0 ativo enfileirado (timeout 2h) que desliga assim que voltar.
+- [Protocolo Renov Oficial](mem://features/protocolo-renov-oficial) — Linkagem definitiva UI↔Electron↔firmware (Servidor/Repetidor/Bombas). Frames com `\r`, payload PLC 6 saídas, CFG remoto, base do Agente Electron.
+- [Pump Controls Logic](mem://features/pump-controls-logic) — Reset button behavior for interrupting the 'Ligando' state.
+- [Comandos manuais e RX divergente](mem://features/manual-command-rx-divergence) — Backend não marca manual como erro por RX divergente; Electron decide timeout após 120s.
+- [Renova Agent Headless](mem://features/renova-agent-headless) — Agente Electron headless (system tray, auto-start Windows, setup 1º boot, auth email/senha) instalado no PC da fazenda. Heartbeat 30s em site_health. Build via electron-agent/build-agent.bat.
+- [Reports System](mem://features/reports-system) — PDF and CSV generation with branding and dynamic data tabs.
+- [Reservoir Alerts](mem://features/reservoir-alerts) — Visual (pulse) and audio (Web Audio API) alerts for Empty and Full states.
+- [RF Signal Measurement](mem://features/rf-signal-measurement) — Barra de 4 barrinhas medida pela latência da resposta ao último comando: ≤4s=4 barras, ≤5s=3, ≤6s=2, ≤8s=1, >8s=apagada.
+- [Sidebar Behavior](mem://ux/sidebar-behavior) — Collapsible with Ctrl+B, hover expand, hamburger/chevron toggle.
+- [Service Mode](mem://features/service-mode) — Aba admin /platform para diagnóstico individual de PLCs via `commands.type='service_test'`; lock por TSNN suspende polling até 5 min de inatividade.
+- [Status Animations](mem://features/status-animations) — Pulse and glow visual feedback for 'Ligado' status.
+- [Technical Support Hub](mem://features/technical-support-hub) — Guarded restricted area centralizing admin tools with 30-min shared session.
+- [Telemetry Simulation](mem://features/telemetry-simulation) — 15s polling hook simulating last reading, RF signal, and reservoir levels.
+- [TSNN Shared Communication Status](mem://features/tsnn-shared-communication-status) — Status de comunicação na UI compartilhado por plc_group_id; max(last_communication) do grupo.
+- [Farm Score & ROI Cards](mem://features/farm-score-roi-cards) — Score 0-100 (Eficiência+Resposta+Ponta+Uptime) e ROI 30d (Haversine sede→poço × custo) no Dashboard.
+- [Tariff Bands Coelba](mem://features/tariff-bands) — 4 faixas (reservada/fora-ponta/intermediária/ponta) em tariff.ts + farm_productivity_config.tariff_intermediate; EnergyEfficiencyCard mostra custo do atraso e barras comparativas.
+- [Timers Config](mem://features/timers-config) — Communication and auto-reset timeouts (5-30 min) for pending commands.
+- [Toasts & Confirms](mem://features/toasts-confirms) — Helpers `notify*` (lib/notify.ts) e `confirmAction` (lib/confirmDialog.tsx). Toaster top-right, máx 3, dedup por id, durações por severidade.
+- [User Management](mem://features/user-management) — CRUD operations, roles, and password management in the tech hub.
+- [Visual Identity](mem://style/visual-identity) — Tech-botanical premium style with hex grid and glowing orbs.
+- [Water Balance](mem://features/water-balance) — Indicador de Balanço Hídrico no Dashboard: RPC cruza level_history×bombas captação, status visual + alertas no sino (insuficiente 30min, sem captação 15min, crítico <2h).

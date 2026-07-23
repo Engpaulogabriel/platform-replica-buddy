@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "sdk_version": "0.22.0",
+  "path": "/functions/v1/mcp",
+  "auth": {
+    "type": "oauth",
+    "issuer": "https://dnyukgfedredvxpzjpqz.supabase.co/auth/v1",
+    "accepted_audiences": [
+      "authenticated"
+    ]
+  },
+  "mcp": {
+    "server": {
+      "name": "renov-gestor-bombas-mcp",
+      "version": "0.1.0",
+      "title": "RENOV Gestor de Bombas"
+    },
+    "tools": [
+      {
+        "name": "whoami",
+        "title": "Identificar usuário autenticado",
+        "description": "Retorna o e-mail e o ID do usuário autenticado via OAuth no servidor MCP. Útil para verificar a conexão.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {}
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "list_farms",
+        "title": "Listar fazendas do usuário",
+        "description": "Retorna todas as fazendas às quais o usuário autenticado tem acesso (id, nome e status).",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {}
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "list_equipments",
+        "title": "Listar equipamentos de uma fazenda",
+        "description": "Retorna bombas/poços/reservatórios cadastrados na fazenda informada, com estado atual e horário da última atualização.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "farm_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "description": "UUID da fazenda (use list_farms para obter)."
+            }
+          },
+          "required": [
+            "farm_id"
+          ]
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "list_recent_notifications",
+        "title": "Listar notificações/alarmes recentes",
+        "description": "Retorna as notificações/alertas mais recentes de uma fazenda (padrão: últimas 20).",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "farm_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "description": "UUID da fazenda."
+            },
+            "limit": {
+              "default": 20,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Quantas notificações retornar (1–100)."
+            }
+          },
+          "required": [
+            "farm_id"
+          ]
+        },
+        "outputSchema": null
+      }
+    ]
+  }
+}

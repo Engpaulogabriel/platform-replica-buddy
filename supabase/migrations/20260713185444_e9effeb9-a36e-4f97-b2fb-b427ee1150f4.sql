@@ -1,0 +1,1 @@
+UPDATE public.agent_releases SET file_size_bytes = 10753393 WHERE version = '3.14.2';

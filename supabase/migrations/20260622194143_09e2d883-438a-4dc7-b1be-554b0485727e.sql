@@ -1,0 +1,1 @@
+ALTER TABLE public.whatsapp_config ADD COLUMN IF NOT EXISTS webhook_verify_token TEXT NOT NULL DEFAULT 'renov_whatsapp_token_2026';
