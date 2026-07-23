@@ -84,9 +84,36 @@ export function usePendingManualCommands(farmId: string | null | undefined): Map
       timer = setTimeout(loop, delay);
     };
     void loop();
+
+    // Realtime na tabela `commands`: reflete a mudança de status do comando
+    // (pending/sent → executed/cancelled/timeout) em <1s, liberando o
+    // "Ligando…/Desligando…" imediatamente em vez de esperar o próximo poll (3s).
+    // Pequeno coalescing (200ms) porque o polling de bombas gera muitos eventos
+    // em `commands`; ainda fica muito abaixo de 1s. O poll acima permanece como
+    // fallback caso o Realtime caia.
+    let coalesce: ReturnType<typeof setTimeout> | null = null;
+    const onCommandsChange = () => {
+      if (cancelled) return;
+      if (coalesce) return; // já há um refresh agendado nesta janela
+      coalesce = setTimeout(() => {
+        coalesce = null;
+        void refresh();
+      }, 200);
+    };
+    const channel = supabase
+      .channel(`pending-manual-cmds-${farmId}-${Date.now().toString(36)}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "commands", filter: `farm_id=eq.${farmId}` },
+        onCommandsChange,
+      )
+      .subscribe();
+
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      if (coalesce) clearTimeout(coalesce);
+      try { void supabase.removeChannel(channel); } catch { /* ignore */ }
     };
   }, [farmId, refresh]);
 
