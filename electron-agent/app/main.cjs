@@ -489,6 +489,21 @@ function isInStartupSyncWindow() {
   return agentStartupAt > 0 && (Date.now() - agentStartupAt) < STARTUP_SYNC_DURATION_MS;
 }
 
+// v3.25.10: PLCs cujo estado já foi confirmado por um RX nesta sessão (TSNN em
+// upper-case). Depois do primeiro RX confirmado de uma PLC, o STARTUP SYNC NÃO
+// deve mais interceptar espontâneos dela — o estado já é conhecido, então
+// mudanças subsequentes vão para a classificação normal (local/remote via
+// applySpontaneousImmediately). Corrige o bug de o startup-sync sincronizar
+// desired_running=true a partir de um acionamento local (botoeira) já depois de
+// o agente ter confirmado o estado da PLC.
+const startupSyncDoneByTsnn = new Set();
+function markStartupSyncDone(tsnn) {
+  if (tsnn) startupSyncDoneByTsnn.add(String(tsnn).toUpperCase());
+}
+function isStartupSyncDone(tsnn) {
+  return !!tsnn && startupSyncDoneByTsnn.has(String(tsnn).toUpperCase());
+}
+
 function withCloudTimeout(promise, label, timeoutMs) {
   let timer = null;
   const timeout = new Promise((_, reject) => {
@@ -2377,7 +2392,10 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
 
     if (matchedByCommand) originForRpc = "remote-cmd";
     else if (matchedByDesired) originForRpc = "remote-desired";
-    else if (divergedFromDesired && inStartupSync && !pendingCommandActive && !safetyArmedForFrame && !recentSafetyExpiry) {
+    else if (divergedFromDesired && inStartupSync && !isStartupSyncDone(tsnnUpper) && !pendingCommandActive && !safetyArmedForFrame && !recentSafetyExpiry) {
+      // v3.25.10: só entra no startup-sync se a PLC ainda NÃO teve um RX confirmado
+      // nesta sessão. Após o primeiro RX confirmado (isStartupSyncDone), um espontâneo
+      // divergente é atuação local/remoto normal, não "estado inicial a sincronizar".
       // v3.9.4 — Startup Sync só sobrescreve desired_running quando NÃO há
       // comando ativo / safety armado / safety recém-expirado para a PLC.
       // Caso contrário, divergência RX↔desired = atuação local (PLC em modo
@@ -2521,6 +2539,11 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       CLOUD_TELEMETRY_TIMEOUT_MS,
     );
     if (error || !updatedId) throw (error || new Error("espontaneo sem equipamento correspondente"));
+
+    // v3.25.10: espontâneo processado com sucesso → estado da PLC conhecido. Marca
+    // para que o startup-sync não intercepte espontâneos seguintes desta PLC (o
+    // primeiro espontâneo ainda usou o startup-sync acima, se aplicável).
+    markStartupSyncDone(tsnn);
 
     const originLocal = originForRpc === "local";
 
@@ -3716,6 +3739,9 @@ function processTelemFrame(frame) {
     inflightCmd = null;
     inflightTsnn = null;
     recentCmdByTsnn.delete(rxTsnn);
+    // v3.25.10: RX confirmado (polling ou manual) → estado da PLC conhecido; a partir
+    // daqui o startup-sync não intercepta mais espontâneos desta PLC.
+    markStartupSyncDone(rxTsnn);
 
     // Cancela safety timer IMEDIATAMENTE se o RX confirma o estado esperado.
     // (Evita que o failsafe dispare TX OFF apos a bomba ja ter confirmado.)
