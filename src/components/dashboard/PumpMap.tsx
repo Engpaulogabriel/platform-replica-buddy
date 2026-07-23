@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { ExternalLink, MapPin } from "lucide-react";
+import { ExternalLink, Hand, MapPin } from "lucide-react";
 import type { Pump } from "./PumpTable";
 
 interface PumpMapProps {
@@ -182,11 +182,25 @@ export default function PumpMap({ pumps }: PumpMapProps) {
           markersRef.current.push(pulseMarker);
         }
 
-        const html = `<div style="
-          width:${dotSize}px;height:${dotSize}px;border-radius:9999px;
-          background:${fillColor};border:2px solid hsl(var(--background));
-          box-shadow:0 0 0 1px rgba(0,0,0,0.3);
-        "></div>`;
+        // Badge LOCAL no canto do ícone: último acionamento foi no painel físico
+        // (last_actuation_origin="local"). Não aparece p/ origem remota nem offline.
+        const showLocal = !isOffline && pump.actuationOrigin === "local";
+        const localBadge = showLocal
+          ? `<div style="
+              position:absolute;top:-7px;right:-9px;z-index:1;
+              background:hsl(var(--warning));color:#1a1200;
+              font-size:7px;font-weight:800;line-height:1;letter-spacing:0.2px;
+              padding:1px 3px;border-radius:4px;white-space:nowrap;
+              border:1px solid hsl(var(--background));box-shadow:0 1px 2px rgba(0,0,0,0.4);
+            ">LOCAL</div>`
+          : "";
+        const html = `<div style="position:relative;width:${dotSize}px;height:${dotSize}px;">
+          <div style="
+            width:100%;height:100%;border-radius:9999px;
+            background:${fillColor};border:2px solid hsl(var(--background));
+            box-shadow:0 0 0 1px rgba(0,0,0,0.3);
+          "></div>${localBadge}
+        </div>`;
 
         const icon = L.divIcon({
           className: "pump-cluster-marker",
@@ -288,6 +302,15 @@ export default function PumpMap({ pumps }: PumpMapProps) {
                         title="Bomba em modo Automático — controlada por programação"
                       >
                         AUTO
+                      </span>
+                    )}
+                    {!isOffline && pump.actuationOrigin === "local" && (
+                      <span
+                        className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-warning/20 text-warning font-bold text-[9px] uppercase tracking-wide border border-warning/40 shrink-0"
+                        title="Último acionamento via painel local/botoeira"
+                      >
+                        <Hand className="w-2.5 h-2.5" />
+                        LOCAL
                       </span>
                     )}
                   </div>
