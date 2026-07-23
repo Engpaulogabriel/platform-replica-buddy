@@ -2438,11 +2438,15 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
         }
       }
     }
-    else if (divergedFromDesired && !safetyArmedForFrame && !pendingCommandActive && !recentSafetyExpiry) originForRpc = "local";
-    else if (divergedFromDesired && (safetyArmedForFrame || pendingCommandActive || recentSafetyExpiry)) {
-      // v3.25.5: Acionamento local PREVALECE sobre safety/comando pendente.
-      // O operador no campo decidiu — o sistema deve aceitar em vez de tentar reverter,
-      // evitando o loop "RX=1 → TX {0} de reforço → safety expira → TX {1} indefinido".
+    else if (divergedFromDesired) {
+      // v3.25.11: Acionamento local SEMPRE PREVALECE e vira o novo desired_running.
+      // Unifica o antigo ramo "local puro" (que só setava origin='local', sem tocar
+      // no desired) com o LOCAL OVERRIDE (v3.25.5). O local puro deixava
+      // desired_running STALE no banco → a RPC de polling (que espelha desired_running
+      // direto da tabela equipments) regerava o frame antigo → TX de reforço → loop
+      // infinito. Agora, QUALQUER atuação local divergente atualiza
+      // desired_running=estado real no banco e cancela comandos/pollings stale,
+      // parando o loop. (Cobre também o caso antigo com safety/comando/expiry.)
       originForRpc = "local";
       const _stateBit = extractStateBit(rawPayload);
       const realRunning = _stateBit === "1";
@@ -2450,7 +2454,9 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
         ? "safety cancelado"
         : pendingCommandActive
           ? "comando pendente cancelado"
-          : "safety-expiry ignorado";
+          : recentSafetyExpiry
+            ? "safety-expiry ignorado"
+            : "acionamento local";
       pushLog(
         "warn",
         "system",
