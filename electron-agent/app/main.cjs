@@ -2519,7 +2519,7 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
               })
               .eq("farm_id", farmId)
               .eq("type", "polling")
-              .like("frame", `%${tsnn}%`)
+              .ilike("frame", `%${tsnn}%`)
               .in("status", ["pending", "sent"]),
             "local-override cancel stale polling",
             CLOUD_WRITE_TIMEOUT_MS,
@@ -4429,6 +4429,40 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
   }
 }
 
+// v3.25.12: verifica se um frame de polling ficou STALE — se o payload não bate
+// mais com o desired_running atual dos equipamentos daquela PLC no banco (ex.: uma
+// atuação local mudou o desired_running DEPOIS deste polling ter sido enfileirado
+// pela RPC). Guard no momento do TX: fecha a corrida em que pollings antigos com
+// payload {1} continuam sendo transmitidos por ~90s mesmo após o desired virar {0}.
+// Em erro/dúvida retorna false (NÃO descarta) — segurança: nunca sumir com polling
+// por falha de query.
+async function isPollingFrameStale(frame, tsnn) {
+  try {
+    if (!supabase || !farmId || !tsnn) return false;
+    const payload = extractTxPayload(frame);
+    if (!payload || !/^[01]{1,6}$/.test(payload)) return false;
+    const { data } = await withCloudTimeout(
+      supabase
+        .from("equipments")
+        .select("saida, desired_running")
+        .eq("farm_id", farmId)
+        .ilike("hw_id", `${String(tsnn)}%`),
+      "polling stale check",
+      CLOUD_READ_TIMEOUT_MS,
+    );
+    if (!Array.isArray(data) || data.length === 0) return false;
+    for (const eq of data) {
+      const saida = Number(eq.saida) || 0;
+      if (saida < 1 || saida > payload.length) continue;
+      const wantBit = eq.desired_running ? "1" : "0";
+      if (payload[saida - 1] !== wantBit) return true; // diverge do desired atual → stale
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
 async function processNextCommand() {
   // v3.25.7: sequência de desligamento forçado em curso segura a fila. Evita que
   // o PROCESSING_STUCK_RESET_MS (15s) ou o pollTimer reentrem durante os ~23-36s
@@ -4560,6 +4594,28 @@ async function processNextCommand() {
     }
 
     if (cmd.type === "polling") {
+      // v3.25.12: descarta polling STALE antes de transmitir. Se o payload não bate
+      // mais com o desired_running atual (atuação local mudou o desired depois deste
+      // polling ter sido enfileirado), cancela sem TX — fecha a corrida em que
+      // pollings antigos com payload {1} seguiam sendo enviados por ~90s.
+      if (await isPollingFrameStale(frame, expectedTsnn)) {
+        try {
+          await supabase
+            .from("commands")
+            .update({
+              status: "cancelled",
+              responded_at: new Date().toISOString(),
+              error_message: "Polling stale: payload não bate com desired_running atual",
+            })
+            .eq("id", cmd.id)
+            .eq("status", "pending");
+        } catch (_) {}
+        pushLog("info", "system",
+          `[POLLING STALE] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} descartado (payload ${extractTxPayload(frame)} ≠ desired_running atual)`);
+        processing = false;
+        setTimeout(() => { void processNextCommand(); }, 50);
+        return;
+      }
       const requiredGap = lastPollingEndedWithTimeout
         ? POLLING_GAP_AFTER_TIMEOUT_MS
         : POLLING_GAP_AFTER_RX_MS;
