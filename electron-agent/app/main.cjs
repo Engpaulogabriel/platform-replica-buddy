@@ -2265,34 +2265,37 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       }
     }
 
-    // 1) Comando manual recente (<= 180s)
+    // 1) v3.25.8: ECO de comando remoto recente. Só considera o comando manual
+    // MAIS RECENTE (não-reset) e apenas dentro de 30s desde sua confirmação/envio
+    // (responded_at → sent_at → created_at). Isso distingue "eco do comando" de
+    // "nova atuação local após o comando já ter sido executado": um comando já
+    // concluído (ex.: OFF) ou antigo não mascara mais um religamento local
+    // subsequente com o mesmo bit. Espelha o v_recent_remote_match da RPC.
     if (!matchedByCommand && resolvedEqId) {
       try {
-        const since = new Date(Date.now() - 180_000).toISOString();
         const { data: recent } = await withCloudTimeout(
           supabase
             .from("commands")
-            .select("id, frame, source_device, sent_at, created_at")
+            .select("id, frame, source_device, sent_at, created_at, responded_at")
             .eq("farm_id", farmId)
             .eq("equipment_id", resolvedEqId)
             .eq("type", "manual")
-            .or(`sent_at.gte.${since},created_at.gte.${since}`)
             .order("created_at", { ascending: false })
-            .limit(5),
+            .limit(3),
           "espontaneo recent-cmd lookup",
           CLOUD_WRITE_TIMEOUT_MS,
         );
         if (Array.isArray(recent)) {
-          for (const c of recent) {
-            if (String(c.source_device || "").startsWith("backend-reset:")) continue;
-            const m = String(c.frame || "").match(/\{([01]{1,6})\}/);
-            if (!m) continue;
-            const expected = m[1];
-            const expectedBit = expected[expected.length - 1];
+          // comando manual MAIS RECENTE que não seja backend-reset
+          const latest = recent.find((c) => !String(c.source_device || "").startsWith("backend-reset:"));
+          if (latest) {
+            const m = String(latest.frame || "").match(/\{([01]{1,6})\}/);
+            const expectedBit = m ? m[1][m[1].length - 1] : null;
             const rxBit = extractStateBit(rawPayload);
-            if (rxBit && expectedBit === rxBit) {
+            const cmdTs = new Date(latest.responded_at || latest.sent_at || latest.created_at || 0).getTime();
+            const withinEcho = cmdTs > 0 && (Date.now() - cmdTs) <= 30_000; // janela de eco (RF responde < 5s)
+            if (expectedBit && rxBit && expectedBit === rxBit && withinEcho) {
               matchedByCommand = true;
-              break;
             }
           }
         }
