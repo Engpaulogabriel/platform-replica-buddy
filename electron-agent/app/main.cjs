@@ -2265,42 +2265,47 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       }
     }
 
-    // 1) v3.25.8: ECO de comando remoto recente. Só considera o comando manual
-    // MAIS RECENTE (não-reset) e apenas dentro de 30s desde sua confirmação/envio
-    // (responded_at → sent_at → created_at). Isso distingue "eco do comando" de
-    // "nova atuação local após o comando já ter sido executado": um comando já
-    // concluído (ex.: OFF) ou antigo não mascara mais um religamento local
-    // subsequente com o mesmo bit. Espelha o v_recent_remote_match da RPC.
+    // 1) v3.25.9: comando do operador NÃO confirmado — distinção por ESTADO DO
+    // COMANDO, não por tempo. Considera status não-terminais (pending/sent/delivered):
+    //   • QUALQUER comando 'pending' (na FILA, ainda não transmitido) → NÃO é local:
+    //     o operador mandou e o TX ainda não saiu (ex.: ligar 10 bombas em série —
+    //     as bombas 6-10 ficam pending enquanto a 5 transmite).
+    //   • comando 'sent'/'delivered' (em voo) cujo bit alvo == bit recebido → é o
+    //     ECO/confirmação do comando remoto.
+    // Só quando NÃO existe nenhum comando desses é que um espontâneo que muda o
+    // estado é atuação LOCAL. Divergência de um comando JÁ enviado continua tratada
+    // pelo LOCAL OVERRIDE abaixo (v3.25.5) — sem risco de loop, pois um 'pending'
+    // ainda não gerou TX/reforço. Espelha v_pending_command_active da RPC.
     if (!matchedByCommand && resolvedEqId) {
       try {
-        const { data: recent } = await withCloudTimeout(
+        const { data: cmds } = await withCloudTimeout(
           supabase
             .from("commands")
-            .select("id, frame, source_device, sent_at, created_at, responded_at")
+            .select("frame, source_device, status")
             .eq("farm_id", farmId)
             .eq("equipment_id", resolvedEqId)
             .eq("type", "manual")
+            .in("status", ["pending", "sent", "delivered"])
             .order("created_at", { ascending: false })
-            .limit(3),
-          "espontaneo recent-cmd lookup",
+            .limit(10),
+          "espontaneo cmd-in-flight lookup",
           CLOUD_WRITE_TIMEOUT_MS,
         );
-        if (Array.isArray(recent)) {
-          // comando manual MAIS RECENTE que não seja backend-reset
-          const latest = recent.find((c) => !String(c.source_device || "").startsWith("backend-reset:"));
-          if (latest) {
-            const m = String(latest.frame || "").match(/\{([01]{1,6})\}/);
-            const expectedBit = m ? m[1][m[1].length - 1] : null;
-            const rxBit = extractStateBit(rawPayload);
-            const cmdTs = new Date(latest.responded_at || latest.sent_at || latest.created_at || 0).getTime();
-            const withinEcho = cmdTs > 0 && (Date.now() - cmdTs) <= 30_000; // janela de eco (RF responde < 5s)
-            if (expectedBit && rxBit && expectedBit === rxBit && withinEcho) {
-              matchedByCommand = true;
-            }
+        if (Array.isArray(cmds)) {
+          const rxBit = extractStateBit(rawPayload);
+          for (const c of cmds) {
+            if (String(c.source_device || "").startsWith("backend-reset:")) continue;
+            // comando na FILA (pending, ainda não TX): operador mandou → não é local
+            if (c.status === "pending") { matchedByCommand = true; break; }
+            // comando EM VOO (sent/delivered) com bit igual ao recebido → eco
+            const m = String(c.frame || "").match(/\{([01]{1,6})\}/);
+            if (!m) continue;
+            const expectedBit = m[1][m[1].length - 1];
+            if (rxBit && expectedBit === rxBit) { matchedByCommand = true; break; }
           }
         }
       } catch (e) {
-        pushLog("warn", "cloud", `Espontaneo recent-cmd lookup falhou: ${e.message}`);
+        pushLog("warn", "cloud", `Espontaneo cmd-in-flight lookup falhou: ${e.message}`);
       }
     }
 
@@ -2315,7 +2320,7 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
             .select("id")
             .eq("farm_id", farmId)
             .eq("equipment_id", resolvedEqId)
-            .in("status", ["pending", "sent"])
+            .in("status", ["pending", "sent", "delivered"])
             .limit(1),
           "espontaneo pending-cmd lookup",
           CLOUD_WRITE_TIMEOUT_MS,
