@@ -443,7 +443,7 @@ function resolvePythonBridgePath() {
 }
 
 const PYTHON_BRIDGE = resolvePythonBridgePath();
-const AGENT_VERSION = "3.25.6";
+const AGENT_VERSION = require("./package.json").version;
 const LOG_RETENTION_DAYS = 7;
 const LOG_FILE_MAX_BYTES = 50 * 1024 * 1024; // 50MB por arquivo
 const MEMORY_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // 30min
