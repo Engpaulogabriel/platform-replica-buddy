@@ -568,9 +568,36 @@ let appClosing = false;
 // é decidido SOMENTE pelo backend (critical-alerts-tick) com limiar de 15 min.
 // v3.9.21: + registro em automation_log de eventos equipamento_offline /
 // equipamento_online (campo details.tipo_evento) para histórico no relatório.
-const pollingBackoffByTsnn = new Map(); // tsnn -> { failures, offlineSince, lastSuccessAt }
-function getBackoffSkipEvery(_failures) { return 1; }
-function shouldSkipPollingForBackoff(_tsnn) { return false; }
+const pollingBackoffByTsnn = new Map(); // tsnn -> { failures, offlineSince, lastSuccessAt, backoffCycle }
+// v3.25.19: BACKOFF EXPONENCIAL para PLC sem resposta. Uma PLC morta consome ~5s de
+// timeout por rodada; sem backoff isso monopoliza o ciclo e atrasa as PLCs que
+// funcionam. Regra: <3 falhas → poll todo ciclo; ≥3 → 1 poll a cada 5 ciclos;
+// ≥10 → 1 a cada 10 ciclos. noteBackoffSuccess (qualquer RX) reseta failures.
+function getBackoffSkipEvery(failures) {
+  if ((failures || 0) >= 10) return 10;
+  if ((failures || 0) >= 3) return 5;
+  return 1; // sem backoff
+}
+function shouldSkipPollingForBackoff(tsnn) {
+  if (!tsnn) return false;
+  const b = pollingBackoffByTsnn.get(String(tsnn));
+  const failures = b ? (b.failures || 0) : 0;
+  if (failures < 3) return false; // sem backoff — poll normal
+  const skipEvery = getBackoffSkipEvery(failures);
+  const c = (b.backoffCycle || 0) + 1;
+  if (c >= skipEvery) {
+    b.backoffCycle = 0; // deixa passar 1 tentativa e reinicia a contagem
+    pollingBackoffByTsnn.set(String(tsnn), b);
+    return false;
+  }
+  b.backoffCycle = c;
+  pollingBackoffByTsnn.set(String(tsnn), b);
+  if (c === 1) { // loga uma vez por janela de skip (evita spam)
+    pushLog("info", "system",
+      `[POLLING BACKOFF] TSNN ${tsnn} em backoff (tentativa ${failures}, próxima em ${skipEvery - c} ciclos)`);
+  }
+  return true; // pula esta rodada
+}
 
 // v3.9.30 — Métricas por ciclo de polling. Ciclo = uma rodada de enqueue
 // de pollings pela RPC enqueue_polling_for_due_equipments. Ao detectar uma
@@ -876,7 +903,7 @@ const activeResetByTsnn = new Map();
 // Estrutura por equipment_id (UUID):
 //   { tsnn, saida, hwId, expectedBit ('1'|'0'), expectedPayload, armedAt, timer, cmdId }
 const safetyByEquipment = new Map();
-const SAFETY_WINDOW_MS = 60_000;
+const SAFETY_WINDOW_MS = 120_000; // v3.25.19: 60s → 120s (bombas com proteção térmica/soft-starter demoram a partir; reforço segue em 0/15/30/45s)
 const SAFETY_LOCAL_SUPPRESS_MS = 30_000;
 
 // --- Reforço de TX manual (3 envios em 0s/15s/30s) ---
@@ -2031,7 +2058,7 @@ async function fireSafetyOff(equipmentId, entry) {
     pushLog(
       "warn",
       "system",
-      `[REFORCO] Timeout 60s TSNN ${entry.tsnn} — enviando comando inverso (safety): esperava bit=${expectedBit}, enviando bit=${inverseBit} (frame=${inverseFrame.replace(/\r/g, "")})`,
+      `[REFORCO] Timeout ${Math.round(SAFETY_WINDOW_MS/1000)}s TSNN ${entry.tsnn} — enviando comando inverso (safety): esperava bit=${expectedBit}, enviando bit=${inverseBit} (frame=${inverseFrame.replace(/\r/g, "")})`,
       null,
       `Bomba ${nameForTsnn(entry.tsnn)} nao confirmou comando em ${Math.round(SAFETY_WINDOW_MS/1000)}s — safety acionado (bit inverso)`,
     );
@@ -2069,6 +2096,30 @@ async function fireSafetyOff(equipmentId, entry) {
           "safety desired_running update",
           CLOUD_WRITE_TIMEOUT_MS,
         );
+        // v3.25.19: marca o comando que armou o safety como 'timeout' (bomba NÃO
+        // confirmou no tempo) — assim o frontend sai de "Ligando…/Desligando…"
+        // imediatamente. NOTA: o enum command_status não tem 'failed'; 'timeout' é o
+        // terminal semanticamente correto ("não confirmou em Xs") e o front já o
+        // trata como não-pendente (sai de "Ligando").
+        if (entry.cmdId) {
+          try {
+            await withCloudTimeout(
+              supabase
+                .from("commands")
+                .update({
+                  status: "timeout",
+                  error_message: `Safety timer: bomba não confirmou em ${Math.round(SAFETY_WINDOW_MS / 1000)}s`,
+                  responded_at: new Date().toISOString(),
+                })
+                .eq("id", entry.cmdId)
+                .in("status", ["pending", "sent"]),
+              "safety mark command timeout",
+              CLOUD_WRITE_TIMEOUT_MS,
+            );
+          } catch (e) {
+            pushLog("warn", "cloud", `Safety mark command timeout falhou: ${e.message}`);
+          }
+        }
         const { data: cancelledPollings, error: cancelPollingError } = await withCloudTimeout(
           supabase.rpc("cancel_pending_pollings_for_plc", {
             _farm_id: farmId,
