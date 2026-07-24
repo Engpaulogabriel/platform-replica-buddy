@@ -5048,18 +5048,14 @@ async function processNextCommand() {
         const fsEqMeta = equipmentById.get(String(cmd.equipment_id));
         const fsTargetIndex = Math.max(0, Math.min(fsPayload.length - 1, (fsEqMeta?.saida || fsPayload.length) - 1));
         if (fsPayload[fsTargetIndex] === "0") {
-          // v3.25.28: log de diagnóstico — confirma que um manual de DESLIGAR entrou
-          // no bloco de forced-shutdown e que a consulta ao banco (forced_shutdown_enabled)
-          // vai acontecer. Se sumir o "consulta de estado falhou" depois disto, a query
-          // deu timeout (conexão instável) e caiu no fail-safe {0} direto.
           pushLog("info", "system",
-            `[FORCED OFF] manual OFF detectado (eq ${String(cmd.equipment_id).substring(0, 8)} TSNN ${expectedTsnn}) — consultando forced_shutdown_enabled no banco...`);
+            `[FORCED OFF] manual OFF detectado (eq ${String(cmd.equipment_id).substring(0, 8)} TSNN ${expectedTsnn}) — consultando banco...`);
           let fsEqRow = null;
           try {
             const { data } = await withCloudTimeout(
               supabase
                 .from("equipments")
-                .select("last_actuation_origin,forced_shutdown_enabled")
+                .select("last_actuation_origin,forced_shutdown_enabled,last_outputs_state,saida")
                 .eq("id", cmd.equipment_id)
                 .maybeSingle(),
               "forced-shutdown check",
@@ -5069,7 +5065,19 @@ async function processNextCommand() {
           } catch (e) {
             pushLog("warn", "system", `[FORCED OFF] consulta de estado falhou: ${e.message}; seguindo com {0} direto`);
           }
-          if (fsEqRow && fsEqRow.forced_shutdown_enabled === true && fsEqRow.last_actuation_origin === "local") {
+          // v3.25.31: dispara por FLAG + bomba LIGADA (estado real), NÃO pela origem.
+          // last_actuation_origin OSCILA (o polling grava 'remote-desired' ao confirmar o
+          // estado — ver linha ~2537), então o critério origin==='local' fazia o forced-
+          // shutdown quase nunca disparar. O estado real (last_outputs_state) é estável e
+          // captura a intenção: forçar o desligamento de uma bomba LIGADA com a flag ativa.
+          const fsLos = fsEqRow && typeof fsEqRow.last_outputs_state === "string" ? fsEqRow.last_outputs_state : "";
+          const fsSaida = Number(fsEqRow?.saida) || (fsTargetIndex + 1);
+          const fsRealIdx = fsSaida - 1;
+          const fsRealBit = (/^[01]+$/.test(fsLos) && fsRealIdx >= 0 && fsRealIdx < fsLos.length) ? fsLos[fsRealIdx] : null;
+          const fsShouldFire = !!fsEqRow && fsEqRow.forced_shutdown_enabled === true && fsRealBit === "1";
+          pushLog("info", "system",
+            `[FORCED OFF] banco: forced_shutdown_enabled=${fsEqRow ? fsEqRow.forced_shutdown_enabled : "?"} origin=${fsEqRow ? fsEqRow.last_actuation_origin : "?"} estado_real=${fsLos || "?"} bit_saida${fsSaida}=${fsRealBit ?? "?"} → ${fsShouldFire ? "DISPARA sequência" : "NÃO dispara (segue reforço normal)"}`);
+          if (fsShouldFire) {
             await runForcedShutdownSequence(cmd, frame, expectedTsnn, fsTargetIndex);
             return; // a sequência assume o controle; NÃO segue para o TX {0} direto nem agenda reforços
           }
