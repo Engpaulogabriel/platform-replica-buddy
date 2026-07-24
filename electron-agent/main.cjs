@@ -4540,6 +4540,11 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
 // UM poll de heartbeat a cada HEARTBEAT_POLL_MS para detectar PLC offline caso ela
 // não emita espontâneo. Espontâneos já atualizam last_communication; isto é o piso.
 const HEARTBEAT_POLL_MS = 3 * 60_000;
+// v3.25.24: até este nº de PLCs na fazenda, o agente pola TODO ciclo (detecção de
+// acionamento local em ~11s via RX, sem esperar o espontâneo do INO ~20s). Acima
+// disso, mantém o heartbeat de HEARTBEAT_POLL_MS por PLC para não estourar a serial
+// (TX_MIN_GAP 3s comporta ~3 polls/ciclo de 11s).
+const FAST_DETECT_MAX_PLCS = 3;
 
 // v3.25.20: decide se um polling deve ser DESCARTADO antes do TX. Retorna:
 //   "stale"       → payload não bate mais com o desired_running atual (atuação local
@@ -4554,44 +4559,16 @@ const HEARTBEAT_POLL_MS = 3 * 60_000;
 // nada; polling não atua no relé). A migration 20260723160000 preserva
 // last_actuation_origin='local' quando o polling confirma o estado, então o badge não
 // some. Em erro/dúvida retorna null (NÃO descarta) — nunca sumir com polling.
-// v3.25.23: normaliza o frame de polling para keep-alive {0} nas saídas em modo
-// LOCAL (last_actuation_origin='local'). Modelo do relé: {0} = normal (botoeira
-// controla); {1} = override momentâneo que SÓ existe na sequência MANUAL de
-// desligamento forçado ({1}→{0}). Um polling NUNCA leva {1}: segurar {1} numa saída
-// local deixaria o relé acionado — ao desligar na botoeira a bomba religaria sozinha
-// (ciclo liga/desliga que queima o motor). O INO watchdog (15min) aceita qualquer
-// frame, então {0} mantém a prova de vida. Só reescreve os bits das saídas locais;
-// preserva as demais saídas do mesmo PLC.
-async function forceLocalKeepAliveZero(frame, tsnn) {
-  try {
-    if (!supabase || !farmId || !tsnn) return frame;
-    const payload = extractTxPayload(frame);
-    if (!payload || !/^[01]{1,6}$/.test(payload)) return frame;
-    const { data, error } = await withCloudTimeout(
-      supabase
-        .from("equipments")
-        .select("saida, last_actuation_origin")
-        .eq("farm_id", farmId)
-        .ilike("hw_id", `${String(tsnn)}%`),
-      "polling local keep-alive zero",
-      CLOUD_READ_TIMEOUT_MS,
-    );
-    if (error || !Array.isArray(data) || data.length === 0) return frame;
-    const bits = payload.split("");
-    let changed = false;
-    for (const eq of data) {
-      if (eq.last_actuation_origin !== "local") continue;
-      const saida = Number(eq.saida) || 0;
-      if (saida < 1 || saida > bits.length) continue;
-      if (bits[saida - 1] !== "0") { bits[saida - 1] = "0"; changed = true; }
-    }
-    if (!changed) return frame;
-    const newPayload = bits.join("");
-    return String(frame).replace(TX_PAYLOAD_RE, (match, p) =>
-      p.length === newPayload.length ? match.replace(p, newPayload) : match);
-  } catch (_) {
-    return frame;
-  }
+// v3.25.24: um POLLING é keep-alive e SEMPRE leva {0} em TODAS as saídas — nunca
+// {1}, em modo local OU remoto. Modelo do relé: {0} = estado NORMAL (relé solto,
+// botoeira/contator controlam a bomba); {1} = override momentâneo que SÓ existe na
+// sequência MANUAL de desligamento forçado ({1}→{0}), que não passa pelo polling.
+// Segurar {1} num polling religaria a bomba ao desligar na botoeira (ciclo que
+// queima o motor). O INO watchdog (15min) é alimentado por qualquer frame, então
+// {0} mantém a prova de vida. Zera o payload inteiro (síncrono, sem consulta).
+function forcePollingKeepAliveZero(frame) {
+  return String(frame).replace(TX_PAYLOAD_RE, (match, p) =>
+    match.replace(p, "0".repeat(p.length)));
 }
 
 async function pollingSkipReason(frame, tsnn) {
@@ -4614,39 +4591,40 @@ async function pollingSkipReason(frame, tsnn) {
     }
     if (!Array.isArray(data) || data.length === 0) return null;
     const anyLocal = data.some((e) => e.last_actuation_origin === "local");
-    // v3.25.23: modelo CORRETO do relé — {0} é o estado NORMAL (relé solto, botoeira
-    // controla), {1} é override momentâneo que só existe na sequência MANUAL de
-    // desligamento forçado ({1}→{0}). Um polling é keep-alive e NUNCA leva {1}.
-    // Bomba em modo LOCAL → SEMPRE transmite o keep-alive (nunca stale/unnecessary);
-    // o frame já foi normalizado para {0} nas saídas locais (forceLocalKeepAliveZero).
-    // Segurar {1} numa saída local deixaria o relé acionado — ao desligar na botoeira
-    // a bomba religaria sozinha (ciclo liga/desliga que queima o motor). O INO
-    // watchdog (15min) é alimentado por QUALQUER frame, então {0} mantém a prova de
-    // vida igual. (Reverte a lógica invertida da v3.25.22.)
+    // v3.25.23/24: modelo CORRETO do relé — {0} é o estado NORMAL (relé solto, a
+    // botoeira/contator controlam), {1} é override momentâneo que só existe na
+    // sequência MANUAL de desligamento forçado ({1}→{0}). Um polling é keep-alive e
+    // NUNCA leva {1} (o frame já foi zerado por forcePollingKeepAliveZero). Bomba em
+    // modo LOCAL → SEMPRE transmite o keep-alive {0}, nunca descartado.
     if (anyLocal) return null;
+    // v3.25.24: NÃO existe mais "stale" — o payload de polling é SEMPRE {0}, não
+    // deriva do desired_running, então nunca fica "defasado". Mantemos só o
+    // "unnecessary" (heartbeat) para não congestionar a serial.
     let allRealMatchDesired = true; // todos os eqs (com estado real conhecido) já batem
     let haveRealForAll = true;      // temos last_outputs_state de todos
     for (const eq of data) {
       const saida = Number(eq.saida) || 0;
       if (saida < 1 || saida > payload.length) continue;
       const desiredBit = eq.desired_running ? "1" : "0";
-      if (payload[saida - 1] !== desiredBit) return "stale"; // payload != desired atual
       const los = typeof eq.last_outputs_state === "string" ? eq.last_outputs_state : "";
       const realBit = (/^[01]+$/.test(los) && saida <= los.length) ? los[saida - 1] : null;
       if (realBit === null) haveRealForAll = false;
       else if (realBit !== desiredBit) allRealMatchDesired = false;
     }
     if (haveRealForAll && allRealMatchDesired) {
-      // v3.25.16: heartbeat baseado em PROVA DE VIDA (último RX — espontâneo OU
-      // resposta), não no último poll. Se a PLC se manifestou nos últimos
-      // HEARTBEAT_POLL_MS, ela está online → descarta como desnecessário mesmo
-      // "fora da janela". Só libera o TX de heartbeat se a PLC estiver TOTALMENTE
-      // silenciosa por >HEARTBEAT_POLL_MS (aí sim precisa checar se está viva).
-      // Corrige o bug de o heartbeat transmitir {1} para bomba ligada local e o
-      // RX confirmar → RPC re-atribuir origem → badge LOCAL sumir.
-      const lastRx = lastRxAtByTsnn.get(String(tsnn)) || 0;
-      if (Date.now() - lastRx < HEARTBEAT_POLL_MS) return "unnecessary";
-      // sem NENHUM RX há >HEARTBEAT_POLL_MS → deixa transmitir como heartbeat (detecta offline)
+      // v3.25.24: DETECÇÃO RÁPIDA de acionamento local. O INO só emite o espontâneo
+      // ~20s após a botoeira; polando ativamente detectamos pela RX em ~1 ciclo (11s).
+      // MAS a serial (TX_MIN_GAP 3s) só comporta ~3 polls por ciclo — então só polamos
+      // todo ciclo em fazendas PEQUENAS (<= FAST_DETECT_MAX_PLCS PLCs). Em fazendas
+      // grandes mantemos o heartbeat de HEARTBEAT_POLL_MS por PLC para não congestionar
+      // (aí a detecção rápida depende do espontâneo do INO).
+      const plcCount = equipmentByTsnn.size || 0;
+      if (plcCount > FAST_DETECT_MAX_PLCS) {
+        const lastRx = lastRxAtByTsnn.get(String(tsnn)) || 0;
+        if (Date.now() - lastRx < HEARTBEAT_POLL_MS) return "unnecessary";
+        // sem NENHUM RX há >HEARTBEAT_POLL_MS → transmite como heartbeat (detecta offline)
+      }
+      // fazenda pequena → cai fora e transmite todo ciclo (detecção rápida)
     }
     return null;
   } catch (_) {
@@ -4785,19 +4763,19 @@ async function processNextCommand() {
     }
 
     if (cmd.type === "polling") {
-      // v3.25.23: keep-alive é SEMPRE {0} nas saídas em modo LOCAL — nunca segura {1}
-      // (que religaria a bomba ao desligar na botoeira). Normaliza o frame ANTES do
-      // skip check e do TX. O {1} só é pulsado na sequência MANUAL de desligamento
-      // forçado (runForcedShutdownSequence), que não passa por aqui.
-      const zeroed = await forceLocalKeepAliveZero(frame, expectedTsnn);
+      // v3.25.24: keep-alive é SEMPRE {0} em TODAS as saídas (local E remoto) — nunca
+      // segura {1} (que religaria a bomba ao desligar na botoeira/contator). Normaliza
+      // o frame ANTES do skip check e do TX. O {1} só é pulsado na sequência MANUAL de
+      // desligamento forçado (runForcedShutdownSequence), que não passa por aqui.
+      const zeroed = forcePollingKeepAliveZero(frame);
       if (zeroed !== frame) {
         pushLog("info", "system",
-          `[POLLING LOCAL] keep-alive normalizado para {0} (TSNN=${expectedTsnn}; saída local não segura o relé em {1})`);
+          `[POLLING] keep-alive normalizado para {0} (TSNN=${expectedTsnn}; polling não atua o relé)`);
         frame = zeroed;
       }
-      // v3.25.12/15/23: descarta polling antes do TX se STALE (payload ≠ desired atual)
-      // ou UNNECESSARY (estado real já == desired). Bomba LOCAL sempre transmite o
-      // keep-alive {0} (pollingSkipReason retorna null p/ local).
+      // v3.25.24: descarta polling antes do TX só como UNNECESSARY (heartbeat, fazenda
+      // grande). Não existe mais STALE (payload é sempre {0}). Bomba LOCAL e fazenda
+      // pequena sempre transmitem o keep-alive {0} (pollingSkipReason retorna null).
       const skipReason = await pollingSkipReason(frame, expectedTsnn);
       if (skipReason) {
         const skipMsg = skipReason === "stale"
