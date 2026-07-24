@@ -25,7 +25,10 @@ import { usePendingManualCommands, type PendingManualCommand } from "@/hooks/use
 // Janela em que um comando manual em andamento força "Ligando…/Desligando…"
 // no card, ignorando last_confirmed_state (que o Electron pode escrever com
 // leituras intermediárias durante o reforço).
-const MANUAL_PENDING_WINDOW_MS = 90_000;
+// v3.25.21: 90s → 5min. O "Ligando" é dirigido pelo STATUS do comando (pending/sent,
+// via usePendingManualCommands + Realtime): sai quando o agente muda para
+// executed/timeout/cancelled. Esta janela é só o teto de segurança.
+const MANUAL_PENDING_WINDOW_MS = 300_000;
 
 
 // Janela de classificação de comunicação por equipamento:
@@ -38,7 +41,11 @@ const OFFLINE_MIN_MULTI = 20;
 const STATUS_REFRESH_MS = 30_000;
 // Estados "Ligando…/Desligando…" aguardam a janela física completa antes de
 // qualquer falha definitiva. Resposta antiga em 8s NÃO é falha.
-const PENDING_MAX_MS = 120_000;
+// v3.25.21: 120s → 5min. Não corta mais o "Ligando" prematuramente (o safety do
+// agente agora é 120s; o comando só vira terminal depois). Este é o FALLBACK de
+// segurança: se o comando ficou pending/sent além de 5min (agente pode ter
+// crashado), o card passa a exibir ERRO em vez de ficar preso em "Ligando".
+const PENDING_MAX_MS = 300_000;
 
 export type EquipmentCommunicationStatus = "online" | "unstable" | "offline";
 
@@ -400,7 +407,9 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
                   localTimeoutFiredRef.current.add(e.id);
                   setTimeout(() => localTimeoutFiredRef.current.delete(e.id), 35_000);
                 }
-                pending = undefined;
+                // v3.25.21: além de 5min pending/sent → ERRO (agente pode ter
+                // crashado), em vez de silenciosamente voltar a "Desligado".
+                pending = "error";
                 running = cloudRunning;
               }
             }
@@ -538,7 +547,9 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
                     localTimeoutFiredRef.current.add(p.id);
                     setTimeout(() => localTimeoutFiredRef.current.delete(p.id), 35_000);
                   }
-                  pending = undefined;
+                  // v3.25.21: além de 5min pending/sent → ERRO (agente pode ter
+                  // crashado), em vez de silenciosamente voltar a "Desligado".
+                  pending = "error";
                   running = cloudRunning;
                 }
               }

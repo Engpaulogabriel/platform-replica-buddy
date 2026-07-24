@@ -12,7 +12,12 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
-const PENDING_WINDOW_MS = 90_000;
+// v3.25.21: 90s → 5min. O "Ligando…/Desligando…" é dirigido pelo STATUS do
+// comando (pending/sent). Enquanto o comando estiver nesses estados dentro da
+// janela, o card mostra o estado transitório; sai assim que o agente muda para
+// executed/timeout/cancelled (refletido em <1s pelo Realtime abaixo). 5min é só
+// o teto — combina com o fallback de erro do useDashboardEquipment.
+const PENDING_WINDOW_MS = 300_000;
 
 export interface PendingManualCommand {
   id: string;
