@@ -5027,6 +5027,12 @@ async function processNextCommand() {
         const fsEqMeta = equipmentById.get(String(cmd.equipment_id));
         const fsTargetIndex = Math.max(0, Math.min(fsPayload.length - 1, (fsEqMeta?.saida || fsPayload.length) - 1));
         if (fsPayload[fsTargetIndex] === "0") {
+          // v3.25.28: log de diagnóstico — confirma que um manual de DESLIGAR entrou
+          // no bloco de forced-shutdown e que a consulta ao banco (forced_shutdown_enabled)
+          // vai acontecer. Se sumir o "consulta de estado falhou" depois disto, a query
+          // deu timeout (conexão instável) e caiu no fail-safe {0} direto.
+          pushLog("info", "system",
+            `[FORCED OFF] manual OFF detectado (eq ${String(cmd.equipment_id).substring(0, 8)} TSNN ${expectedTsnn}) — consultando forced_shutdown_enabled no banco...`);
           let fsEqRow = null;
           try {
             const { data } = await withCloudTimeout(
