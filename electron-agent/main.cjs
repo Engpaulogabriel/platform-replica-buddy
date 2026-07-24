@@ -92,9 +92,20 @@ const POLL_INTERVAL_MS = 10_000; // v3.7.8: aumentado de 3s para 10s — comando
 // v3.9.10: gap entre o FIM (RX/timeout) de uma comunicação de polling e o INÍCIO (TX) da próxima.
 // Após RX bem sucedido, espera 8s para não saturar o canal de rádio (colisão/eco).
 // Após timeout, basta um gap curto (3s) para não atrasar demais o ciclo.
-const POLLING_GAP_AFTER_RX_MS = 8_000;
+const POLLING_GAP_AFTER_RX_MS = 3_000;
 const POLLING_GAP_AFTER_TIMEOUT_MS = 3_000;
 const MANUAL_FIRST_TX_GAP_MS = 3_000; // v3.8.13: gap mínimo entre último TX da mesma PLC e primeiro TX manual
+// v3.25.7: quando há OUTROS manuais pendentes na fila, não segura o barramento os
+// 13s completos esperando o RX deste manual — libera após 3s para o próximo manual
+// sair em ~3s (TX_MIN_GAP_MS). A confirmação física deste comando continua garantida
+// pelos reforços TX (+15/30/45s) e pela janela de late-RX/safety de 120s no backend.
+const MANUAL_QUEUED_HOLD_MS = 3_000;
+// v3.25.7: desligamento forçado de bomba ligada localmente. Quando o operador
+// desliga (bit=0) pela plataforma uma bomba com last_actuation_origin='local' e
+// forced_shutdown_enabled=true, o agente executa {1} -> espera RX -> estabiliza -> {0}
+// UMA ÚNICA VEZ (sem reforços/safety). Ver runForcedShutdownSequence().
+const FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS = 13_000; // espera do RX confirmando o {1} (mesma janela do manual)
+const FORCED_SHUTDOWN_STABILIZE_MS = POLL_INTERVAL_MS; // 10s p/ firmware/LoRa estabilizar antes do {0}
 let lastPollingEndAt = 0;             // timestamp do último RX/timeout de polling
 let lastPollingEndedWithTimeout = false; // true se o último polling acabou em timeout
 const lastTxByTsnn = new Map(); // TSNN -> { at, type, cmdId, frame }
@@ -110,8 +121,13 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 // ============================================================================
 let lastTxTimestamp = 0;
 let lastRxTimestamp = 0;
+// v3.25.16: timestamp da última ATIVIDADE útil da fila (TX real OU descarte de
+// polling DESNEC/STALE). O watchdog usa isto — descartar polling é atividade
+// normal (a fila está processando), não stall. Só é stall quando há frame para
+// enviar e a serial não transmite (aí este timestamp para de avançar).
+let lastTxOrSkipAt = 0;
 const txQueue = []; // [{ frame, priority, queuedAt, tsnn }]
-const TX_MIN_GAP_MS = 5000;
+const TX_MIN_GAP_MS = 3000;
 const RX_AVOID_GAP_MS = 2000;
 const POLLING_QUEUE_DROP_THRESHOLD = 5;
 
@@ -125,6 +141,7 @@ function _txWriteNow(frame) {
   try {
     bridgeProcess.stdin.write(Buffer.from(`SEND:${frame}\n`, "utf8"));
     lastTxTimestamp = Date.now();
+    lastTxOrSkipAt = lastTxTimestamp; // atividade da fila (para o watchdog)
     return true;
   } catch (e) {
     try { pushLog("error", "serial", `[TX QUEUE] stdin write falhou: ${e.message}`); } catch (_) {}
@@ -174,6 +191,7 @@ function processTxQueue() {
   const item = txQueue.shift();
   const gap = lastTxTimestamp > 0 ? (now - lastTxTimestamp) : -1;
   if (_txWriteNow(item.frame)) {
+    watchdogRestartCount = 0; // TX efetivo: reseta watchdog
     try { pushLog("info", "tx", `[TX QUEUE] Enviando frame para TSNN ${item.tsnn} (gap: ${gap}ms desde ultimo TX)`); } catch (_) {}
   } else {
     // bridge caiu: devolve para fila para tentar de novo
@@ -182,6 +200,192 @@ function processTxQueue() {
 }
 
 setInterval(processTxQueue, 1000);
+
+// ============================================================================
+// Cloud auth resilience + TX watchdog
+// ----------------------------------------------------------------------------
+// Objetivo: manter o loop de polling/TX vivo mesmo quando o token do Supabase
+// expira ou a nuvem devolve "Sem permissao" (RLS/JWT). O loop TX
+// (processTxQueue) já é 100% offline — só consome txQueue e escreve na porta
+// serial. O que trava é o loop QUE ENFILEIRA (tickEnqueuePolling e
+// processNextCommand): se essas chamadas retornam erro de auth, nenhum
+// frame novo entra na fila. Aqui:
+//   1) Detectamos erros de autenticação/permissão.
+//   2) Disparamos re-autenticação em background (refreshSession → fallback
+//      signInWithPassword com credenciais salvas). NUNCA bloqueia o loop TX.
+//   3) Watchdog independente: se não sai TX por >60s com PLCs cadastradas e
+//      bridge ok, reinicia o ciclo de polling. Após 3 tentativas seguidas,
+//      dispara alerta crítico via whatsapp-alerts (best-effort, sem bloquear).
+// ============================================================================
+function isCloudAuthError(err) {
+  if (!err) return false;
+  const msg = String(err.message || err.error_description || err || "").toLowerCase();
+  const code = String(err.code || err.status || "").toLowerCase();
+  if (
+    msg.includes("sem permissao")
+    || msg.includes("permission denied")
+    || msg.includes("jwt expired")
+    || msg.includes("invalid jwt")
+    || msg.includes("jwt is invalid")
+    || msg.includes("token is expired")
+    || msg.includes("token has invalid claims")
+    || msg.includes("not authenticated")
+  ) return true;
+  if (code === "401" || code === "403" || code === "pgrst301" || code === "pgrst302") return true;
+  return false;
+}
+
+let reauthInProgress = false;
+let lastReauthAt = 0;
+const REAUTH_MIN_GAP_MS = 15_000; // evita loop apertado ao repetir 401
+
+async function triggerReauth(reason) {
+  if (reauthInProgress) return;
+  if (Date.now() - lastReauthAt < REAUTH_MIN_GAP_MS) return;
+  reauthInProgress = true;
+  lastReauthAt = Date.now();
+  try {
+    pushLog("warn", "cloud", `[AUTH] Token expirado detectado (${reason || "unknown"}). Tentando re-autenticação...`);
+    // Tenta refresh primeiro (mais barato)
+    if (supabase && supabase.auth && typeof supabase.auth.refreshSession === "function") {
+      try {
+        const { data, error } = await supabase.auth.refreshSession();
+        if (!error && data && data.session) {
+          activeAccessToken = data.session.access_token || activeAccessToken;
+          pushLog("info", "cloud", "[AUTH] Refresh de token bem-sucedido");
+          void flushTelemetryQueue();
+          return;
+        }
+        if (error) pushLog("warn", "cloud", `[AUTH] refreshSession falhou: ${error.message || error}`);
+      } catch (e) {
+        pushLog("warn", "cloud", `[AUTH] refreshSession exception: ${e && e.message || e}`);
+      }
+    }
+    // Fallback: login completo com credenciais salvas
+    const cfg = (typeof loadConfig === "function") ? loadConfig() : null;
+    if (!cfg || !cfg.email || !cfg.password || !cfg.supabaseUrl || !cfg.supabaseAnonKey) {
+      pushLog("error", "cloud", "[AUTH] Re-autenticação impossível: config incompleta");
+      return;
+    }
+    try {
+      const newClient = await authenticate(cfg.email, cfg.password, cfg.supabaseUrl, cfg.supabaseAnonKey);
+      supabase = newClient;
+      // reseta canal de broadcast (cliente novo)
+      broadcastChannelRef = null;
+      pushLog("info", "cloud", `[AUTH] Re-autenticação bem-sucedida (${cfg.email})`);
+      void flushTelemetryQueue();
+    } catch (e) {
+      pushLog("error", "cloud", `[AUTH] Re-autenticação falhou: ${e && e.message || e}`);
+    }
+  } finally {
+    reauthInProgress = false;
+  }
+}
+
+// Wrapper leve para ser chamado nos catch/error paths dos loops que falam
+// com a nuvem. NUNCA lança — é fire-and-forget.
+function noteCloudError(err, context) {
+  try {
+    if (isCloudAuthError(err)) {
+      void triggerReauth(context || "cloud-error");
+    }
+  } catch (_) {}
+}
+
+// --- Watchdog TX QUEUE -----------------------------------------------------
+let watchdogRestartCount = 0;
+let lastWatchdogAlertAt = 0;
+const WATCHDOG_INTERVAL_MS = 15_000;
+const WATCHDOG_TX_SILENCE_MS = 60_000;
+const WATCHDOG_MAX_RESTARTS = 3;
+
+function hasActivePLCs() {
+  // Usa cache de equipamentos carregado do Supabase (map por hw_id).
+  // Se ainda não carregou, assume "sim" para não silenciar o watchdog.
+  return equipmentByHwId.size > 0 || equipmentCacheLoadedAt === 0;
+}
+
+async function sendTxStalledCriticalAlert(silenceSec) {
+  if (!supabase || !farmId) return;
+  // Rate-limit: no máximo 1 alerta a cada 10 min
+  if (Date.now() - lastWatchdogAlertAt < 10 * 60_000) return;
+  lastWatchdogAlertAt = Date.now();
+  const message = `Agente Electron: TX QUEUE travada há ${Math.round(silenceSec)}s. Comunicação com PLCs interrompida. Verificar computador local.`;
+  try {
+    // Insere notificação no sino (aba Sistema) — dispara pipeline padrão
+    await supabase.from("farm_notifications").insert({
+      farm_id: farmId,
+      kind: "failure",
+      severity: "critical",
+      title: "Agente sem TX há mais de 3 minutos",
+      message,
+      source: "agent-watchdog",
+      source_ref: `tx-stalled:${Date.now()}`,
+    });
+  } catch (e) {
+    pushLog("warn", "cloud", `[WATCHDOG] Falha ao registrar notificação crítica: ${e && e.message || e}`);
+  }
+  try {
+    // WhatsApp direto (best-effort — pode falhar sem bloquear)
+    await supabase.functions.invoke("whatsapp-alerts", {
+      body: {
+        kind: "agent_tx_stalled",
+        farm_id: farmId,
+        message,
+        silence_seconds: Math.round(silenceSec),
+      },
+    });
+  } catch (e) {
+    pushLog("warn", "cloud", `[WATCHDOG] whatsapp-alerts invoke falhou: ${e && e.message || e}`);
+  }
+}
+
+function watchdogTxTick() {
+  try {
+    if (!bridgeReady) return;                 // sem porta serial não é problema de TX
+    if (!hasActivePLCs()) return;             // sem PLCs cadastradas nada a enviar
+    if (licenseKillSwitchTriggered) return;   // desligamento intencional
+    if (pollingPaused) return;                // pausa administrativa
+    // v3.25.16: mede silêncio pela última ATIVIDADE da fila (TX real OU descarte de
+    // polling DESNEC/STALE), não só por TX. Assim, quando todos os pollings são
+    // descartados (estado real já bate com desired), isso conta como atividade
+    // normal e o watchdog NÃO dispara falso-positivo. Só dispara em stall real:
+    // frame para enviar e serial não transmite → lastTxOrSkipAt para de avançar.
+    const activityAt = Math.max(lastTxTimestamp, lastTxOrSkipAt);
+    const silenceMs = activityAt > 0 ? (Date.now() - activityAt) : (Date.now() - agentStartupAt);
+    if (silenceMs < WATCHDOG_TX_SILENCE_MS) return;
+
+    watchdogRestartCount++;
+    pushLog(
+      "warn",
+      "system",
+      `[WATCHDOG] TX QUEUE travada há ${Math.round(silenceMs / 1000)}s. Reinício #${watchdogRestartCount}`,
+    );
+
+    if (watchdogRestartCount <= WATCHDOG_MAX_RESTARTS) {
+      // Limpa estado que pode ter ficado preso e força novo ciclo.
+      try { txQueue.length = 0; } catch (_) {}
+      processing = false;
+      processingSince = 0;
+      inflightCmd = null;
+      inflightTsnn = null;
+      if (inflightTimer) { try { clearTimeout(inflightTimer); } catch (_) {} inflightTimer = null; }
+      // Re-auth em background (se o problema for token) e força enfileirar já
+      void triggerReauth("watchdog-tx-stalled");
+      void tickEnqueuePolling();
+      void processNextCommand();
+    } else {
+      pushLog("error", "system", "[WATCHDOG] 3 reinícios falharam. Enviando alerta WhatsApp...");
+      void sendTxStalledCriticalAlert(silenceMs / 1000);
+      watchdogRestartCount = 0; // reseta para poder tentar de novo depois
+    }
+  } catch (e) {
+    try { pushLog("warn", "system", `[WATCHDOG] exception: ${e && e.message || e}`); } catch (_) {}
+  }
+}
+setInterval(watchdogTxTick, WATCHDOG_INTERVAL_MS);
+
+// (contador do watchdog é resetado em processTxQueue após TX bem-sucedido)
 
 function uniqueExistingPythonCandidates(items) {
   const seen = new Set();
@@ -251,7 +455,7 @@ function resolvePythonBridgePath() {
 }
 
 const PYTHON_BRIDGE = resolvePythonBridgePath();
-const AGENT_VERSION = "3.12.1";
+const AGENT_VERSION = require("./package.json").version;
 const LOG_RETENTION_DAYS = 7;
 const LOG_FILE_MAX_BYTES = 50 * 1024 * 1024; // 50MB por arquivo
 const MEMORY_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // 30min
@@ -273,6 +477,16 @@ const CLOUD_READ_BACKOFF_MS = 15_000;
 // e isso fazia o sistema "travar" quando a janela ficava minimizada.
 const POLLING_ENQUEUE_INTERVAL_MS = 11_000;
 const POLLING_TIMEOUT_SWEEP_MS = 5_000;
+// v3.12.2 — Configuração remota (tabela agent_config). Os valores abaixo
+// começam com os defaults compilados e são sobrescritos a cada hot-reload
+// (a cada 60s) pelo registro de agent_config da fazenda.
+let activePollingEnqueueIntervalMs = POLLING_ENQUEUE_INTERVAL_MS;
+let activeSweepTimeoutMs = POLLING_TIMEOUT_SWEEP_MS;
+let activeTxGapMs = 100;               // gap mínimo entre TX serial (configurável remotamente)
+let liveAgentConfig = null;            // { serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at }
+let lastAgentConfigUpdatedAt = null;   // string ISO do último updated_at aplicado
+let agentConfigWatchTimer = null;
+const AGENT_CONFIG_POLL_MS = 60_000;
 // v3.8.24 — Modo Startup Sync: nos primeiros 15 min após autenticar, o agente
 // faz polling em rajada (2s) usando uma RPC que monta o frame TX a partir de
 // last_outputs_state (estado real conhecido), em vez de desired_running. Isso
@@ -285,6 +499,21 @@ let startupSyncTimer = null;
 let startupSyncEndTimer = null;
 function isInStartupSyncWindow() {
   return agentStartupAt > 0 && (Date.now() - agentStartupAt) < STARTUP_SYNC_DURATION_MS;
+}
+
+// v3.25.10: PLCs cujo estado já foi confirmado por um RX nesta sessão (TSNN em
+// upper-case). Depois do primeiro RX confirmado de uma PLC, o STARTUP SYNC NÃO
+// deve mais interceptar espontâneos dela — o estado já é conhecido, então
+// mudanças subsequentes vão para a classificação normal (local/remote via
+// applySpontaneousImmediately). Corrige o bug de o startup-sync sincronizar
+// desired_running=true a partir de um acionamento local (botoeira) já depois de
+// o agente ter confirmado o estado da PLC.
+const startupSyncDoneByTsnn = new Set();
+function markStartupSyncDone(tsnn) {
+  if (tsnn) startupSyncDoneByTsnn.add(String(tsnn).toUpperCase());
+}
+function isStartupSyncDone(tsnn) {
+  return !!tsnn && startupSyncDoneByTsnn.has(String(tsnn).toUpperCase());
 }
 
 function withCloudTimeout(promise, label, timeoutMs) {
@@ -339,9 +568,36 @@ let appClosing = false;
 // é decidido SOMENTE pelo backend (critical-alerts-tick) com limiar de 15 min.
 // v3.9.21: + registro em automation_log de eventos equipamento_offline /
 // equipamento_online (campo details.tipo_evento) para histórico no relatório.
-const pollingBackoffByTsnn = new Map(); // tsnn -> { failures, offlineSince, lastSuccessAt }
-function getBackoffSkipEvery(_failures) { return 1; }
-function shouldSkipPollingForBackoff(_tsnn) { return false; }
+const pollingBackoffByTsnn = new Map(); // tsnn -> { failures, offlineSince, lastSuccessAt, backoffCycle }
+// v3.25.19: BACKOFF EXPONENCIAL para PLC sem resposta. Uma PLC morta consome ~5s de
+// timeout por rodada; sem backoff isso monopoliza o ciclo e atrasa as PLCs que
+// funcionam. Regra: <3 falhas → poll todo ciclo; ≥3 → 1 poll a cada 5 ciclos;
+// ≥10 → 1 a cada 10 ciclos. noteBackoffSuccess (qualquer RX) reseta failures.
+function getBackoffSkipEvery(failures) {
+  if ((failures || 0) >= 10) return 10;
+  if ((failures || 0) >= 3) return 5;
+  return 1; // sem backoff
+}
+function shouldSkipPollingForBackoff(tsnn) {
+  if (!tsnn) return false;
+  const b = pollingBackoffByTsnn.get(String(tsnn));
+  const failures = b ? (b.failures || 0) : 0;
+  if (failures < 3) return false; // sem backoff — poll normal
+  const skipEvery = getBackoffSkipEvery(failures);
+  const c = (b.backoffCycle || 0) + 1;
+  if (c >= skipEvery) {
+    b.backoffCycle = 0; // deixa passar 1 tentativa e reinicia a contagem
+    pollingBackoffByTsnn.set(String(tsnn), b);
+    return false;
+  }
+  b.backoffCycle = c;
+  pollingBackoffByTsnn.set(String(tsnn), b);
+  if (c === 1) { // loga uma vez por janela de skip (evita spam)
+    pushLog("info", "system",
+      `[POLLING BACKOFF] TSNN ${tsnn} em backoff (tentativa ${failures}, próxima em ${skipEvery - c} ciclos)`);
+  }
+  return true; // pula esta rodada
+}
 
 // v3.9.30 — Métricas por ciclo de polling. Ciclo = uma rodada de enqueue
 // de pollings pela RPC enqueue_polling_for_due_equipments. Ao detectar uma
@@ -511,6 +767,11 @@ const lastOnConfirmAtByEq = new Map();
 const MAX_PLC_SILENCE_WARN_MS = 12 * 60_000;
 const PLC_SILENCE_CHECK_INTERVAL_MS = 60_000;
 const lastPollAtByTsnn = new Map();
+// v3.25.16: timestamp do ÚLTIMO RX de cada PLC (qualquer RX — espontâneo OU resposta
+// a TX). Prova de vida: se a PLC mandou algo nos últimos HEARTBEAT_POLL_MS, está
+// online e o heartbeat NÃO precisa transmitir polling à toa. Atualizado em
+// processTelemFrame para todo RX válido.
+const lastRxAtByTsnn = new Map();
 let plcSilenceCheckTimer = null;
 function noteSuccessfulPoll(tsnn) {
   if (!tsnn) return;
@@ -592,6 +853,32 @@ let inflightTimer = null;     // timer de timeout
 let inflightSpontaneousSeen = false;
 let inflightRetryCount = 0;
 
+// v3.25.7: estado da sequência de desligamento forçado ({1}->RX->10s->{0}).
+// forcedShutdownActive segura a fila (processNextCommand retorna cedo) durante
+// os ~23-36s da sequência, neutralizando o PROCESSING_STUCK_RESET_MS e o pollTimer.
+// forcedShutdownRxWaiter é um waiter one-shot resolvido pelo processTelemFrame
+// quando o RX confirma o bit alvo esperado.
+let forcedShutdownActive = false;
+let forcedShutdownRxWaiter = null;    // { tsnn, targetIndex, wantBit, resolve }
+
+// Aguarda um RX confirmando `wantBit` na saída `targetIndex` do `tsnn`, ou expira.
+// Resolve com "rx" (confirmado) ou "timeout".
+function forcedShutdownWaitRx(tsnn, targetIndex, wantBit, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    const finish = (how) => {
+      if (done) return;
+      done = true;
+      forcedShutdownRxWaiter = null;
+      if (timer) clearTimeout(timer);
+      resolve(how);
+    };
+    timer = setTimeout(() => finish("timeout"), timeoutMs);
+    forcedShutdownRxWaiter = { tsnn: String(tsnn), targetIndex, wantBit, resolve: () => finish("rx") };
+  });
+}
+
 // Comando recente por TSNN — usado para casar RX que chega APOS o timeout
 // do comando (frames atrasados continuam sendo telemetria do comando original,
 // nao "espontaneos"). Janela: 30s apos sentAt.
@@ -616,7 +903,7 @@ const activeResetByTsnn = new Map();
 // Estrutura por equipment_id (UUID):
 //   { tsnn, saida, hwId, expectedBit ('1'|'0'), expectedPayload, armedAt, timer, cmdId }
 const safetyByEquipment = new Map();
-const SAFETY_WINDOW_MS = 60_000;
+const SAFETY_WINDOW_MS = 120_000; // v3.25.19: 60s → 120s (bombas com proteção térmica/soft-starter demoram a partir; reforço segue em 0/15/30/45s)
 const SAFETY_LOCAL_SUPPRESS_MS = 30_000;
 
 // --- Reforço de TX manual (3 envios em 0s/15s/30s) ---
@@ -782,17 +1069,14 @@ const RX_PING_RE  = /^_\[([0-9A-Fa-f]{4})_(?:CFG|PING)_\]\{(?:PING|OK:PING)/;
 // onde TAG pode ser: CFG, PING, STATUS, DUMP, SAVE, REBOOT, etc.
 // Capturamos TSNN, TAG e PAYLOAD para permitir casamento com inflightCmd.
 const RX_CFG_RESP_RE = /^_?\[([0-9A-Fa-f]{4})_([A-Z0-9_]+)_\]\{([^}]*)\}(?:\[[0-9A-Fa-f]{4}_ETX_\])?/;
-// Firmware novo pode responder CFG sem cabecalho, apenas payload + ETX:
-//   {OK:STATUS:UP=3516s,...}[1103_ETX_]
-// Nesse caso inferimos o TAG pelo payload e casamos pelo TSNN do ETX.
-const RX_CFG_BARE_RESP_RE = /^\{([^}]*)\}\[([0-9A-Fa-f]{4})_ETX_\]/;
 const TX_TSNN_RE  = /^\[([0-9A-Fa-f]{4})_(?:1|CFG)_\]/;
 const TX_CFG_RE   = /^\[([0-9A-Fa-f]{4})_CFG_\]/;
-const TX_PAYLOAD_RE = /\{([01]{1,6})\}/;
-// Sufixos de leitura analogica de nivel: _N1<valor>N1_, _N2<valor>N2_
-// Exemplo de frame: _[1313_0_]{1}_N11015N1__N20N2_[1313_ETX_]
-// O <valor> eh inteiro (0-9999).
-const RX_LEVEL_RE = /_N([12])(\d{1,5})N\1_/g;
+// Aceita sufixo opcional "RV" no payload (comando de reset de vazao no firmware).
+// O grupo 1 continua sendo apenas o payload posicional 0/1.
+const TX_PAYLOAD_RE = /\{([01]{1,6})(?:RV)?\}/;
+// Sufixos de leitura analogica: _N1<valor>N1_ (nivel), _N2<valor>N2_ (vazao total m3),
+// _N3<valor>N3_ (vazao instantanea x10). Exemplo: _[1313_0_]{1}_N11015N1__N20N2_[1313_ETX_]
+const RX_LEVEL_RE = /_N([123])(\d{1,5})N\1_/g;
 
 function extractCommandTsnn(frame) {
   const m = String(frame || "").replace(/[\r\n]/g, "").trim().match(TX_TSNN_RE);
@@ -855,12 +1139,28 @@ let telemetryFlushInFlight = false;
 let telemetryRetryAt = 0;
 let telemetryWarnAt = 0;
 
+// --- Live stream (broadcast Realtime, zero storage) ---
+// Buffer circular de 500 entradas em RAM. Quando alguém abre a página
+// "Logs ao Vivo" no interface web, envia start_log_stream → o agente flusha o
+// buffer e passa a emitir cada nova linha via broadcast. Auto-stop em 30 min
+// sem renovação (frontend manda renew_log_stream a cada 5 min).
+const LIVE_STREAM_BUFFER_MAX = 500;
+const LIVE_STREAM_INACTIVE_MS = 30 * 60 * 1000;
+const liveStreamBuffer = [];
+let liveStreamActive = false;
+let liveStreamChannel = null;
+let liveStreamInactiveTimer = null;
+
+
 // --- Equipment name cache (para mostrar nomes amigaveis no log local) ---
 // Mapa: hw_id (ex "210101") -> { name: "Poço Norte", saida: 1 }
 //       tsnn (ex "2101") -> [{ name, saida }, ...] (todas as saidas daquele PLC)
 const equipmentByHwId = new Map();
 const equipmentByTsnn = new Map();
 const equipmentById = new Map(); // UUID -> { name, hw_id, saida }
+// TSNN -> { id, hw_id, vazao_mode, flow_total_m3 } do primeiro equipamento com vazao_mode='real' daquele PLC.
+// Usado pelo parser N2/N3 e pelo agendador de reset (RV).
+const flowEquipByTsnn = new Map();
 let equipmentCacheLoadedAt = 0;
 let lastCleanupAt = 0;
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hora
@@ -870,12 +1170,13 @@ async function refreshEquipmentCache() {
   try {
     const { data, error } = await supabase
       .from("equipments")
-      .select("id, hw_id, name, saida")
+      .select("id, hw_id, name, saida, vazao_mode, flow_total_m3")
       .eq("farm_id", farmId);
     if (error || !data) return;
     equipmentByHwId.clear();
     equipmentByTsnn.clear();
     equipmentById.clear();
+    flowEquipByTsnn.clear();
     for (const eq of data) {
       const hw = String(eq.hw_id || "").trim().toUpperCase();
       if (!hw) continue;
@@ -885,6 +1186,15 @@ async function refreshEquipmentCache() {
       const arr = equipmentByTsnn.get(tsnn) || [];
       arr.push({ name: eq.name, saida: eq.saida, hw_id: hw });
       equipmentByTsnn.set(tsnn, arr);
+      // Registra o primeiro equipamento com vazao_mode='real' de cada TSNN.
+      if (eq.vazao_mode === "real" && !flowEquipByTsnn.has(tsnn)) {
+        flowEquipByTsnn.set(tsnn, {
+          id: eq.id,
+          hw_id: hw,
+          vazao_mode: eq.vazao_mode,
+          flow_total_m3: Number(eq.flow_total_m3 || 0),
+        });
+      }
     }
     equipmentCacheLoadedAt = Date.now();
   } catch (_) {}
@@ -1127,107 +1437,6 @@ function cfgResponseLabel(rxTag, rxPayload) {
   if (tag === "REBOOT" || payload.startsWith("OK:REBOOT")) return "REBOOT";
   if (tag === "CFG") return "CFG";
   return tag || "CFG";
-}
-
-function inferCfgTagFromPayload(rxPayload) {
-  const payload = String(rxPayload || "").toUpperCase();
-  if (payload.startsWith("OK:PING") || payload === "PING") return "PING";
-  if (payload.startsWith("OK:STATUS") || payload.includes(":STATUS:")) return "STATUS";
-  if (payload.startsWith("OK:DUMP") || payload.startsWith("ID=") || payload.includes(":DUMP:")) return "DUMP";
-  if (payload.startsWith("OK:SAVE")) return "SAVE";
-  if (payload.startsWith("OK:REBOOT")) return "REBOOT";
-  if (payload.startsWith("ERR:")) return "CFG";
-  return "CFG";
-}
-
-function parseCfgResponseFrame(frame) {
-  const framed = String(frame || "").match(RX_CFG_RESP_RE);
-  if (framed) {
-    return {
-      rxTsnn: String(framed[1] || "").toUpperCase(),
-      rxTag: String(framed[2] || "").toUpperCase(),
-      rxPayload: framed[3] || "",
-      bare: false,
-    };
-  }
-  const bare = String(frame || "").match(RX_CFG_BARE_RESP_RE);
-  if (bare) {
-    const rxPayload = bare[1] || "";
-    return {
-      rxTsnn: String(bare[2] || "").toUpperCase(),
-      rxTag: inferCfgTagFromPayload(rxPayload),
-      rxPayload,
-      bare: true,
-    };
-  }
-  return null;
-}
-
-async function markCfgCommandExecuted(cmd, frame, cfgLabel, confirmedSetId) {
-  if (!supabase || !cmd?.id) {
-    pushLog("error", "cloud", `CFG ${cfgLabel}: sem cliente cloud ou command id para gravar resposta`);
-    return;
-  }
-  try {
-    const { data, error } = await withCloudTimeout(
-      supabase
-        .from("commands")
-        .update({
-          status: "executed",
-          response: frame,
-          responded_at: new Date().toISOString(),
-        })
-        .eq("id", cmd.id)
-        .select("id"),
-      "marcar cfg executed",
-      CLOUD_WRITE_TIMEOUT_MS,
-    );
-    if (error) throw error;
-    if (!Array.isArray(data) || data.length === 0) {
-      throw new Error(`UPDATE commands não alterou linhas para id=${cmd.id}`);
-    }
-    pushLog("info", "system", `cmd ${cmd.id.substring(0, 8)} -> executed (CFG ${cfgLabel})`, null, null);
-    if (confirmedSetId) await syncConfirmedSetId(cmd, confirmedSetId);
-  } catch (e) {
-    pushLog("error", "cloud", `Falha ao gravar resposta CFG no commands id=${String(cmd.id).substring(0, 8)}: ${e.message || e}`);
-  } finally {
-    consecutiveTimeouts = 0;
-    processing = false;
-    setTimeout(() => { void processNextCommand(); }, 10);
-  }
-}
-
-async function tryCompleteRecentCfgCommand(rxTsnn, rxTag, rxPayload, frame) {
-  if (!supabase || !farmId || !rxTsnn) return false;
-  try {
-    const since = new Date(Date.now() - 120_000).toISOString();
-    const { data, error } = await withCloudTimeout(
-      supabase
-        .from("commands")
-        .select("*")
-        .eq("farm_id", farmId)
-        .eq("type", "config")
-        .eq("plc_hw_id", rxTsnn)
-        .in("status", ["pending", "sent", "timeout"])
-        .gte("created_at", since)
-        .order("created_at", { ascending: false })
-        .limit(5),
-      "buscar cfg recente sem inflight",
-      CLOUD_READ_TIMEOUT_MS,
-    );
-    if (error) throw error;
-    const cmd = Array.isArray(data)
-      ? data.find((row) => TX_CFG_RE.test(String(row.frame || "")) && isCfgAckCompatible(row, rxTag, rxPayload))
-      : null;
-    if (!cmd) return false;
-    const cfgLabel = cfgResponseLabel(rxTag, rxPayload);
-    pushLog("warn", "cloud", `[CFG FALLBACK] RX ${cfgLabel} TSNN=${rxTsnn} sem inflight; casando com command ${String(cmd.id).substring(0, 8)}`);
-    await markCfgCommandExecuted(cmd, frame, cfgLabel, extractSetIdTarget(cmd));
-    return true;
-  } catch (e) {
-    pushLog("warn", "cloud", `CFG fallback lookup falhou TSNN=${rxTsnn}: ${e.message || e}`);
-    return false;
-  }
 }
 
 function payloadCommandsOnlyOff(payload) {
@@ -1565,8 +1774,86 @@ function pushLog(level, category, message, rawFrame, humanOverride) {
     }
   }
 
+  // --- Live stream buffer (RAM only, broadcast on demand) ---
+  // Versão amigável + categoria/level vão pro buffer circular de 500 linhas.
+  // Quando o streaming está ativo, cada linha vai direto pro broadcast.
+  const streamEntry = {
+    ts: entry.timestamp,
+    level,
+    category,
+    message: humanMessage ?? message,
+    raw_frame: rawFrame || null,
+  };
+  liveStreamBuffer.push(streamEntry);
+  if (liveStreamBuffer.length > LIVE_STREAM_BUFFER_MAX) liveStreamBuffer.shift();
+  if (liveStreamActive && liveStreamChannel) {
+    try {
+      liveStreamChannel.send({
+        type: "broadcast",
+        event: "log_line",
+        payload: streamEntry,
+      });
+    } catch (_) {}
+  }
+
   // v3.7.9 MODO CRU: flushLogs desativado — nunca há nada para mandar.
 }
+
+// --- Live stream control (start/stop/renew via agent_commands) ---
+function _scheduleLiveStreamStop() {
+  if (liveStreamInactiveTimer) clearTimeout(liveStreamInactiveTimer);
+  liveStreamInactiveTimer = setTimeout(() => {
+    stopLiveLogStream("inactive_timeout");
+  }, LIVE_STREAM_INACTIVE_MS);
+}
+
+function startLiveLogStream() {
+  if (!supabase || !farmId) return false;
+  try {
+    if (!liveStreamChannel) {
+      liveStreamChannel = supabase.channel(`agent-logs-${farmId}`, {
+        config: { broadcast: { self: false, ack: false } },
+      });
+      liveStreamChannel.subscribe();
+    }
+    liveStreamActive = true;
+    _scheduleLiveStreamStop();
+    // Flush do buffer atual (até 500 linhas) em um único broadcast.
+    try {
+      liveStreamChannel.send({
+        type: "broadcast",
+        event: "log_buffer",
+        payload: { lines: liveStreamBuffer.slice() },
+      });
+    } catch (_) {}
+    return true;
+  } catch (e) {
+    pushLog("warn", "system", `Falha ao iniciar log stream: ${e.message}`);
+    return false;
+  }
+}
+
+function renewLiveLogStream() {
+  if (!liveStreamActive) return false;
+  _scheduleLiveStreamStop();
+  return true;
+}
+
+function stopLiveLogStream(reason = "manual") {
+  liveStreamActive = false;
+  if (liveStreamInactiveTimer) {
+    clearTimeout(liveStreamInactiveTimer);
+    liveStreamInactiveTimer = null;
+  }
+  if (liveStreamChannel) {
+    try { void supabase.removeChannel(liveStreamChannel); } catch (_) {}
+    liveStreamChannel = null;
+  }
+  if (reason !== "manual") {
+    console.log(`[LIVE-STREAM] parado (${reason})`);
+  }
+}
+
 
 async function flushLogs() {
   // v3.7.9 MODO CRU: no-op. Logs ficam apenas no arquivo local + tray.
@@ -1771,7 +2058,7 @@ async function fireSafetyOff(equipmentId, entry) {
     pushLog(
       "warn",
       "system",
-      `[REFORCO] Timeout 60s TSNN ${entry.tsnn} — enviando comando inverso (safety): esperava bit=${expectedBit}, enviando bit=${inverseBit} (frame=${inverseFrame.replace(/\r/g, "")})`,
+      `[REFORCO] Timeout ${Math.round(SAFETY_WINDOW_MS/1000)}s TSNN ${entry.tsnn} — enviando comando inverso (safety): esperava bit=${expectedBit}, enviando bit=${inverseBit} (frame=${inverseFrame.replace(/\r/g, "")})`,
       null,
       `Bomba ${nameForTsnn(entry.tsnn)} nao confirmou comando em ${Math.round(SAFETY_WINDOW_MS/1000)}s — safety acionado (bit inverso)`,
     );
@@ -1798,6 +2085,10 @@ async function fireSafetyOff(equipmentId, entry) {
             .update({
               desired_running: inverseBit === "1",
               pending_command_id: null,
+              // v3.25.21: o safety é uma ação do SISTEMA (failsafe), NÃO botoeira.
+              // Origem 'remote-desired' (não 'local') — assim não mostra badge LOCAL
+              // indevido e a PLC segue no fluxo NORMAL de polling (não vira modo local).
+              last_actuation_origin: "remote-desired",
               safety_expired_at: new Date().toISOString(),
               // v3.11.5: NUNCA atualizar last_communication aqui — safety é TX
               // sem RX. last_communication só pode ser tocado por RX real
@@ -1808,6 +2099,30 @@ async function fireSafetyOff(equipmentId, entry) {
           "safety desired_running update",
           CLOUD_WRITE_TIMEOUT_MS,
         );
+        // v3.25.19: marca o comando que armou o safety como 'timeout' (bomba NÃO
+        // confirmou no tempo) — assim o frontend sai de "Ligando…/Desligando…"
+        // imediatamente. NOTA: o enum command_status não tem 'failed'; 'timeout' é o
+        // terminal semanticamente correto ("não confirmou em Xs") e o front já o
+        // trata como não-pendente (sai de "Ligando").
+        if (entry.cmdId) {
+          try {
+            await withCloudTimeout(
+              supabase
+                .from("commands")
+                .update({
+                  status: "timeout",
+                  error_message: `Safety timer: bomba não confirmou em ${Math.round(SAFETY_WINDOW_MS / 1000)}s`,
+                  responded_at: new Date().toISOString(),
+                })
+                .eq("id", entry.cmdId)
+                .in("status", ["pending", "sent"]),
+              "safety mark command timeout",
+              CLOUD_WRITE_TIMEOUT_MS,
+            );
+          } catch (e) {
+            pushLog("warn", "cloud", `Safety mark command timeout falhou: ${e.message}`);
+          }
+        }
         const { data: cancelledPollings, error: cancelPollingError } = await withCloudTimeout(
           supabase.rpc("cancel_pending_pollings_for_plc", {
             _farm_id: farmId,
@@ -1968,6 +2283,32 @@ function hasActiveSafetyForTsnn(tsnn) {
 // que o operador remoto veja o estado real em tempo real. Origem = 'local'.
 async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
   if (!supabase || !farmId) return false;
+  // v3.25.17: se há REFORÇO TX manual ativo para esta PLC e o RX DIVERGE do bit
+  // esperado pelo reforço, é leitura intermediária ("comando ainda não confirmado,
+  // aguardando" — ex.: Ligar {1}, motor não partiu, bomba responde {0}). O caminho
+  // do reforço (processTelemFrame) já tratou isso mantendo o reforço. NÃO classificar
+  // como acionamento LOCAL aqui — senão o LOCAL OVERRIDE cancelaria reforço+safety e
+  // marcaria desired=false prematuramente. Retorna false → o chamador grava a
+  // telemetria com origem PRESERVADA (queueTelemetry null), sem re-atribuir origem.
+  try {
+    const reinf = getActiveReinforcementForTsnn(tsnn);
+    const expBit = reinf && reinf.entry ? reinf.entry.expectedBit : null;
+    if (expBit === "0" || expBit === "1") {
+      const rx = String(rawPayload || "");
+      const reinfSaida = Number(reinf.entry.saida) || 0;
+      let rxBit = null;
+      if (/^[01]{1,6}$/.test(rx)) {
+        if (rx.length === 1) rxBit = rx[0];
+        else if (reinfSaida >= 1 && reinfSaida <= rx.length) rxBit = rx[reinfSaida - 1];
+        else rxBit = rx[rx.length - 1];
+      }
+      if (rxBit && rxBit !== expBit) {
+        pushLog("info", "system",
+          `[REFORCO] RX intermediário TSNN=${tsnn} (recebido=${rxBit} ≠ esperado=${expBit}) — reforço ativo já tratou; não classifica como local`);
+        return false;
+      }
+    }
+  } catch (_) { /* na dúvida, segue o fluxo normal */ }
   try {
     // ─────────────────────────────────────────────────────────────────
     // CLASSIFICACAO DE ORIGEM ANTES da RPC (v3.8.6)
@@ -2036,39 +2377,47 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       }
     }
 
-    // 1) Comando manual recente (<= 180s)
+    // 1) v3.25.9: comando do operador NÃO confirmado — distinção por ESTADO DO
+    // COMANDO, não por tempo. Considera status não-terminais (pending/sent/delivered):
+    //   • QUALQUER comando 'pending' (na FILA, ainda não transmitido) → NÃO é local:
+    //     o operador mandou e o TX ainda não saiu (ex.: ligar 10 bombas em série —
+    //     as bombas 6-10 ficam pending enquanto a 5 transmite).
+    //   • comando 'sent'/'delivered' (em voo) cujo bit alvo == bit recebido → é o
+    //     ECO/confirmação do comando remoto.
+    // Só quando NÃO existe nenhum comando desses é que um espontâneo que muda o
+    // estado é atuação LOCAL. Divergência de um comando JÁ enviado continua tratada
+    // pelo LOCAL OVERRIDE abaixo (v3.25.5) — sem risco de loop, pois um 'pending'
+    // ainda não gerou TX/reforço. Espelha v_pending_command_active da RPC.
     if (!matchedByCommand && resolvedEqId) {
       try {
-        const since = new Date(Date.now() - 180_000).toISOString();
-        const { data: recent } = await withCloudTimeout(
+        const { data: cmds } = await withCloudTimeout(
           supabase
             .from("commands")
-            .select("id, frame, source_device, sent_at, created_at")
+            .select("frame, source_device, status")
             .eq("farm_id", farmId)
             .eq("equipment_id", resolvedEqId)
             .eq("type", "manual")
-            .or(`sent_at.gte.${since},created_at.gte.${since}`)
+            .in("status", ["pending", "sent", "delivered"])
             .order("created_at", { ascending: false })
-            .limit(5),
-          "espontaneo recent-cmd lookup",
+            .limit(10),
+          "espontaneo cmd-in-flight lookup",
           CLOUD_WRITE_TIMEOUT_MS,
         );
-        if (Array.isArray(recent)) {
-          for (const c of recent) {
+        if (Array.isArray(cmds)) {
+          const rxBit = extractStateBit(rawPayload);
+          for (const c of cmds) {
             if (String(c.source_device || "").startsWith("backend-reset:")) continue;
+            // comando na FILA (pending, ainda não TX): operador mandou → não é local
+            if (c.status === "pending") { matchedByCommand = true; break; }
+            // comando EM VOO (sent/delivered) com bit igual ao recebido → eco
             const m = String(c.frame || "").match(/\{([01]{1,6})\}/);
             if (!m) continue;
-            const expected = m[1];
-            const expectedBit = expected[expected.length - 1];
-            const rxBit = extractStateBit(rawPayload);
-            if (rxBit && expectedBit === rxBit) {
-              matchedByCommand = true;
-              break;
-            }
+            const expectedBit = m[1][m[1].length - 1];
+            if (rxBit && expectedBit === rxBit) { matchedByCommand = true; break; }
           }
         }
       } catch (e) {
-        pushLog("warn", "cloud", `Espontaneo recent-cmd lookup falhou: ${e.message}`);
+        pushLog("warn", "cloud", `Espontaneo cmd-in-flight lookup falhou: ${e.message}`);
       }
     }
 
@@ -2083,7 +2432,7 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
             .select("id")
             .eq("farm_id", farmId)
             .eq("equipment_id", resolvedEqId)
-            .in("status", ["pending", "sent"])
+            .in("status", ["pending", "sent", "delivered"])
             .limit(1),
           "espontaneo pending-cmd lookup",
           CLOUD_WRITE_TIMEOUT_MS,
@@ -2140,35 +2489,144 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
 
     if (matchedByCommand) originForRpc = "remote-cmd";
     else if (matchedByDesired) originForRpc = "remote-desired";
-    else if (divergedFromDesired && inStartupSync && !pendingCommandActive && !safetyArmedForFrame && !recentSafetyExpiry) {
-      // v3.14.3 (fix 2026-07-13) — STARTUP SYNC NÃO altera mais desired_running.
-      // desired_running representa a INTENÇÃO do operador/automação e só pode
-      // ser alterada por comando manual (web) ou automação por horário.
-      // Divergência entre RX e desired = acionamento local: preservamos o
-      // desired do operador e apenas refletimos o estado físico em
-      // last_outputs_state via apply_pump_telemetry (origem 'local').
-      // Isso evita o bug em que o polling volta a mandar {1} depois de um
-      // comando Desligar não obedecido, fazendo o badge LOCAL sumir.
+    else if (divergedFromDesired && inStartupSync && !isStartupSyncDone(tsnnUpper) && !pendingCommandActive && !safetyArmedForFrame && !recentSafetyExpiry) {
+      // v3.25.10: só entra no startup-sync se a PLC ainda NÃO teve um RX confirmado
+      // nesta sessão. Após o primeiro RX confirmado (isStartupSyncDone), um espontâneo
+      // divergente é atuação local/remoto normal, não "estado inicial a sincronizar".
+      // v3.9.4 — Startup Sync só sobrescreve desired_running quando NÃO há
+      // comando ativo / safety armado / safety recém-expirado para a PLC.
+      // Caso contrário, divergência RX↔desired = atuação local (PLC em modo
+      // botoeira ignorando o comando) e devemos preservar o desired do
+      // operador, evitando loop "comando OFF → RX=1 → sync ON → comando OFF".
       const _stateBit = extractStateBit(rawPayload);
+      const realRunning = _stateBit === "1";
       const _eqKey = resolvedEqId ? String(resolvedEqId) : "";
-      pushLog(
-        "info",
-        "system",
-        `[STARTUP SYNC] Divergência RX↔desired em eq ${_eqKey.substring(0,8)} (real=${_stateBit}) — preservando desired_running (intenção do operador).`,
-      );
-      // Deixa que apply_pump_telemetry classifique como 'local'.
+      const _lastOn = _eqKey ? (lastOnConfirmAtByEq.get(_eqKey) || 0) : 0;
+      const _ageMs = _lastOn ? (Date.now() - _lastOn) : Infinity;
+      if (!realRunning && _lastOn > 0 && _ageMs < STARTUP_SYNC_ON_GRACE_MS) {
+        // v3.11.2 — Houve confirmacao de ON ha < 30s; o bit=0 atual e provavelmente
+        // espontaneo transitorio (latencia de radio / leitura intermediaria).
+        // NAO mexer em desired_running — preserva intencao do operador.
+        pushLog(
+          "warn",
+          "system",
+          `[STARTUP SYNC] Sinal espontaneo 0 ignorado para eq ${_eqKey.substring(0,8)} — comando Ligar confirmado ha ${Math.round(_ageMs/1000)}s`,
+        );
+      } else {
+        originForRpc = "remote-desired";
+        try {
+          if (resolvedEqId) {
+            await withCloudTimeout(
+              supabase
+                .from("equipments")
+                .update({ desired_running: realRunning })
+                .eq("id", resolvedEqId),
+              "startup-sync update desired",
+              CLOUD_WRITE_TIMEOUT_MS,
+            );
+            pushLog(
+              "info",
+              "system",
+              `[STARTUP SYNC] eq ${String(resolvedEqId).substring(0,8)} sincronizado: desired_running=${realRunning} (estado real do PLC)`,
+            );
+          }
+        } catch (e) {
+          pushLog("warn", "cloud", `[STARTUP SYNC] update desired falhou: ${e.message}`);
+        }
+      }
+    }
+    else if (divergedFromDesired) {
+      // v3.25.11: Acionamento local SEMPRE PREVALECE e vira o novo desired_running.
+      // Unifica o antigo ramo "local puro" (que só setava origin='local', sem tocar
+      // no desired) com o LOCAL OVERRIDE (v3.25.5). O local puro deixava
+      // desired_running STALE no banco → a RPC de polling (que espelha desired_running
+      // direto da tabela equipments) regerava o frame antigo → TX de reforço → loop
+      // infinito. Agora, QUALQUER atuação local divergente atualiza
+      // desired_running=estado real no banco e cancela comandos/pollings stale,
+      // parando o loop. (Cobre também o caso antigo com safety/comando/expiry.)
       originForRpc = "local";
+      const _stateBit = extractStateBit(rawPayload);
+      const realRunning = _stateBit === "1";
+      const reason = safetyArmedForFrame
+        ? "safety cancelado"
+        : pendingCommandActive
+          ? "comando pendente cancelado"
+          : recentSafetyExpiry
+            ? "safety-expiry ignorado"
+            : "acionamento local";
+      pushLog(
+        "warn",
+        "system",
+        `[LOCAL OVERRIDE] RX ${rawPayload} acionamento local aceito (${reason}) para eq ${String(resolvedEqId || "").substring(0, 8)} — desired_running → ${realRunning}`,
+      );
+
+      // 1) Cancelar safety timer + reforço TX (clearSafetyTimer já chama clearManualReinforcements)
+      if (resolvedEqId) {
+        if (safetyArmedForFrame) {
+          clearSafetyTimer(String(resolvedEqId), `Acionamento local detectado (RX=${rawPayload})`);
+        } else {
+          clearManualReinforcements(String(resolvedEqId), "Acionamento local detectado");
+        }
+      }
+
+      // 2) Atualizar desired_running para refletir o estado real do PLC
+      if (resolvedEqId) {
+        try {
+          await withCloudTimeout(
+            supabase
+              .from("equipments")
+              .update({ desired_running: realRunning })
+              .eq("id", resolvedEqId),
+            "local-override update desired",
+            CLOUD_WRITE_TIMEOUT_MS,
+          );
+        } catch (e) {
+          pushLog("warn", "cloud", `[LOCAL OVERRIDE] update desired falhou: ${e.message}`);
+        }
+
+        // 3) Cancelar comandos pendentes/enviados para este equipamento
+        try {
+          await withCloudTimeout(
+            supabase
+              .from("commands")
+              .update({
+                status: "cancelled",
+                error_message: "Cancelado por acionamento local",
+                responded_at: new Date().toISOString(),
+              })
+              .eq("farm_id", farmId)
+              .eq("equipment_id", resolvedEqId)
+              .in("status", ["pending", "sent"]),
+            "local-override cancel commands",
+            CLOUD_WRITE_TIMEOUT_MS,
+          );
+        } catch (e) {
+          pushLog("warn", "cloud", `[LOCAL OVERRIDE] cancel commands falhou: ${e.message}`);
+        }
+
+        // 4) Cancelar pollings pendentes/enviados para este TSNN (frame stale com payload antigo)
+        try {
+          await withCloudTimeout(
+            supabase
+              .from("commands")
+              .update({
+                status: "cancelled",
+                error_message: "Polling cancelado: acionamento local alterou desired_running",
+                responded_at: new Date().toISOString(),
+              })
+              .eq("farm_id", farmId)
+              .eq("type", "polling")
+              .ilike("frame", `%${tsnn}%`)
+              .in("status", ["pending", "sent"]),
+            "local-override cancel stale polling",
+            CLOUD_WRITE_TIMEOUT_MS,
+          );
+        } catch (e) {
+          pushLog("warn", "cloud", `[LOCAL OVERRIDE] cancel polling falhou: ${e.message}`);
+        }
+      }
     }
-    else if (divergedFromDesired && !safetyArmedForFrame && !pendingCommandActive && !recentSafetyExpiry) originForRpc = "local";
-    else if (divergedFromDesired && safetyArmedForFrame) {
-      pushLog("warn", "system", `RX ${rawPayload} ignorado como acionamento local: safety timer ainda armado para ${tsnn}`);
-    }
-    else if (divergedFromDesired && pendingCommandActive) {
-      pushLog("warn", "system", `RX ${rawPayload} ignorado como acionamento local: comando pendente para eq ${String(resolvedEqId || "").substring(0, 8)}`);
-    }
-    else if (divergedFromDesired && recentSafetyExpiry) {
-      pushLog("warn", "system", `RX ${rawPayload} ignorado como acionamento local: safety expirou há menos de ${Math.round(SAFETY_LOCAL_SUPPRESS_MS / 1000)}s`);
-    }
+
 
     const { data: updatedId, error } = await withCloudTimeout(
       supabase.rpc("apply_pump_telemetry", {
@@ -2184,6 +2642,11 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       CLOUD_TELEMETRY_TIMEOUT_MS,
     );
     if (error || !updatedId) throw (error || new Error("espontaneo sem equipamento correspondente"));
+
+    // v3.25.10: espontâneo processado com sucesso → estado da PLC conhecido. Marca
+    // para que o startup-sync não intercepte espontâneos seguintes desta PLC (o
+    // primeiro espontâneo ainda usou o startup-sync acima, se aplicável).
+    markStartupSyncDone(tsnn);
 
     const originLocal = originForRpc === "local";
 
@@ -2275,6 +2738,7 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
     return true;
   } catch (e) {
     pushLog("warn", "cloud", `Espontaneo IMEDIATO falhou (${e.message}); caindo para fila normal`);
+    noteCloudError(e, "handleSpontaneousImmediate");
     return false;
   }
 }
@@ -2343,6 +2807,7 @@ async function queueTelemetry(tsnn, rawPayload, rxFrame, commandId) {
     }
   } catch (e) {
     pushLog("warn", "cloud", `Telemetria IMEDIATA falhou (${e.message}); tentando retry em 2s`);
+    noteCloudError(e, "queueTelemetry-immediate");
   }
   // Tentativa 2: retry agendado (2s)
   setTimeout(async () => {
@@ -2374,6 +2839,7 @@ async function queueTelemetry(tsnn, rawPayload, rxFrame, commandId) {
         telemetryQueue.splice(0, telemetryQueue.length - TELEMETRY_QUEUE_MAX);
       }
       pushLog("warn", "cloud", `Telemetria em fila apos 2 tentativas (${telemetryQueue.length}): ${e.message}`, null, `Telemetria em fila local (${telemetryQueue.length}). Comunicação via rádio continua normal.`);
+      noteCloudError(e, "queueTelemetry-retry");
       void flushTelemetryQueue();
     }
   }, 2000);
@@ -2410,6 +2876,7 @@ async function flushTelemetryQueue() {
       telemetryWarnAt = Date.now() + 60_000;
       pushLog("warn", "cloud", `Telemetria em fila (${telemetryQueue.length}); nuvem indisponível/lenta: ${e.message}`, null, `Telemetria em fila local (${telemetryQueue.length}). Comunicação via rádio continua normal.`);
     }
+    noteCloudError(e, "flushTelemetryQueue");
   } finally {
     telemetryFlushInFlight = false;
   }
@@ -2420,6 +2887,8 @@ async function flushTelemetryQueue() {
 // nao tem sufixo de nivel ou se nao ha equipamento de nivel cadastrado.
 async function processLevelReadings(rawFrame, plcHwId) {
   if (!supabase || !farmId || !rawFrame || !plcHwId) return;
+  const tsnn = String(plcHwId || "").trim().toUpperCase().substring(0, 4);
+  const hasFlow = flowEquipByTsnn.has(tsnn);
   RX_LEVEL_RE.lastIndex = 0;
   let m;
   const seen = new Set();
@@ -2429,6 +2898,11 @@ async function processLevelReadings(rawFrame, plcHwId) {
     if (!Number.isFinite(sensorIndex) || !Number.isFinite(rawValue)) continue;
     if (seen.has(sensorIndex)) continue; // dedup por frame
     seen.add(sensorIndex);
+    // Se este TSNN tem equipamento com vazao_mode='real', N2 = totalizador e N3 = vazao instantanea:
+    // ambos sao tratados por processFlowReadings, NAO devem ir para apply_level_telemetry.
+    if (hasFlow && (sensorIndex === 2 || sensorIndex === 3)) continue;
+    // N3 sem contexto de vazao nao existe no protocolo antigo — ignora.
+    if (sensorIndex === 3) continue;
     try {
       await withCloudTimeout(
         supabase.rpc("apply_level_telemetry", {
@@ -2446,6 +2920,557 @@ async function processLevelReadings(rawFrame, plcHwId) {
       pushLog("warn", "cloud", `Nivel N${sensorIndex} PLC ${plcHwId} falhou: ${e.message}`);
     }
   }
+}
+
+// ============================================================================
+// INFRA DE VAZAO (N2 = totalizador m3, N3 = vazao instantanea x10)
+// ----------------------------------------------------------------------------
+// Fluxo: frame RX -> processFlowReadings -> grava flow_total_m3 / flow_rate_m3h
+// no equipments (do equipamento com vazao_mode='real' daquele TSNN).
+//
+// Reset (RV): frontend seta equipments.vazao_reset_pending=true OU o scheduler
+// de meia-noite marca todos os TSNN 'real'. checkRemoteResetPending() (chamado
+// no inicio de cada polling) copia isso para pendingVazaoResetByTsnn. Antes de
+// enviar o frame de polling, maybeInjectVazaoReset() reescreve `{PAYLOAD}` como
+// `{PAYLOADRV}` e remove do Map — o firmware zera o contador ao ler RV.
+// ============================================================================
+const pendingVazaoResetByTsnn = new Map(); // TSNN -> true (aguardando envio RV)
+const lastN2ByTsnn = new Map();            // TSNN -> { value: number, at: number }
+// Acumulador do dia por TSNN: soma de TODOS os segmentos já encerrados (resets)
+// do dia corrente. O consumo do dia em qualquer instante =
+//   dayAccum.accum + lastRawN2 (leitura atual do firmware pós último reset).
+// O sistema é a memória — a placa pode ser zerada N vezes no mesmo dia.
+const flowDayAccumByTsnn = new Map();      // TSNN -> { date: "YYYY-MM-DD", accum: number }
+let midnightResetTimer = null;
+
+// Handlers RX temporários usados pela sequência de meia-noite (v3.25.4).
+// Quando presente para um TSNN, processFlowReadings encaminha a leitura ao
+// handler e NÃO aplica o fluxo normal de acumulação/DB writes (a sequência
+// cuida da persistência sozinha, para evitar corrida com virada de dia).
+const midnightRxHandlers = new Map(); // TSNN -> (rxData) => void
+let midnightSequenceActive = false;
+
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function yesterdayStr() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function processFlowReadings(rawFrame, plcHwId) {
+  if (!supabase || !farmId || !rawFrame || !plcHwId) return;
+  const tsnn = String(plcHwId || "").trim().toUpperCase().substring(0, 4);
+  const eq = flowEquipByTsnn.get(tsnn);
+  if (!eq) return; // nenhum equipamento com vazao_mode='real' para este PLC
+
+  // Extrai N2 e N3 do frame.
+  RX_LEVEL_RE.lastIndex = 0;
+  let m;
+  let rawN2 = null;
+  let rawN3 = null;
+  const seen = new Set();
+  while ((m = RX_LEVEL_RE.exec(rawFrame)) !== null) {
+    const idx = parseInt(m[1], 10);
+    const val = parseInt(m[2], 10);
+    if (!Number.isFinite(idx) || !Number.isFinite(val)) continue;
+    if (seen.has(idx)) continue;
+    seen.add(idx);
+    if (idx === 2) rawN2 = val;
+    else if (idx === 3) rawN3 = val;
+  }
+
+  // Detecta confirmação de reset (RV) na resposta do firmware.
+  // Frame padrão: ..._[TSNN_0_]{0}_N1..._N2..._N3..._[TSNN_ETX_]
+  // Frame com confirmação: ..._[TSNN_0_]{0RV}_N1..._N2..._N3..._[TSNN_ETX_]
+  const RX_RESET_CONFIRM_RE = /\{[01]*RV\}/;
+  const resetConfirmed = RX_RESET_CONFIRM_RE.test(rawFrame);
+
+  // Interceptor da sequência de meia-noite (v3.25.4). Se há um handler
+  // registrado para este TSNN, entrega os dados extraídos e curto-circuita
+  // o fluxo normal (a sequência persistirá em daily_consumption/equipments).
+  {
+    const handler = midnightRxHandlers.get(tsnn);
+    if (handler) {
+      try { handler({ tsnn, n2: rawN2, n3: rawN3, rvConfirmed: resetConfirmed }); }
+      catch (e) { pushLog("warn", "system", `[VAZAO-MIDNIGHT] handler TSNN ${tsnn} erro: ${e.message}`); }
+      return;
+    }
+  }
+
+  // --- Reset confirmado pelo firmware (RV na resposta) ---
+  // NÃO fecha o dia. Apenas soma o segmento (lastRawN2) ao acumulador do dia
+  // e zera a última leitura. O dia continua acumulando normalmente.
+  if (resetConfirmed) {
+    try {
+      const today = todayStr();
+      const lastEntry = lastN2ByTsnn.get(tsnn);
+      const lastRawN2 = lastEntry ? lastEntry.value : 0;
+      let dayAccum = flowDayAccumByTsnn.get(tsnn);
+      if (!dayAccum || dayAccum.date !== today) {
+        dayAccum = { date: today, accum: 0 };
+        flowDayAccumByTsnn.set(tsnn, dayAccum);
+      }
+      dayAccum.accum += Math.max(0, lastRawN2);
+      lastN2ByTsnn.set(tsnn, { value: 0, at: Date.now() });
+
+      // flow_total_m3 = consumo do dia (parcial pós-reset = 0, então = accum).
+      try {
+        await withCloudTimeout(
+          supabase.from("equipments").update({ flow_total_m3: dayAccum.accum }).eq("id", eq.id),
+          "flow RV reset update",
+          CLOUD_TELEMETRY_TIMEOUT_MS,
+        );
+        eq.flow_total_m3 = dayAccum.accum;
+      } catch (e) {
+        pushLog("warn", "cloud", `[VAZAO] flow_total_m3 update pós-RV falhou: ${e.message}`);
+      }
+      pushLog("info", "system",
+        `[VAZAO] Reset CONFIRMADO pelo firmware TSNN ${tsnn}: +${lastRawN2} m3 ao dia (accum_dia=${dayAccum.accum})`);
+    } catch (e) {
+      pushLog("warn", "system", `[VAZAO] tratamento RV TSNN ${tsnn} falhou: ${e.message}`);
+    }
+  }
+
+  // --- N2: totalizador com acumulador diário e detecção de reset (fallback) ---
+  // Só processa N2 como leitura normal quando NÃO houve confirmação RV neste frame
+  // (na resposta com RV o firmware envia N2=0, que já foi tratado acima).
+  if (rawN2 !== null && !resetConfirmed) {
+    try {
+      const today = todayStr();
+      const lastEntry = lastN2ByTsnn.get(tsnn);
+      const lastRawN2 = lastEntry ? lastEntry.value : 0;
+
+      let dayAccum = flowDayAccumByTsnn.get(tsnn);
+
+      // Virada de dia: fecha o dia anterior em daily_consumption
+      // com o total real (accum + lastRawN2, que era o último segmento aberto).
+      if (dayAccum && dayAccum.date !== today) {
+        const consumoDiaAnterior = dayAccum.accum + Math.max(0, lastRawN2);
+        if (consumoDiaAnterior > 0) {
+          try {
+            await supabase.from("daily_consumption").upsert(
+              {
+                farm_id: farmId,
+                equipment_id: eq.id,
+                date: dayAccum.date,
+                total_m3: consumoDiaAnterior,
+                mode: "real",
+              },
+              { onConflict: "equipment_id,date" },
+            );
+            pushLog("info", "system",
+              `[VAZAO] Dia ${dayAccum.date} fechado (rollover): ${consumoDiaAnterior} m3 (TSNN ${tsnn})`);
+          } catch (e) {
+            pushLog("warn", "system", `[VAZAO] upsert daily_consumption (rollover) falhou: ${e.message}`);
+          }
+        }
+        dayAccum = null;
+      }
+
+      if (!dayAccum) {
+        dayAccum = { date: today, accum: 0 };
+        flowDayAccumByTsnn.set(tsnn, dayAccum);
+      }
+
+      // Fallback (firmware antigo sem confirmação RV): rawN2 caiu -> soma o
+      // segmento anterior ao acumulador do dia. Firmware novo já tratou via RV.
+      if (rawN2 < lastRawN2 && lastRawN2 > 0) {
+        dayAccum.accum += lastRawN2;
+        pushLog("info", "system",
+          `[VAZAO] Reset detectado por queda TSNN ${tsnn}: +${lastRawN2} m3 ao dia (accum_dia=${dayAccum.accum})`);
+      }
+
+      lastN2ByTsnn.set(tsnn, { value: rawN2, at: Date.now() });
+      const consumoDia = dayAccum.accum + rawN2;
+
+      await withCloudTimeout(
+        supabase.from("equipments").update({ flow_total_m3: consumoDia }).eq("id", eq.id),
+        "flow N2 update",
+        CLOUD_TELEMETRY_TIMEOUT_MS,
+      );
+      eq.flow_total_m3 = consumoDia;
+      pushLog("info", "cloud",
+        `[VAZAO] PLC ${plcHwId}: raw=${rawN2}, accum_dia=${dayAccum.accum}, total_dia=${consumoDia} m3`, null, null);
+    } catch (e) {
+      pushLog("warn", "cloud", `[VAZAO] N2 update PLC ${plcHwId} falhou: ${e.message}`);
+    }
+  }
+
+  // --- N3: vazao instantanea (rawValue / 10) ---
+  // Não processa quando o frame é confirmação de RV (dados de N2/N3 desse frame
+  // são descartados; próximas leituras retomam normalmente).
+  if (rawN3 !== null && !resetConfirmed) {
+    try {
+      const flowRate = rawN3 / 10.0;
+      await withCloudTimeout(
+        supabase.from("equipments").update({ flow_rate_m3h: flowRate }).eq("id", eq.id),
+        "flow N3 update",
+        CLOUD_TELEMETRY_TIMEOUT_MS,
+      );
+      pushLog("info", "cloud",
+        `[VAZAO] PLC ${plcHwId}: vazao_instantanea=${flowRate.toFixed(1)} m3/h`, null, null);
+    } catch (e) {
+      pushLog("warn", "cloud", `[VAZAO] N3 update PLC ${plcHwId} falhou: ${e.message}`);
+    }
+  }
+}
+
+// Marca todos os TSNN com vazao_mode='real' como pendentes de RV (reset físico
+// no firmware). Executado por scheduleMidnightReset() e pode ser chamado
+// manualmente a partir de fluxos administrativos.
+function markAllFlowRealForReset(reason) {
+  let count = 0;
+  for (const tsnn of flowEquipByTsnn.keys()) {
+    pendingVazaoResetByTsnn.set(tsnn, true);
+    count++;
+  }
+  if (count > 0) {
+    pushLog("info", "system",
+      `[VAZAO] ${count} TSNN marcados para RV (${reason || "midnight"})`);
+  }
+  return count;
+}
+
+// Agenda um disparo para 00:00:05 local do próximo dia, marcando todos os
+// equipamentos com vazao_mode='real' para receber RV no próximo polling.
+// Reagenda automaticamente após o disparo.
+function scheduleMidnightReset() {
+  if (midnightResetTimer) {
+    clearTimeout(midnightResetTimer);
+    midnightResetTimer = null;
+  }
+  const now = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5, 0);
+  const delayMs = Math.max(1_000, next.getTime() - now.getTime());
+  midnightResetTimer = setTimeout(async () => {
+    try {
+      try { await refreshEquipmentCache(); } catch (_) {}
+      // v3.25.4: janela de meia-noite (00:00–01:00) — cada TSNN 'real' tem até
+      // 3 tentativas (00:00:05, 00:20, 00:40) de fechar+resetar. Falhando as
+      // 3, força fechamento com o último valor conhecido e delega o RV ao
+      // próximo polling normal (fallback por queda cobre firmwares antigos).
+      startMidnightWindow();
+    } catch (e) {
+      pushLog("warn", "system", `[VAZAO] scheduleMidnightReset disparo falhou: ${e.message}`);
+    } finally {
+      scheduleMidnightReset(); // reagenda para a próxima meia-noite
+    }
+  }, delayMs);
+  pushLog("info", "system",
+    `[VAZAO] Reset de meia-noite agendado em ${Math.round(delayMs / 1000)}s (${next.toISOString()})`);
+}
+
+// Fecha o dia corrente para todos os TSNN com vazao_mode='real':
+// grava daily_consumption = dayAccum.accum + lastRawN2 (todos os segmentos)
+// e reinicia o acumulador para o novo dia.
+async function closeAllFlowDays(reason) {
+  for (const [tsnn, dayAccum] of flowDayAccumByTsnn.entries()) {
+    const eq = flowEquipByTsnn.get(tsnn);
+    if (!eq) continue;
+    const lastEntry = lastN2ByTsnn.get(tsnn);
+    const lastRawN2 = lastEntry ? lastEntry.value : 0;
+    const consumoDia = dayAccum.accum + Math.max(0, lastRawN2);
+    if (consumoDia > 0) {
+      try {
+        await supabase.from("daily_consumption").upsert(
+          {
+            farm_id: farmId,
+            equipment_id: eq.id,
+            date: dayAccum.date,
+            total_m3: consumoDia,
+            mode: "real",
+          },
+          { onConflict: "equipment_id,date" },
+        );
+        pushLog("info", "system",
+          `[VAZAO] Dia ${dayAccum.date} fechado (${reason}): ${consumoDia} m3 (TSNN ${tsnn})`);
+      } catch (e) {
+        pushLog("warn", "system",
+          `[VAZAO] fechamento diário TSNN ${tsnn} falhou: ${e.message}`);
+      }
+    }
+    // Novo dia começa zerado; lastRawN2 também reseta pois o firmware receberá RV.
+    flowDayAccumByTsnn.set(tsnn, { date: todayStr(), accum: 0 });
+    lastN2ByTsnn.set(tsnn, { value: 0, at: Date.now() });
+    try {
+      await supabase.from("equipments").update({ flow_total_m3: 0 }).eq("id", eq.id);
+      eq.flow_total_m3 = 0;
+    } catch (_) {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sequência de meia-noite (v3.25.4)
+// ---------------------------------------------------------------------------
+// Substitui closeAllFlowDays()+markAllFlowRealForReset() por um fluxo síncrono
+// por equipamento que elimina a janela entre "última leitura" e "RV":
+//   1) sendAndWaitResponse com polling normal (sem RV) — captura N2 final;
+//      grava daily_consumption com data de ONTEM (dayAccum.date).
+//   2) sendAndWaitResponse com RV (retry 0/6/12/18s, timeout 5s cada) — se
+//      confirmado, o handler já contabilizou; se não, marca pendingVazaoReset
+//      para o próximo polling do dia seguinte.
+//   3) Reinicia flowDayAccumByTsnn/lastN2ByTsnn para hoje.
+// Polling normal é pausado (midnightSequenceActive) enquanto executa.
+function buildMidnightPollingFrame(tsnn, withRV) {
+  // Frame padrão de polling: [TSNN_1_]{0}[TSNN_ETX_]\r
+  // No polling real o payload reflete o estado das saídas do PLC; aqui a
+  // sequência não altera relés — pede apenas leitura de contadores. `{0}` é
+  // aceito pelo firmware como "consulta sem transição" (assim como no polling
+  // normal, cujo payload é substituído pelo firmware conforme estado atual).
+  const payload = withRV ? "0RV" : "0";
+  return `[${tsnn}_1_]{${payload}}[${tsnn}_ETX_]\r`;
+}
+
+async function sendAndWaitFlowResponse(tsnn, frame, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      midnightRxHandlers.delete(tsnn);
+      clearTimeout(t);
+      resolve(val);
+    };
+    midnightRxHandlers.set(tsnn, (rx) => finish(rx));
+    const t = setTimeout(() => finish(null), timeoutMs);
+    try {
+      sendTxFrame(frame, { priority: "reset" });
+    } catch (e) {
+      pushLog("warn", "serial", `[VAZAO-MIDNIGHT] sendTxFrame TSNN ${tsnn}: ${e.message}`);
+      finish(null);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Janela de meia-noite (00:00 → 01:00) com até 3 tentativas por TSNN.
+// ---------------------------------------------------------------------------
+// A cada disparo (00:00:05, 00:20:00, 00:40:00 após meia-noite) o agente tenta:
+//   1) polling normal (`{0}`) — capturar N2 final;
+//   2) polling com RV + 4 sub-retries (0/6/12/18s) — confirmar reset físico.
+// Sucesso = RV CONFIRMADO. Isso grava daily_consumption com data de ontem,
+// zera flow_total_m3 e reinicia flowDayAccumByTsnn para o dia novo.
+// Se as 3 tentativas falharem, o agente força o fechamento com o último N2
+// conhecido e marca pendingVazaoResetByTsnn para tentar RV no próximo polling.
+//
+// Durante a janela, o polling normal dos DEMAIS equipamentos segue funcionando
+// (a sequência não é global — cada TSNN 'real' tem seu próprio mutex).
+const MIDNIGHT_ATTEMPT_OFFSETS_MS = [0, 20 * 60 * 1000, 40 * 60 * 1000];
+const midnightBusyByTsnn = new Set(); // mutex por TSNN (evita reentrada)
+
+function startMidnightWindow() {
+  if (!supabase || !farmId) return;
+  const entries = Array.from(flowEquipByTsnn.entries());
+  if (entries.length === 0) {
+    pushLog("info", "system", "[VAZAO-MIDNIGHT] Nenhum TSNN com vazao_mode=real; nada a fazer.");
+    return;
+  }
+  pushLog("info", "system",
+    `[VAZAO-MIDNIGHT] Janela aberta para ${entries.length} TSNN(s) — 3 tentativas até 01:00.`);
+  for (const [tsnn] of entries) {
+    // date de fechamento: a data do accum atual (deve ser "ontem" às 00:00:05)
+    // é congelada aqui para não sofrer mutação por RX intercalado.
+    const dayAccum = flowDayAccumByTsnn.get(tsnn);
+    const closeDate = dayAccum && dayAccum.date !== todayStr() ? dayAccum.date : yesterdayStr();
+    scheduleMidnightAttempts(tsnn, closeDate);
+  }
+}
+
+function scheduleMidnightAttempts(tsnn, closeDate) {
+  const startedAt = Date.now();
+  const runAttempt = async (attemptIdx) => {
+    if (midnightBusyByTsnn.has(tsnn)) {
+      pushLog("warn", "system",
+        `[VAZAO-MIDNIGHT] TSNN ${tsnn}: tentativa ${attemptIdx + 1} pulada (mutex ocupado).`);
+      return scheduleNext(attemptIdx, false);
+    }
+    midnightBusyByTsnn.add(tsnn);
+    let closed = false;
+    try {
+      closed = await runMidnightAttempt(tsnn, closeDate, attemptIdx);
+    } catch (e) {
+      pushLog("warn", "system",
+        `[VAZAO-MIDNIGHT] TSNN ${tsnn}: erro na tentativa ${attemptIdx + 1}: ${e.message}`);
+    } finally {
+      midnightBusyByTsnn.delete(tsnn);
+    }
+    scheduleNext(attemptIdx, closed);
+  };
+  const scheduleNext = (attemptIdx, closed) => {
+    if (closed) return; // sucesso — não agenda mais
+    const nextIdx = attemptIdx + 1;
+    if (nextIdx >= MIDNIGHT_ATTEMPT_OFFSETS_MS.length) {
+      // Última falhou — força fechamento com último valor conhecido.
+      void forceCloseMidnight(tsnn, closeDate);
+      return;
+    }
+    const targetAt = startedAt + MIDNIGHT_ATTEMPT_OFFSETS_MS[nextIdx];
+    const delay = Math.max(1_000, targetAt - Date.now());
+    setTimeout(() => { void runAttempt(nextIdx); }, delay);
+    pushLog("info", "system",
+      `[VAZAO-MIDNIGHT] TSNN ${tsnn}: próxima tentativa em ${Math.round(delay / 1000)}s`);
+  };
+  // Primeira tentativa imediata (o próprio scheduleMidnightReset já disparou às 00:00:05).
+  void runAttempt(0);
+}
+
+// Executa UMA tentativa: polling normal → RV com 4 sub-retries.
+// Retorna true se RV foi confirmado (dia fechado com valor real).
+async function runMidnightAttempt(tsnn, closeDate, attemptIdx) {
+  const eq = flowEquipByTsnn.get(tsnn);
+  if (!eq) return false;
+  pushLog("info", "system",
+    `[VAZAO-MIDNIGHT] TSNN ${tsnn}: tentativa ${attemptIdx + 1}/3 iniciando.`);
+
+  // PASSO 1 — polling normal
+  const rxNormal = await sendAndWaitFlowResponse(
+    tsnn, buildMidnightPollingFrame(tsnn, false), 5000,
+  );
+  let n2Captured = null;
+  if (rxNormal && Number.isFinite(rxNormal.n2)) {
+    n2Captured = Math.max(0, rxNormal.n2);
+    // Atualiza cache local — o handler intercepta e não deixa o processFlow
+    // normal atualizar lastN2ByTsnn, então fazemos aqui.
+    lastN2ByTsnn.set(tsnn, { value: n2Captured, at: Date.now() });
+  } else {
+    pushLog("warn", "system",
+      `[VAZAO-MIDNIGHT] TSNN ${tsnn}: sem resposta ao polling normal (tent ${attemptIdx + 1}).`);
+    return false; // sem N2 real e sem RV — não fecha; próxima tentativa
+  }
+
+  // PASSO 2 — RV com sub-retries 0/6/12/18s
+  const subDelays = [0, 6000, 6000, 6000];
+  let resetConfirmed = false;
+  for (let sub = 0; sub < subDelays.length; sub++) {
+    if (subDelays[sub] > 0) await sleep(subDelays[sub]);
+    const rxRV = await sendAndWaitFlowResponse(
+      tsnn, buildMidnightPollingFrame(tsnn, true), 5000,
+    );
+    if (rxRV && rxRV.rvConfirmed) {
+      resetConfirmed = true;
+      pushLog("info", "system",
+        `[VAZAO-MIDNIGHT] TSNN ${tsnn}: RV CONFIRMADO (tent ${attemptIdx + 1}, sub ${sub + 1}/4).`);
+      break;
+    }
+    pushLog("warn", "system",
+      `[VAZAO-MIDNIGHT] TSNN ${tsnn}: RV sem confirmação (tent ${attemptIdx + 1}, sub ${sub + 1}/4).`);
+  }
+
+  if (!resetConfirmed) return false;
+
+  // Sucesso — fecha o dia com n2Captured + accum e reinicia.
+  const dayAccum = flowDayAccumByTsnn.get(tsnn) || { date: closeDate, accum: 0 };
+  const consumoDia = Math.max(0, dayAccum.accum) + n2Captured;
+  await persistDailyConsumption(eq.id, closeDate, consumoDia,
+    `dia fechado (tent ${attemptIdx + 1}) accum=${dayAccum.accum} n2=${n2Captured}`);
+  await resetFlowDayForTsnn(tsnn, eq);
+  return true;
+}
+
+// Fechamento forçado após 3 tentativas falhas: usa último N2 conhecido +
+// accum e delega o RV ao próximo polling normal (pendingVazaoResetByTsnn).
+async function forceCloseMidnight(tsnn, closeDate) {
+  const eq = flowEquipByTsnn.get(tsnn);
+  if (!eq) return;
+  const dayAccum = flowDayAccumByTsnn.get(tsnn) || { date: closeDate, accum: 0 };
+  const lastEntry = lastN2ByTsnn.get(tsnn);
+  const lastN2 = lastEntry ? Math.max(0, lastEntry.value) : 0;
+  const consumoDia = Math.max(0, dayAccum.accum) + lastN2;
+  pushLog("error", "system",
+    `[VAZAO-MIDNIGHT] TSNN ${tsnn}: 3 tentativas falharam — fechamento forçado com último valor (${consumoDia} m3). RV delegado ao próximo polling.`);
+  await persistDailyConsumption(eq.id, closeDate, consumoDia, "fechamento forçado (3 falhas)");
+  pendingVazaoResetByTsnn.set(tsnn, true);
+  await resetFlowDayForTsnn(tsnn, eq);
+}
+
+async function persistDailyConsumption(equipmentId, date, totalM3, reason) {
+  if (totalM3 <= 0) return;
+  try {
+    await supabase.from("daily_consumption").upsert(
+      { farm_id: farmId, equipment_id: equipmentId, date, total_m3: totalM3, mode: "real" },
+      { onConflict: "equipment_id,date" },
+    );
+    pushLog("info", "system",
+      `[VAZAO-MIDNIGHT] daily_consumption ${date} = ${totalM3} m3 (${reason})`);
+  } catch (e) {
+    pushLog("warn", "system",
+      `[VAZAO-MIDNIGHT] upsert daily_consumption falhou: ${e.message}`);
+  }
+}
+
+async function resetFlowDayForTsnn(tsnn, eq) {
+  flowDayAccumByTsnn.set(tsnn, { date: todayStr(), accum: 0 });
+  lastN2ByTsnn.set(tsnn, { value: 0, at: Date.now() });
+  try {
+    await supabase.from("equipments").update({ flow_total_m3: 0 }).eq("id", eq.id);
+    eq.flow_total_m3 = 0;
+  } catch (_) {}
+}
+
+
+
+
+
+// Consulta equipments.vazao_reset_pending=true e transfere para o Map local,
+// limpando a flag no banco em seguida. Chamado no início de cada ciclo de polling.
+async function checkRemoteResetPending() {
+  if (!supabase || !farmId) return;
+  try {
+    const { data: eqs, error } = await supabase
+      .from("equipments")
+      .select("id, hw_id")
+      .eq("farm_id", farmId)
+      .eq("vazao_mode", "real")
+      .eq("vazao_reset_pending", true);
+    if (error) {
+      pushLog("debug", "system", `[VAZAO] checkRemoteResetPending query erro: ${error.message}`);
+      return;
+    }
+    if (!eqs || eqs.length === 0) return;
+    for (const eq of eqs) {
+      const hw = String(eq.hw_id || "").trim().toUpperCase();
+      const tsnn = hw.length >= 4 ? hw.substring(0, 4) : hw;
+      if (tsnn) {
+        pendingVazaoResetByTsnn.set(tsnn, true);
+        pushLog("info", "system", `[VAZAO] Reset remoto pendente detectado para TSNN ${tsnn}`);
+      }
+      try {
+        await supabase.from("equipments").update({ vazao_reset_pending: false }).eq("id", eq.id);
+      } catch (e) {
+        pushLog("warn", "system", `[VAZAO] limpeza da flag vazao_reset_pending falhou: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    pushLog("warn", "system", `[VAZAO] checkRemoteResetPending falhou: ${e.message}`);
+  }
+}
+
+// Se houver reset pendente para o TSNN deste frame, reescreve `{PAYLOAD}` como
+// `{PAYLOADRV}` para que o firmware zere o contador físico ao processar.
+// Retorna o frame (possivelmente modificado). Remove o TSNN do Map após injeção.
+function maybeInjectVazaoReset(frame, tsnn) {
+  if (!frame || !tsnn) return frame;
+  const key = String(tsnn).toUpperCase();
+  if (!pendingVazaoResetByTsnn.has(key)) return frame;
+  // Só injeta em frame de polling/comando comum `[TSNN_1_]{PAYLOAD}...`.
+  const m = String(frame).match(/\{([01]{1,6})(RV)?\}/);
+  if (!m || m[2]) {
+    // Sem payload posicional ou já tem RV — não mexe, mas mantém a marca para
+    // a próxima oportunidade de envio.
+    return frame;
+  }
+  const newFrame = frame.replace(/\{([01]{1,6})\}/, `{$1RV}`);
+  pendingVazaoResetByTsnn.delete(key);
+  pushLog("info", "system", `[VAZAO] RV injetado no polling de TSNN ${key}`);
+  return newFrame;
 }
 
 function markBridgeAlive() {
@@ -2576,11 +3601,11 @@ function handleRxFrame(frame) {
   //    Formato: _[TSNN_<TAG>_]{PAYLOAD}
   //    Se ha um inflightCmd do tipo 'config' aguardando resposta deste TSNN,
   //    confirmamos AQUI e marcamos o comando como 'executed' na nuvem.
-  const cfgMatch = parseCfgResponseFrame(frame);
+  const cfgMatch = frame.match(RX_CFG_RESP_RE);
   if (cfgMatch) {
-    const rxTsnn = cfgMatch.rxTsnn;
-    const rxTag  = cfgMatch.rxTag;
-    const rxPayload = cfgMatch.rxPayload;
+    const rxTsnn = String(cfgMatch[1] || "").toUpperCase();
+    const rxTag  = cfgMatch[2];
+    const rxPayload = cfgMatch[3];
 
     const expectedCfgTsnn = inflightCmd ? (inflightTsnn || extractCommandTsnn(inflightCmd.frame)) : null;
     const matchesExpectedTsnn = expectedCfgTsnn === rxTsnn || isSetIdAckForNewTsnn(inflightCmd, rxTsnn, rxTag, rxPayload);
@@ -2607,13 +3632,27 @@ function handleRxFrame(frame) {
       pushLog("info", "rx", `[CFG] ${cfgLabel} recebido de ${nameForTsnn(rxTsnn)} em ${latencyMs}ms: ${frame}`, frame);
       const confirmedSetId = extractSetIdTarget(cmd);
 
-      void markCfgCommandExecuted(cmd, frame, cfgLabel, confirmedSetId);
+      supabase
+        .from("commands")
+        .update({
+          status: "executed",
+          response: frame,
+          responded_at: new Date().toISOString(),
+        })
+        .eq("id", cmd.id)
+        .then(async () => {
+          pushLog("info", "system", `cmd ${cmd.id.substring(0, 8)} -> executed (CFG ${cfgLabel})`, null, null);
+          if (confirmedSetId) await syncConfirmedSetId(cmd, confirmedSetId);
+          consecutiveTimeouts = 0;
+          processing = false;
+          // pega o proximo da fila imediatamente
+          setTimeout(() => { void processNextCommand(); }, 10);
+        });
       return;
     }
 
     // PING/STATUS/DUMP espontaneos (sem inflight casando) — apenas registra
     const cfgLabel = cfgResponseLabel(rxTag, rxPayload);
-    void tryCompleteRecentCfgCommand(rxTsnn, rxTag, rxPayload, frame);
     if (cfgLabel === "PING") {
       pushLog("info", "rx", `PING recebido de ${nameForTsnn(rxTsnn)} (sem comando aguardando)`, frame);
       return;
@@ -2658,6 +3697,21 @@ function processTelemFrame(frame) {
 
   // Backoff: qualquer RX desta PLC zera o contador de falhas consecutivas
   noteBackoffSuccess(rxTsnn);
+  // v3.25.16: prova de vida — registra o instante deste RX (espontâneo ou resposta).
+  // Usado pelo heartbeat do polling para não transmitir se a PLC já se manifestou.
+  lastRxAtByTsnn.set(String(rxTsnn), Date.now());
+
+  // v3.25.7: sequência de desligamento forçado — resolve o waiter se este RX
+  // confirma o bit alvo esperado. NÃO retorna: a telemetria continua sendo
+  // gravada normalmente (queremos registrar os estados {1} e {0}).
+  if (forcedShutdownRxWaiter && forcedShutdownRxWaiter.tsnn === rxTsnn) {
+    const w = forcedShutdownRxWaiter;
+    const rx = String(rxPayload || "");
+    if (/^[01]{1,6}$/.test(rx)) {
+      const bit = rx.length === 1 ? rx[0] : (w.targetIndex < rx.length ? rx[w.targetIndex] : null);
+      if (bit === w.wantBit) w.resolve();
+    }
+  }
 
   // Camada 1: se ha um inflightCmd aguardando OUTRO TSNN, este RX eh
   // espontaneo de outro equipamento. Processa normalmente (codigo abaixo),
@@ -2673,6 +3727,7 @@ function processTelemFrame(frame) {
 
   // Niveis (N1/N2): roda em paralelo, nao bloqueia o fluxo da bomba.
   void processLevelReadings(frame, rxTsnn);
+  void processFlowReadings(frame, rxTsnn);
 
   // CANCELAMENTO PROATIVO DO SAFETY TIMER (multi-saidas):
   // Toda resposta `_[TSNN_0_]{PAYLOAD}` carrega o estado de TODAS as saidas
@@ -2790,6 +3845,9 @@ function processTelemFrame(frame) {
     inflightCmd = null;
     inflightTsnn = null;
     recentCmdByTsnn.delete(rxTsnn);
+    // v3.25.10: RX confirmado (polling ou manual) → estado da PLC conhecido; a partir
+    // daqui o startup-sync não intercepta mais espontâneos desta PLC.
+    markStartupSyncDone(rxTsnn);
 
     // Cancela safety timer IMEDIATAMENTE se o RX confirma o estado esperado.
     // (Evita que o failsafe dispare TX OFF apos a bomba ja ter confirmado.)
@@ -2936,6 +3994,7 @@ function stopBridge() {
     stopBridgeWatchdog();
     bridgePingSentAt = 0;
     lastBridgePongAt = 0;
+    global.__lastWorkingComSaved = false;
     if (!bridgeProcess) {
       bridgeReady = false;
       resolve();
@@ -3023,6 +4082,15 @@ function startBridge(portPath) {
           if (trimmed.startsWith("RX:")) {
             markBridgeAlive();
             lastRxTimestamp = Date.now(); // anti-colisao TX
+            // v3.22.0: salva última COM funcional após primeiro RX válido
+            try {
+              if (!global.__lastWorkingComSaved) {
+                const fs2 = require("fs");
+                const lastComFile = path.join(app.getPath("userData"), "last_working_com.txt");
+                fs2.writeFileSync(lastComFile, String(portPath || comPort || ""));
+                global.__lastWorkingComSaved = true;
+              }
+            } catch (_) {}
             // Frame recebido da Serial -> processar
             handleRxFrame(trimmed.substring(3));
           } else if (trimmed === "TX_OK") {
@@ -3389,7 +4457,165 @@ async function fastPathReset(cmd) {
 }
 
 // --- Command processing ---
+// v3.25.7: constrói o frame ON a partir do frame OFF, setando apenas o bit da
+// saída alvo (targetIndex) para '1' e preservando as demais saídas. Reusa
+// TX_PAYLOAD_RE para localizar o grupo {payload} no frame. Não injeta sufixo RV.
+function buildForcedOnFrame(offFrame, targetIndex) {
+  return String(offFrame).replace(TX_PAYLOAD_RE, (match, payload) => {
+    if (targetIndex < 0 || targetIndex >= payload.length) return match;
+    const onPayload = payload.substring(0, targetIndex) + "1" + payload.substring(targetIndex + 1);
+    return match.replace(payload, onPayload);
+  });
+}
+
+// v3.25.7: sequência de desligamento forçado para bomba ligada localmente.
+// Executa UMA ÚNICA VEZ: TX {1} -> espera RX (13s) -> estabiliza (10s) -> TX {0}.
+// NÃO seta inflightCmd (evita que o matching de RX em processTelemFrame trate o
+// {1} como divergente e arme safety). NÃO agenda reforços nem safety timer — assim
+// o pessoal no campo continua podendo desligar pela botoeira. O rate-limiter
+// anti-colisão (TX_MIN_GAP_MS/RX_AVOID_GAP_MS) do processTxQueue permanece ativo.
+async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetIndex) {
+  forcedShutdownActive = true;
+  processing = true;
+  processingSince = Date.now();
+  try {
+    const onFrame = buildForcedOnFrame(offFrame, targetIndex);
+    pushLog("warn", "system",
+      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} saida=${targetIndex + 1}: bomba local -> sequência {1}->RX->${FORCED_SHUTDOWN_STABILIZE_MS}ms->{0}`);
+
+    // Passo 1: TX {1} (assume controle remoto)
+    pushLog("info", "tx", formatTxWithOrigin(cmd, onFrame, " [FORCED OFF: {1}]"), onFrame);
+    sendTxFrame(onFrame, { priority: "manual" });
+    rememberTxForTsnn(expectedTsnn, "forced-on", cmd.id, onFrame);
+    const r1 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "1", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
+    pushLog("info", "system",
+      `[FORCED OFF] {1} ${r1 === "rx" ? "confirmado pelo RX" : "sem RX no timeout — prosseguindo mesmo assim"}; estabilizando ${FORCED_SHUTDOWN_STABILIZE_MS}ms antes do {0}`);
+
+    // Passo 2: estabilização (10s) para o firmware/LoRa processar
+    await new Promise((res) => setTimeout(res, FORCED_SHUTDOWN_STABILIZE_MS));
+
+    // Passo 3: TX {0} (desliga de fato)
+    pushLog("info", "tx", formatTxWithOrigin(cmd, offFrame, " [FORCED OFF: {0}]"), offFrame);
+    sendTxFrame(offFrame, { priority: "manual" });
+    rememberTxForTsnn(expectedTsnn, "forced-off", cmd.id, offFrame);
+    const r0 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "0", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
+    pushLog(r0 === "rx" ? "info" : "warn", "system",
+      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} -> {0} ${r0 === "rx" ? "confirmado pelo RX (desligado)" : "enviado sem confirmação no timeout"}`);
+
+    // Grava o resultado no banco. Sem safety/reforço: sequência é executada uma vez.
+    try {
+      await withCloudTimeout(
+        supabase
+          .from("commands")
+          .update({
+            status: r0 === "rx" ? "executed" : "sent",
+            response: r0 === "rx" ? "(desligamento forçado confirmado)" : "(desligamento forçado enviado, sem confirmação serial)",
+            responded_at: new Date().toISOString(),
+          })
+          .eq("id", cmd.id),
+        "forced-shutdown result",
+        CLOUD_WRITE_TIMEOUT_MS,
+      );
+    } catch (e) {
+      pushLog("warn", "cloud", `[FORCED OFF] gravação do resultado falhou: ${e.message}`);
+    }
+  } catch (e) {
+    pushLog("error", "system", `[FORCED OFF] sequência falhou: ${e.message}`);
+  } finally {
+    forcedShutdownActive = false;
+    processing = false;
+    // Libera a fila e pega o próximo comando imediatamente
+    setImmediate(() => { void processNextCommand(); });
+  }
+}
+
+// v3.25.12: verifica se um frame de polling ficou STALE — se o payload não bate
+// mais com o desired_running atual dos equipamentos daquela PLC no banco (ex.: uma
+// atuação local mudou o desired_running DEPOIS deste polling ter sido enfileirado
+// pela RPC). Guard no momento do TX: fecha a corrida em que pollings antigos com
+// payload {1} continuam sendo transmitidos por ~90s mesmo após o desired virar {0}.
+// Em erro/dúvida retorna false (NÃO descarta) — segurança: nunca sumir com polling
+// por falha de query.
+// v3.25.15: mesmo quando o estado real == desired (poll "desnecessário"), ainda faz
+// UM poll de heartbeat a cada HEARTBEAT_POLL_MS para detectar PLC offline caso ela
+// não emita espontâneo. Espontâneos já atualizam last_communication; isto é o piso.
+const HEARTBEAT_POLL_MS = 3 * 60_000;
+
+// v3.25.20: decide se um polling deve ser DESCARTADO antes do TX. Retorna:
+//   "stale"       → payload não bate mais com o desired_running atual (atuação local
+//                   mudou o desired depois do enqueue) → descarta; o próximo enqueue
+//                   traz o payload correto (que bate com o estado real).
+//   "unnecessary" → estado REAL já == desired em todas as saídas E a PLC deu prova de
+//                   vida (RX) nos últimos HEARTBEAT_POLL_MS. SÓ para bombas NÃO-local.
+//   null          → transmitir.
+// v3.25.20 MUDANÇA CRÍTICA: bomba em modo LOCAL NÃO descarta polling. O INO (PLC) tem
+// watchdog de 15min — se parar de receber TX, desliga a bomba. Então em modo local o
+// agente CONTINUA polando (keep-alive) com o payload que CONFIRMA o estado (não muda
+// nada; polling não atua no relé). A migration 20260723160000 preserva
+// last_actuation_origin='local' quando o polling confirma o estado, então o badge não
+// some. Em erro/dúvida retorna null (NÃO descarta) — nunca sumir com polling.
+async function pollingSkipReason(frame, tsnn) {
+  try {
+    if (!supabase || !farmId || !tsnn) return null;
+    const payload = extractTxPayload(frame);
+    if (!payload || !/^[01]{1,6}$/.test(payload)) return null;
+    const { data, error } = await withCloudTimeout(
+      supabase
+        .from("equipments")
+        .select("saida, desired_running, last_outputs_state, last_actuation_origin")
+        .eq("farm_id", farmId)
+        .ilike("hw_id", `${String(tsnn)}%`),
+      "polling skip check",
+      CLOUD_READ_TIMEOUT_MS,
+    );
+    if (error) {
+      pushLog("warn", "system", `[POLLING] skip check erro: ${error.message} — transmite`);
+      return null;
+    }
+    if (!Array.isArray(data) || data.length === 0) return null;
+    // v3.25.20: bomba em modo LOCAL → keep-alive (o INO precisa receber TX a cada <15min).
+    // Ainda aplicamos o STALE (garante que o payload bata com o desired/estado atual),
+    // mas NUNCA "unnecessary": local sempre transmite o polling confirmando o estado.
+    const anyLocal = data.some((e) => e.last_actuation_origin === "local");
+    let allRealMatchDesired = true; // todos os eqs (com estado real conhecido) já batem
+    let haveRealForAll = true;      // temos last_outputs_state de todos
+    for (const eq of data) {
+      const saida = Number(eq.saida) || 0;
+      if (saida < 1 || saida > payload.length) continue;
+      const desiredBit = eq.desired_running ? "1" : "0";
+      if (payload[saida - 1] !== desiredBit) return "stale"; // payload != desired atual
+      const los = typeof eq.last_outputs_state === "string" ? eq.last_outputs_state : "";
+      const realBit = (/^[01]+$/.test(los) && saida <= los.length) ? los[saida - 1] : null;
+      if (realBit === null) haveRealForAll = false;
+      else if (realBit !== desiredBit) allRealMatchDesired = false;
+    }
+    // v3.25.20: modo LOCAL → NUNCA "unnecessary". Continua polando todo ciclo como
+    // keep-alive do watchdog do INO (15min). O payload já bate com o estado real
+    // (desired atualizado pelo LOCAL OVERRIDE) e a RPC preserva a origem 'local'.
+    if (anyLocal) return null;
+    if (haveRealForAll && allRealMatchDesired) {
+      // v3.25.16: heartbeat baseado em PROVA DE VIDA (último RX — espontâneo OU
+      // resposta), não no último poll. Se a PLC se manifestou nos últimos
+      // HEARTBEAT_POLL_MS, ela está online → descarta como desnecessário mesmo
+      // "fora da janela". Só libera o TX de heartbeat se a PLC estiver TOTALMENTE
+      // silenciosa por >HEARTBEAT_POLL_MS (aí sim precisa checar se está viva).
+      // Corrige o bug de o heartbeat transmitir {1} para bomba ligada local e o
+      // RX confirmar → RPC re-atribuir origem → badge LOCAL sumir.
+      const lastRx = lastRxAtByTsnn.get(String(tsnn)) || 0;
+      if (Date.now() - lastRx < HEARTBEAT_POLL_MS) return "unnecessary";
+      // sem NENHUM RX há >HEARTBEAT_POLL_MS → deixa transmitir como heartbeat (detecta offline)
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function processNextCommand() {
+  // v3.25.7: sequência de desligamento forçado em curso segura a fila. Evita que
+  // o PROCESSING_STUCK_RESET_MS (15s) ou o pollTimer reentrem durante os ~23-36s
+  // da sequência (que roda com processing=true e inflightCmd=null).
+  if (forcedShutdownActive) return;
   if (processing) {
     if (processingSince && Date.now() - processingSince > PROCESSING_STUCK_RESET_MS && !inflightCmd && !inflightManual) {
       pushLog("warn", "system", `Processamento preso ha ${Math.round((Date.now() - processingSince) / 1000)}s sem comando inflight; liberando fila`);
@@ -3516,6 +4742,36 @@ async function processNextCommand() {
     }
 
     if (cmd.type === "polling") {
+      // v3.25.12/15/18: descarta polling antes do TX se: LOCAL-MODE (bomba em modo
+      // local → ZERO TX), STALE (payload ≠ desired atual), ou UNNECESSARY (estado real
+      // já == desired → sem divergência; evita reforço à toa que apagava o badge LOCAL).
+      const skipReason = await pollingSkipReason(frame, expectedTsnn);
+      if (skipReason) {
+        const skipMsg = skipReason === "stale"
+          ? "Polling stale: payload não bate com desired_running atual"
+          : "Polling desnecessário: estado real já bate com desired_running";
+        const skipTag = skipReason === "stale" ? "STALE" : "DESNEC";
+        try {
+          await supabase
+            .from("commands")
+            .update({
+              status: "cancelled",
+              responded_at: new Date().toISOString(),
+              error_message: skipMsg,
+            })
+            .eq("id", cmd.id)
+            .eq("status", "pending");
+        } catch (_) {}
+        pushLog("info", "system",
+          `[POLLING ${skipTag}] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} descartado (payload ${extractTxPayload(frame)})`);
+        // v3.25.16: descarte é ATIVIDADE da fila — reseta o relógio do watchdog
+        // (não é stall). watchdogRestartCount zera porque o ciclo está saudável.
+        lastTxOrSkipAt = Date.now();
+        watchdogRestartCount = 0;
+        processing = false;
+        setTimeout(() => { void processNextCommand(); }, 50);
+        return;
+      }
       const requiredGap = lastPollingEndedWithTimeout
         ? POLLING_GAP_AFTER_TIMEOUT_MS
         : POLLING_GAP_AFTER_RX_MS;
@@ -3628,6 +4884,40 @@ async function processNextCommand() {
       return;
     }
 
+    // v3.25.7: DESLIGAMENTO FORÇADO. Se este é um manual de DESLIGAR (bit alvo=0)
+    // para uma bomba que está ligada localmente (last_actuation_origin='local') e
+    // com forced_shutdown_enabled=true, executa a sequência {1}->RX->10s->{0} uma
+    // única vez (sem reforços/safety) em vez de mandar {0} direto. last_actuation_origin
+    // muda em runtime, por isso consultamos o estado fresco no banco (não o cache).
+    if (cmd.type === "manual" && (cmd.priority ?? 5) > 0 && !isBackendResetCommand(cmd, frame)) {
+      const fsPayload = extractTxPayload(frame);
+      if (fsPayload && /^[01]{1,6}$/.test(fsPayload) && expectedTsnn && cmd.equipment_id) {
+        const fsEqMeta = equipmentById.get(String(cmd.equipment_id));
+        const fsTargetIndex = Math.max(0, Math.min(fsPayload.length - 1, (fsEqMeta?.saida || fsPayload.length) - 1));
+        if (fsPayload[fsTargetIndex] === "0") {
+          let fsEqRow = null;
+          try {
+            const { data } = await withCloudTimeout(
+              supabase
+                .from("equipments")
+                .select("last_actuation_origin,forced_shutdown_enabled")
+                .eq("id", cmd.equipment_id)
+                .maybeSingle(),
+              "forced-shutdown check",
+              CLOUD_READ_TIMEOUT_MS,
+            );
+            fsEqRow = data;
+          } catch (e) {
+            pushLog("warn", "system", `[FORCED OFF] consulta de estado falhou: ${e.message}; seguindo com {0} direto`);
+          }
+          if (fsEqRow && fsEqRow.forced_shutdown_enabled === true && fsEqRow.last_actuation_origin === "local") {
+            await runForcedShutdownSequence(cmd, frame, expectedTsnn, fsTargetIndex);
+            return; // a sequência assume o controle; NÃO segue para o TX {0} direto nem agenda reforços
+          }
+        }
+      }
+    }
+
     // Manual aguarda a janela física completa: RX divergente nao fecha o comando,
     // e a confirmacao real pode chegar muitos segundos depois da primeira leitura.
     // v3.9.30: polling com timeout serial curto (5s) para nao travar o rodizio
@@ -3645,6 +4935,22 @@ async function processNextCommand() {
         serialTimeoutMs = 5_000;
         pushLog("warn", "system",
           `[TIMEOUT] Reduzido para TSNN ${expectedTsnn} (offline há ${backoffOff.failures} tentativas) -> 5000ms`);
+      }
+    }
+
+    // v3.25.7 FIX lentidão manual: se há OUTROS manuais pendentes na fila (já
+    // buscados em `data`), não segura a serial os 13s completos esperando o RX
+    // deste manual — libera após MANUAL_QUEUED_HOLD_MS (3s) para o próximo manual
+    // sair em ~3s. Não afeta manual isolado, polling nem reset. A confirmação
+    // física deste comando segue garantida pelos reforços TX e pela janela de 120s.
+    if (cmd.type === "manual" && (cmd.priority ?? 5) > 0) {
+      const otherPendingManuals = data.filter(
+        (d) => d.type === "manual" && d.id !== cmd.id,
+      ).length;
+      if (otherPendingManuals > 0 && serialTimeoutMs > MANUAL_QUEUED_HOLD_MS) {
+        serialTimeoutMs = MANUAL_QUEUED_HOLD_MS;
+        pushLog("info", "system",
+          `[FILA MANUAL] ${otherPendingManuals} manual(is) pendente(s) — hold serial reduzido para ${MANUAL_QUEUED_HOLD_MS}ms (TSNN=${expectedTsnn})`);
       }
     }
 
@@ -3753,6 +5059,8 @@ async function processNextCommand() {
 
     // Enviar para o Python bridge (protocolo simples: SEND:<frame>)
     try {
+      // Injeta sufixo RV no payload se houver reset de vazao pendente para este TSNN.
+      frame = maybeInjectVazaoReset(frame, expectedTsnn);
       sendTxFrame(frame, { priority: cmd.type === "polling" ? "polling" : ((cmd.priority ?? 5) === 0 ? "reset" : "manual") });
       rememberTxForTsnn(expectedTsnn, cmd.type, cmd.id, frame);
       // (gap de polling agora medido pelo FIM da última comunicação, não pelo TX)
@@ -3793,6 +5101,7 @@ async function processNextCommand() {
     if (String(e.message || "").includes("buscar proximo comando: timeout local")) {
       cloudReadBackoffUntil = Date.now() + CLOUD_READ_BACKOFF_MS;
     }
+    noteCloudError(e, "processNextCommand");
     inflightCmd = null;
     inflightTsnn = null;
     if (inflightTimer) { clearTimeout(inflightTimer); inflightTimer = null; }
@@ -4283,12 +5592,29 @@ async function downloadAndInstallUpdate(url, version, expectedHash) {
 async function tickEnqueuePolling() {
   if (!supabase || !farmId) return;
   if (!bridgeReady) return; // sem porta serial nao adianta enfileirar
+  // FIX lentidão: manuais têm prioridade — não enfileira polling novo enquanto
+  // houver comandos manuais pendentes na fila da fazenda.
+  try {
+    const { data: pendingManuals } = await supabase
+      .from("commands")
+      .select("id")
+      .eq("farm_id", farmId)
+      .eq("status", "pending")
+      .eq("type", "manual")
+      .limit(1);
+    if (pendingManuals && pendingManuals.length > 0) return;
+  } catch (_) {}
+  // No inicio de cada ciclo, verifica se ha reset de vazao pendente marcado
+  // pelo frontend (equipments.vazao_reset_pending=true) e transfere para o
+  // Map local. O sufixo RV sera injetado no proximo frame TX daquele TSNN.
+  await checkRemoteResetPending();
   try {
     const { data, error } = await supabase.rpc("enqueue_polling_for_due_equipments", {
       _farm_id: farmId,
     });
     if (error) {
       pushLog("debug", "system", `enqueue_polling falhou: ${error.message}`);
+      noteCloudError(error, "tickEnqueuePolling");
     } else if (typeof data === "number" && data > 0) {
       // v3.9.30: nova rodada de polling enfileirada → fecha o ciclo anterior
       if (pollingCycleStats.startedAt > 0) {
@@ -4303,6 +5629,7 @@ async function tickEnqueuePolling() {
     }
   } catch (e) {
     pushLog("debug", "system", `enqueue_polling exception: ${e.message}`);
+    noteCloudError(e, "tickEnqueuePolling");
   }
 }
 
@@ -4310,10 +5637,11 @@ async function tickMarkTimeouts() {
   if (!supabase || !farmId) return;
   try {
     await supabase.rpc("mark_commands_timeout", { _farm_id: farmId });
-  } catch (_) {
-    /* silencioso */
+  } catch (e) {
+    noteCloudError(e, "tickMarkTimeouts");
   }
 }
+
 
 // v3.8.24 — Burst de polling no startup usando last_outputs_state como base.
 // Roda a cada 2s durante 15 min. Não tenta mudar estado das bombas — só lê e
@@ -4328,6 +5656,7 @@ async function tickStartupSyncPolling() {
     });
     if (error) {
       pushLog("debug", "system", `startup_sync_polling falhou: ${error.message}`);
+      noteCloudError(error, "tickStartupSyncPolling");
       return;
     }
     if (typeof data === "number" && data > 0) {
@@ -4342,6 +5671,7 @@ async function tickStartupSyncPolling() {
     }
   } catch (e) {
     pushLog("debug", "system", `startup_sync exception: ${e.message}`);
+    noteCloudError(e, "tickStartupSyncPolling");
   }
 }
 
@@ -4349,7 +5679,7 @@ function endStartupBurst(reason) {
   if (startupSyncTimer) { clearInterval(startupSyncTimer); startupSyncTimer = null; }
   pushLog("info", "system", `[STARTUP SYNC] burst de 3s encerrado (${reason}). Polling normal de 11s assume. Janela RX→desired segue ativa.`);
   if (!pollingEnqueueTimer && supabase && farmId) {
-    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, POLLING_ENQUEUE_INTERVAL_MS);
+    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, activePollingEnqueueIntervalMs);
     void tickEnqueuePolling();
   }
 }
@@ -4365,7 +5695,7 @@ function startCriticalPollingLoops() {
     pollTimer = setInterval(() => { void processNextCommand(); }, POLL_INTERVAL_MS);
   }
   if (!pollingTimeoutTimer) {
-    pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, POLLING_TIMEOUT_SWEEP_MS);
+    pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, activeSweepTimeoutMs);
   }
   if (!plcSilenceCheckTimer) {
     plcSilenceCheckTimer = setInterval(checkPlcSilence, PLC_SILENCE_CHECK_INTERVAL_MS);
@@ -4389,7 +5719,7 @@ function startCriticalPollingLoops() {
     }
     void tickStartupSyncPolling();
   } else if (!pollingEnqueueTimer && !isInStartupSyncWindow()) {
-    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, POLLING_ENQUEUE_INTERVAL_MS);
+    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, activePollingEnqueueIntervalMs);
     void tickEnqueuePolling();
   }
 
@@ -4453,6 +5783,7 @@ async function connectCloudServices(cfg, options = {}) {
     startCriticalPollingLoops();
     pushLog("info", "system", "Polling HTTP iniciado imediatamente; Realtime é best-effort.");
     void refreshEquipmentCache();
+    scheduleMidnightReset();
     void sendHeartbeat();
     void flushLogs();
     void flushTelemetryQueue();
@@ -4573,11 +5904,11 @@ async function openComPort(newPort) {
     }
     if (!pollingEnqueueTimer) {
       void tickEnqueuePolling();
-      pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, POLLING_ENQUEUE_INTERVAL_MS);
+      pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, activePollingEnqueueIntervalMs);
     }
     if (!pollingTimeoutTimer) {
       void tickMarkTimeouts();
-      pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, POLLING_TIMEOUT_SWEEP_MS);
+      pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, activeSweepTimeoutMs);
     }
     if (tray) tray.setToolTip(`RENOV Agent - Online (${comPort})`);
     return { success: true };
@@ -4692,12 +6023,43 @@ async function handleAgentCommand(cmd) {
           await resolveAgentCommand(cmd.id, "error", { error: "payload.port ausente" });
           break;
         }
+        const previousPort = comPort;
+        pushLog("info", "system", `[CONFIG] Comando remoto de troca de porta: ${previousPort} → ${newPort}`);
         await closeComPort();
         const r = await openComPort(newPort);
-        await resolveAgentCommand(cmd.id, r.success ? "done" : "error", {
+        if (!r.success) {
+          // Rollback: tenta reabrir a porta anterior.
+          pushLog("warn", "system", `[CONFIG] Falha em ${newPort} (${r.error}) — revertendo para ${previousPort}`);
+          let rolledBack = false;
+          if (previousPort && previousPort !== newPort) {
+            const rb = await openComPort(previousPort);
+            rolledBack = !!(rb && rb.success);
+          }
+          await resolveAgentCommand(cmd.id, "error", {
+            duration_ms: Date.now() - startedAt,
+            error: `Falha ao abrir ${newPort}: ${r.error}${rolledBack ? ` (revertido para ${previousPort})` : ""}`,
+            data: { attempted: newPort, current: comPort, rolled_back: rolledBack },
+          });
+          break;
+        }
+        // Sucesso → persiste em agent_config (fonte da verdade) sem disparar hot-reload duplicado.
+        if (supabase && farmId) {
+          try {
+            const nowIso = new Date().toISOString();
+            await supabase
+              .from("agent_config")
+              .upsert({ farm_id: farmId, serial_port: newPort, updated_at: nowIso },
+                      { onConflict: "farm_id" });
+            lastAgentConfigUpdatedAt = nowIso;
+            if (liveAgentConfig) liveAgentConfig.serial_port = newPort;
+          } catch (e) {
+            pushLog("warn", "system", `[CONFIG] não pôde persistir porta em agent_config: ${formatError(e)}`);
+          }
+        }
+        pushLog("info", "system", `[CONFIG] Bridge reconectada em ${newPort}`);
+        await resolveAgentCommand(cmd.id, "done", {
           duration_ms: Date.now() - startedAt,
-          error: r.success ? undefined : r.error,
-          data: { port: comPort },
+          data: { port: comPort, previous: previousPort },
         });
         break;
       }
@@ -4733,6 +6095,28 @@ async function handleAgentCommand(cmd) {
       case "resume_polling": {
         pollingPaused = false;
         pushLog("info", "remote", "Polling de telemetria RETOMADO remotamente");
+        await resolveAgentCommand(cmd.id, "done", { duration_ms: Date.now() - startedAt });
+        break;
+      }
+      case "start_log_stream": {
+        const ok = startLiveLogStream();
+        await resolveAgentCommand(cmd.id, ok ? "done" : "error", {
+          duration_ms: Date.now() - startedAt,
+          data: { buffer_size: liveStreamBuffer.length, ttl_ms: LIVE_STREAM_INACTIVE_MS },
+          error: ok ? undefined : "Falha ao abrir canal broadcast",
+        });
+        break;
+      }
+      case "renew_log_stream": {
+        const ok = renewLiveLogStream();
+        await resolveAgentCommand(cmd.id, ok ? "done" : "error", {
+          duration_ms: Date.now() - startedAt,
+          error: ok ? undefined : "Stream não estava ativo",
+        });
+        break;
+      }
+      case "stop_log_stream": {
+        stopLiveLogStream("manual");
         await resolveAgentCommand(cmd.id, "done", { duration_ms: Date.now() - startedAt });
         break;
       }
@@ -5161,6 +6545,177 @@ async function startCommandsSubscription() {
   }
 }
 
+// ============================================================================
+// v3.12.2 — Configuração remota da fazenda (tabela public.agent_config)
+// ----------------------------------------------------------------------------
+// Tudo que antes ficava em config local (porta COM, intervalo de polling,
+// timeout de sweep) agora vem do banco. O agente:
+//   1) Busca/cria o registro da fazenda no boot (após gate de licença).
+//   2) Reconsulta a cada 60s; se updated_at mudou, aplica em hot-reload.
+//   3) Se serial_port mudou: fecha bridge e reabre na nova porta.
+//   4) Se intervalos mudaram: reinicia os timers afetados.
+// ============================================================================
+function _agentConfigCacheFile() {
+  try { return path.join(app.getPath("userData"), "agent-config-cache.json"); } catch (_) { return null; }
+}
+function _loadAgentConfigCache() {
+  try {
+    const f = _agentConfigCacheFile();
+    if (!f || !fs.existsSync(f)) return null;
+    const j = JSON.parse(fs.readFileSync(f, "utf8"));
+    if (j && typeof j === "object" && j.serial_port) return j;
+  } catch (_) {}
+  return null;
+}
+function _saveAgentConfigCache(cfg) {
+  try {
+    const f = _agentConfigCacheFile();
+    if (!f || !cfg) return;
+    fs.writeFileSync(f, JSON.stringify({
+      serial_port: cfg.serial_port,
+      polling_interval_ms: cfg.polling_interval_ms,
+      sweep_timeout_ms: cfg.sweep_timeout_ms,
+      tx_gap_ms: cfg.tx_gap_ms,
+      updated_at: cfg.updated_at,
+      cached_at: new Date().toISOString(),
+    }), "utf8");
+  } catch (_) {}
+}
+
+async function fetchAgentConfig() {
+  if (!supabase || !farmId) {
+    const cached = _loadAgentConfigCache();
+    if (cached) {
+      pushLog("warn", "system", `[CONFIG] sem conexao com nuvem — usando cache local (porta ${cached.serial_port})`);
+      return cached;
+    }
+    return null;
+  }
+  try {
+    const { data, error } = await supabase
+      .from("agent_config")
+      .select("serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at")
+      .eq("farm_id", farmId)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) return data;
+    // Não existe — cria com defaults para esta fazenda.
+    const defaults = {
+      farm_id: farmId,
+      serial_port: comPort || "COM1",
+      polling_interval_ms: POLLING_ENQUEUE_INTERVAL_MS,
+      sweep_timeout_ms: POLLING_TIMEOUT_SWEEP_MS,
+      tx_gap_ms: activeTxGapMs,
+    };
+    const { data: created, error: insErr } = await supabase
+      .from("agent_config")
+      .insert(defaults)
+      .select("serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at")
+      .single();
+    if (insErr) {
+      pushLog("warn", "system", `[CONFIG] não pôde criar agent_config (${formatError(insErr)}) — usando defaults locais`);
+      return {
+        serial_port: defaults.serial_port,
+        polling_interval_ms: defaults.polling_interval_ms,
+        sweep_timeout_ms: defaults.sweep_timeout_ms,
+        tx_gap_ms: defaults.tx_gap_ms,
+        updated_at: new Date().toISOString(),
+      };
+    }
+    pushLog("info", "system", `[CONFIG] registro agent_config criado com defaults (porta ${defaults.serial_port})`);
+    return created;
+  } catch (e) {
+    pushLog("warn", "system", `[CONFIG] fetchAgentConfig falhou: ${formatError(e)}`);
+    const cached = _loadAgentConfigCache();
+    if (cached) {
+      pushLog("warn", "system", `[CONFIG] fallback: cache local (porta ${cached.serial_port}, salvo em ${cached.cached_at || "?"})`);
+      return cached;
+    }
+    return null;
+  }
+}
+
+async function applyAgentConfig(newCfg, options = {}) {
+  if (!newCfg) return;
+  const { initial = false } = options;
+  const oldPort = (liveAgentConfig && liveAgentConfig.serial_port) || comPort;
+  const oldPoll = activePollingEnqueueIntervalMs;
+  const oldSweep = activeSweepTimeoutMs;
+  const oldTxGap = activeTxGapMs;
+
+  // Intervalos — sanity bounds.
+  const newPoll = Math.max(1_000, Math.min(120_000, Number(newCfg.polling_interval_ms) || POLLING_ENQUEUE_INTERVAL_MS));
+  const newSweep = Math.max(500, Math.min(60_000, Number(newCfg.sweep_timeout_ms) || POLLING_TIMEOUT_SWEEP_MS));
+  const newTxGap = Math.max(0, Math.min(5_000, Number(newCfg.tx_gap_ms) || 100));
+  const newPort = (newCfg.serial_port || "").trim() || oldPort;
+
+  liveAgentConfig = newCfg;
+  lastAgentConfigUpdatedAt = newCfg.updated_at || lastAgentConfigUpdatedAt;
+  activePollingEnqueueIntervalMs = newPoll;
+  activeSweepTimeoutMs = newSweep;
+  activeTxGapMs = newTxGap;
+  _saveAgentConfigCache(newCfg);
+
+  if (initial) {
+    comPort = newPort;
+    pushLog("info", "system",
+      `[CONFIG] aplicada (porta=${newPort}, polling=${newPoll}ms, sweep=${newSweep}ms, tx_gap=${newTxGap}ms)`);
+    return;
+  }
+
+  if (newPoll !== oldPoll && pollingEnqueueTimer) {
+    clearInterval(pollingEnqueueTimer);
+    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, activePollingEnqueueIntervalMs);
+    pushLog("info", "system", `[CONFIG] polling_interval_ms ${oldPoll} → ${newPoll}ms (timer reiniciado)`);
+  }
+  if (newSweep !== oldSweep && pollingTimeoutTimer) {
+    clearInterval(pollingTimeoutTimer);
+    pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, activeSweepTimeoutMs);
+    pushLog("info", "system", `[CONFIG] sweep_timeout_ms ${oldSweep} → ${newSweep}ms (timer reiniciado)`);
+  }
+  if (newTxGap !== oldTxGap) {
+    pushLog("info", "system", `[CONFIG] tx_gap_ms ${oldTxGap} → ${newTxGap}ms`);
+  }
+  if (newPort && newPort !== oldPort) {
+    pushLog("warn", "system", `[CONFIG] Porta alterada para ${newPort} — reconectando bridge`);
+    try {
+      await closeComPort();
+      const r = await openComPort(newPort);
+      if (r && r.success) {
+        pushLog("info", "system", `[CONFIG] Bridge reconectada em ${newPort}`);
+      } else {
+        pushLog("error", "system", `[CONFIG] Falha ao reabrir ${newPort}: ${r && r.error}`);
+      }
+    } catch (e) {
+      pushLog("error", "system", `[CONFIG] Exceção ao trocar porta: ${formatError(e)}`);
+    }
+  }
+}
+
+async function tickAgentConfigWatch() {
+  if (!supabase || !farmId) return;
+  try {
+    const { data, error } = await supabase
+      .from("agent_config")
+      .select("serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at")
+      .eq("farm_id", farmId)
+      .maybeSingle();
+    if (error) { pushLog("debug", "system", `[CONFIG] watch erro: ${formatError(error)}`); return; }
+    if (!data) return;
+    if (lastAgentConfigUpdatedAt && data.updated_at === lastAgentConfigUpdatedAt) return;
+    pushLog("info", "system", `[CONFIG] mudanca detectada (updated_at=${data.updated_at}) — aplicando hot-reload`);
+    await applyAgentConfig(data, { initial: false });
+  } catch (e) {
+    pushLog("debug", "system", `[CONFIG] watch exception: ${formatError(e)}`);
+  }
+}
+
+function startAgentConfigWatch() {
+  if (agentConfigWatchTimer) return;
+  agentConfigWatchTimer = setInterval(() => { void tickAgentConfigWatch(); }, AGENT_CONFIG_POLL_MS);
+}
+
+
 
 async function startAgent(cfg) {
   if (startingAgent) return;
@@ -5173,6 +6728,7 @@ async function startAgent(cfg) {
     if (pollingEnqueueTimer) { clearInterval(pollingEnqueueTimer); pollingEnqueueTimer = null; }
     if (pollingTimeoutTimer) { clearInterval(pollingTimeoutTimer); pollingTimeoutTimer = null; }
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    if (agentConfigWatchTimer) { clearInterval(agentConfigWatchTimer); agentConfigWatchTimer = null; }
     processing = false;
     inflightCmd = null;
     inflightTsnn = null;
@@ -5181,7 +6737,15 @@ async function startAgent(cfg) {
     await stopBridge();
 
     farmId = cfg.farmId;
-    comPort = cfg.comPort || "COM12";
+    // v3.22.0: prioriza última COM que funcionou (evita re-scan em toda inicialização)
+    let portToTry = null;
+    try {
+      const fs3 = require("fs");
+      const lastComFile = path.join(app.getPath("userData"), "last_working_com.txt");
+      portToTry = fs3.readFileSync(lastComFile, "utf8").trim();
+    } catch (_) {}
+    if (!portToTry) portToTry = cfg.comPort;
+    comPort = portToTry || "COM12";
 
     // v3.10.7 SECURITY: conecta nuvem PRIMEIRO e valida hardware ANTES do bridge.
     startupStep = "conectar serviços da nuvem (pré-gate)";
@@ -5214,28 +6778,58 @@ async function startAgent(cfg) {
       pushLog("warn", "system", `[HEARTBEAT] Falha ao reportar versão: ${formatError(e)}`);
     }
 
-    startupStep = "gate de hardware fingerprint";
+    // v3.13.1 SECURITY: gate de licença NÃO-INVASIVO.
+    // Fluxo legacy (fazendas em produção): email+password+farmId salvos localmente
+    // + autenticação bem-sucedida no Supabase (já ocorreu acima) ⇒ agente licenciado.
+    // O licenseToken/anticlone é OPCIONAL — se ausente, tenta provisionar em background,
+    // mas NUNCA bloqueia a inicialização do bridge/polling.
+    startupStep = "gate de licença (legacy-friendly)";
     _loadLicenseGrace();
-    try {
-      const res = await awaitAndVerifyHardware(cfg);
-      if (res.level === "blocked") {
+    const hasLegacyLicense = !!(cfg.email && cfg.password && cfg.farmId && supabase);
+    if (!hasLegacyLicense && !cfg.licenseToken) {
+      pushLog("error", "system",
+        "[SECURITY] Sem credenciais nem licença — agente não iniciará. Reconfigure pelo Tray → 'Reconfigurar (login)'.");
+      if (tray) tray.setToolTip("RENOV Agent - SEM LICENÇA");
+      try {
+        dialog.showErrorBox("Renov Agent — Licença ausente",
+          "Este agente não está vinculado a uma fazenda. Use o ícone na bandeja → 'Reconfigurar (login)' para ativar.");
+      } catch (_) {}
+      return;
+    }
+    // Se já temos licenseToken novo, valida — mas SÓ desliga se servidor responder revogado.
+    // Falha de rede / token ausente NÃO bloqueia o legacy.
+    if (cfg.licenseToken) {
+      lastLicenseValidationAt = 0;
+      try { await validateLicenseHeartbeat(cfg); } catch (_) {}
+      if (licenseKillSwitchTriggered) {
         pushLog("error", "system",
-          `[SECURITY] Bloqueado — máquina não autorizada (${res.changed.join(", ")}). Agente NÃO iniciará.`);
-        if (tray) tray.setToolTip("RENOV Agent - BLOQUEADO (hardware)");
-        try {
-          await reportTampering(cfg, "hardware_changed", "critical",
-            { reason: "blocked_at_startup", changed: res.changed, blocking: true }, null, null);
-        } catch (_) {}
-        try {
-          dialog.showErrorBox("Renov Agent — Hardware bloqueado",
-            "O hardware deste PC mudou em 2 ou mais componentes desde a última ativação.\n\n" +
-            "Por segurança, o agente foi desativado. Contate o suporte da Renov para reautorizar.");
-        } catch (_) {}
-        try { app.exit(2); } catch (_) { process.exit(2); }
+          "[SECURITY] Licença revogada pelo servidor — agente NÃO iniciará bridge.");
+        if (tray) tray.setToolTip("RENOV Agent - LICENÇA REVOGADA");
         return;
       }
+    } else {
+      pushLog("info", "system",
+        "[SECURITY] Legacy license (email+senha OK). licenseToken ausente — provisionamento anticlone será tentado em background.");
+    }
+
+    // v3.14.0 — Anti-clone em BACKGROUND (não bloqueia inicialização).
+    // A verificação de fingerprint (agent_hardware, keyed por farm_id) foi
+    // movida para depois do polling estar rodando. Ver scheduleBackgroundAntiCloneCheck().
+    _loadLicenseGrace();
+
+
+
+    // v3.12.2 — Carrega configuração remota (porta COM + intervalos) ANTES de abrir o bridge.
+    startupStep = "carregar agent_config remoto";
+    try {
+      const remoteCfg = await fetchAgentConfig();
+      if (remoteCfg) {
+        await applyAgentConfig(remoteCfg, { initial: true });
+      } else {
+        pushLog("warn", "system", "[CONFIG] agent_config indisponível — usando porta/intervalos locais");
+      }
     } catch (e) {
-      pushLog("warn", "system", `Hardware gate falhou (continuando): ${formatError(e)}`);
+      pushLog("warn", "system", `[CONFIG] falha ao carregar agent_config: ${formatError(e)}`);
     }
 
     pushLog("info", "system", `Iniciando bridge Serial em ${comPort}...`);
@@ -5264,7 +6858,11 @@ async function startAgent(cfg) {
     // navegador/renderer (que sofre throttle quando minimizado).
     startupStep = "iniciar polling";
     startCriticalPollingLoops();
-    pushLog("info", "system", "Enqueue de polling no agente: 11s | sweep timeouts: 5s");
+    pushLog("info", "system", `Enqueue de polling no agente: ${activePollingEnqueueIntervalMs}ms | sweep timeouts: ${activeSweepTimeoutMs}ms`);
+
+    // v3.12.2 — hot-reload de agent_config a cada 60s.
+    startupStep = "iniciar watcher de agent_config";
+    startAgentConfigWatch();
 
     // Log rotation diaria + subscription de agent_commands
     startupStep = "ativar subscriptions";
@@ -5274,6 +6872,10 @@ async function startAgent(cfg) {
     startMemoryCleanup();
     startAutoRebootWatchdog();
     startRealtimeSubscriptionsBestEffort();
+
+    // v3.14.0 — Anti-clone em BACKGROUND (30s após polling estar rodando).
+    // Se clone detectado: WhatsApp alert → aguarda 60s → encerra processo.
+    try { scheduleBackgroundAntiCloneCheck(cfg); } catch (_) {}
   } catch (e) {
     pushLog("error", "system", `Falha ao iniciar (${startupStep}): ${formatError(e)}`);
     if (tray) tray.setToolTip("RENOV Agent - ERRO");
@@ -5632,6 +7234,77 @@ async function awaitAndVerifyHardware(cfg) {
   }
   return verifyHardwareFingerprint(cfg);
 }
+
+// ============================================================
+// v3.14.0 — ANTI-CLONE em BACKGROUND (não bloqueia inicialização)
+// ------------------------------------------------------------
+// Fluxo:
+//  1) Polling já está rodando (agente operacional).
+//  2) Após 30s, verifica fingerprint em agent_hardware (keyed por farm_id).
+//  3) Se 'blocked' (≥2 componentes divergem) → CLONE:
+//     • Envia alerta WhatsApp genérico (best-effort).
+//     • Aguarda 60s para o alerta sair.
+//     • Encerra o processo com popup genérico.
+//  4) Falha de rede / sem cliente → ignora silenciosamente (retenta em 30 min).
+//  5) Repete a checagem a cada 30 minutos (troca de HW em runtime).
+// ============================================================
+let antiCloneScheduled = false;
+let antiCloneTriggered = false;
+function scheduleBackgroundAntiCloneCheck(cfg) {
+  if (antiCloneScheduled) return;
+  antiCloneScheduled = true;
+
+  const runCheck = async () => {
+    if (antiCloneTriggered) return;
+    try {
+      const res = await verifyHardwareFingerprint(cfg);
+      if (!res || res.level !== "blocked") return;
+      antiCloneTriggered = true;
+      pushLog("error", "system",
+        `[SECURITY] CLONE detectado em background — componentes divergentes: ${(res.changed || []).join(", ")}. Encerrando em 60s.`);
+
+      // 1) Alerta WhatsApp (best-effort)
+      try {
+        if (supabase && cfg && cfg.farmId) {
+          await supabase.functions.invoke("whatsapp-alerts", {
+            body: {
+              kind: "agent_clone_detected",
+              farm_id: cfg.farmId,
+              message: "ALERTA: Clone detectado — hardware não autorizado tentou operar o agente desta fazenda.",
+              changed_components: res.changed || [],
+            },
+          });
+        }
+      } catch (e) {
+        pushLog("warn", "cloud", `[ANTI-CLONE] whatsapp-alerts falhou: ${e && e.message || e}`);
+      }
+
+      // 2) Report tampering (blocking)
+      try {
+        await reportTampering(cfg, "hardware_changed", "critical",
+          { reason: "clone_detected_background", changed: res.changed, blocking: true, farm_id: cfg.farmId },
+          null, null);
+      } catch (_) {}
+
+      // 3) Aguarda 60s antes de encerrar (garante envio do alerta)
+      setTimeout(() => {
+        try { if (tray) tray.setToolTip("RENOV Agent - Erro de licença"); } catch (_) {}
+        try {
+          dialog.showErrorBox("Renov Agent", "Erro de licença. Contate o suporte.");
+        } catch (_) {}
+        try { app.exit(1); } catch (_) { process.exit(1); }
+      }, 60_000);
+    } catch (e) {
+      // Falha de rede → ignora, tenta de novo no próximo ciclo
+      pushLog("warn", "system", `[ANTI-CLONE] check em background falhou (ignorado): ${e && e.message || e}`);
+    }
+  };
+
+  // Primeira checagem 30s após polling; depois a cada 30 min.
+  setTimeout(runCheck, 30_000).unref?.();
+  setInterval(runCheck, 30 * 60_000).unref?.();
+}
+
 
 // ============================================================
 // ANTI-DEBUG (Camada 3) — detecta DevTools/inspector anexados ao processo
