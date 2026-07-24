@@ -7335,6 +7335,25 @@ async function tryAutoProvision() {
   }
 }
 
+// SHA-256 do app.asar real em disco (via original-fs, pois o Electron vê o .asar
+// como diretório virtual). Cacheado: o asar não muda sob um processo vivo — uma
+// OTA substitui o arquivo e REINICIA o app, então o cache é sempre coerente.
+let _cachedAsarHash;
+function computeAsarHash() {
+  if (_cachedAsarHash !== undefined) return _cachedAsarHash;
+  try {
+    if (!process.resourcesPath) return (_cachedAsarHash = null);
+    let originalFs;
+    try { originalFs = require("original-fs"); } catch (_) { originalFs = fs; }
+    const asarPath = path.join(process.resourcesPath, "app.asar");
+    if (!originalFs.existsSync(asarPath)) return (_cachedAsarHash = null);
+    return (_cachedAsarHash = crypto.createHash("sha256")
+      .update(originalFs.readFileSync(asarPath)).digest("hex"));
+  } catch (_) {
+    return (_cachedAsarHash = null);
+  }
+}
+
 // Verifica integridade do .asar (anti-tampering)
 // REFORÇADO: o hash de referência DEVE vir do build (extraResources/asar-hash.txt).
 // Se não existir hash de build, NÃO aceita gerar em runtime — falha fechada,
@@ -7342,15 +7361,8 @@ async function tryAutoProvision() {
 function verifyAsarIntegrity() {
   try {
     if (!process.resourcesPath) return { ok: true, reason: "dev-mode" };
-    // Electron intercepta operações de fs em arquivos .asar (vê como diretório virtual).
-    // Para ler o arquivo .asar real precisamos do original-fs.
-    let originalFs;
-    try { originalFs = require("original-fs"); } catch (_) { originalFs = fs; }
-    const asarPath = path.join(process.resourcesPath, "app.asar");
-    if (!originalFs.existsSync(asarPath)) return { ok: true, reason: "no-asar" };
-
-    const fileBuf = originalFs.readFileSync(asarPath);
-    const actualHash = crypto.createHash("sha256").update(fileBuf).digest("hex");
+    const actualHash = computeAsarHash();
+    if (!actualHash) return { ok: true, reason: "no-asar" };
 
     // Hash gerado em build-time pelo build-agent.bat
     if (fs.existsSync(ASAR_HASH_FILE_BUILD)) {
@@ -7369,6 +7381,37 @@ function verifyAsarIntegrity() {
     return { ok: true, reason: "no-build-hash", actualHash };
   } catch (e) {
     return { ok: true, reason: "check-error", error: e.message };
+  }
+}
+
+// v3.25.34 — item 4: verificação do asar contra o HASH ESPERADO BAIXADO DO BANCO.
+// verifyAsarIntegrity() compara com o asar-hash.txt LOCAL (build-time) — um atacante
+// que reempacota o asar pode regenerar esse .txt. Esta checagem compara o asar rodando
+// com agent_releases.file_hash da versão atual (fonte da verdade no servidor, que o
+// atacante não controla). Divergência = binário não-oficial → loga + reporta + CONTINUA
+// (warn-only, pra não dar dica ao adversário). Roda em background, não trava o boot.
+async function verifyAsarAgainstServer(cfg) {
+  try {
+    if (!supabase || !process.resourcesPath) return { level: "skip", reason: "no-client" };
+    const actual = computeAsarHash();
+    if (!actual) return { level: "skip", reason: "no-asar" };
+    const { data: rel } = await supabase
+      .from("agent_releases")
+      .select("file_hash")
+      .eq("version", AGENT_VERSION)
+      .maybeSingle();
+    if (!rel || !rel.file_hash) return { level: "skip", reason: "no-registered-hash", actual };
+    if (String(rel.file_hash).trim().toLowerCase() === actual.toLowerCase()) {
+      pushLog("info", "system", `[SECURITY] asar confere com o release oficial ${AGENT_VERSION} no banco.`);
+      return { level: "ok", actual };
+    }
+    pushLog("error", "system",
+      `[SECURITY] asar DIVERGE do release oficial ${AGENT_VERSION} (banco ${String(rel.file_hash).slice(0, 12)}…, rodando ${actual.slice(0, 12)}…) — possível ASAR substituído. Continuando (warn-only).`);
+    await reportTampering(cfg, "asar_server_mismatch", "critical",
+      { version: AGENT_VERSION, source: "agent_releases" }, rel.file_hash, actual);
+    return { level: "mismatch", expected: rel.file_hash, actual };
+  } catch (e) {
+    return { level: "skip", reason: "error", error: e && e.message };
   }
 }
 
@@ -7442,14 +7485,40 @@ function _primaryMac() {
   return null;
 }
 
+// Primeiro IPv4 não-interno (informativo — muda por DHCP, NÃO é usado no diff).
+function _localIPv4() {
+  try {
+    for (const list of Object.values(os.networkInterfaces())) {
+      for (const ni of list || []) {
+        if (ni && !ni.internal && ni.family === "IPv4" && ni.address) return ni.address;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 function collectHardwareFingerprint() {
+  const mac = _primaryMac();
+  const disk = _wmicValue("wmic diskdrive get serialnumber");
+  const bios = _wmicValue("wmic csproduct get uuid");
+  const cpu = _wmicValue("wmic cpu get processorid");
+  // machine_id derivado dos MESMOS componentes já coletados (sem wmic extra).
+  const machineId = crypto.createHash("sha256")
+    .update([mac, disk, bios, cpu].map((x) => x || "").join("|"))
+    .digest("hex").slice(0, 16);
   return {
     hostname: os.hostname() || null,
-    mac_address: _primaryMac(),
-    disk_serial: _wmicValue("wmic diskdrive get serialnumber"),
-    bios_uuid: _wmicValue("wmic csproduct get uuid"),
-    cpu_id: _wmicValue("wmic cpu get processorid"),
+    mac_address: mac,
+    disk_serial: disk,
+    bios_uuid: bios,
+    cpu_id: cpu,
     os_install_date: _wmicValue("wmic os get installdate"),
+    // v3.25.34 — item 4: registrar no banco machine_id, IP e hash do asar (p/ detectar
+    // clones). INFORMATIVOS: não entram em HW_COMPONENTS_BLOCKING/diffHardware — IP muda
+    // por DHCP e asar_hash muda a cada OTA legítima, então nenhum deles bloqueia.
+    machine_id: machineId,
+    local_ip: _localIPv4(),
+    asar_hash: computeAsarHash(),
     collected_at: new Date().toISOString(),
   };
 }
@@ -7564,8 +7633,16 @@ function scheduleBackgroundAntiCloneCheck(cfg) {
   if (antiCloneScheduled) return;
   antiCloneScheduled = true;
 
+  let asarServerChecked = false;
   const runCheck = async () => {
     if (antiCloneTriggered) return;
+    // v3.25.34 — item 4: uma vez, confere o asar rodando contra agent_releases.file_hash
+    // (hash esperado baixado do banco). Warn-only, não encerra o processo.
+    if (!asarServerChecked) {
+      asarServerChecked = true;
+      try { await verifyAsarAgainstServer(cfg); }
+      catch (e) { pushLog("warn", "system", `[SECURITY] verifyAsarAgainstServer falhou (ignorado): ${e && e.message || e}`); }
+    }
     try {
       const res = await verifyHardwareFingerprint(cfg);
       if (!res || res.level !== "blocked") return;
