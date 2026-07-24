@@ -121,6 +121,11 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 // ============================================================================
 let lastTxTimestamp = 0;
 let lastRxTimestamp = 0;
+// v3.25.16: timestamp da última ATIVIDADE útil da fila (TX real OU descarte de
+// polling DESNEC/STALE). O watchdog usa isto — descartar polling é atividade
+// normal (a fila está processando), não stall. Só é stall quando há frame para
+// enviar e a serial não transmite (aí este timestamp para de avançar).
+let lastTxOrSkipAt = 0;
 const txQueue = []; // [{ frame, priority, queuedAt, tsnn }]
 const TX_MIN_GAP_MS = 3000;
 const RX_AVOID_GAP_MS = 2000;
@@ -136,6 +141,7 @@ function _txWriteNow(frame) {
   try {
     bridgeProcess.stdin.write(Buffer.from(`SEND:${frame}\n`, "utf8"));
     lastTxTimestamp = Date.now();
+    lastTxOrSkipAt = lastTxTimestamp; // atividade da fila (para o watchdog)
     return true;
   } catch (e) {
     try { pushLog("error", "serial", `[TX QUEUE] stdin write falhou: ${e.message}`); } catch (_) {}
@@ -340,7 +346,13 @@ function watchdogTxTick() {
     if (!hasActivePLCs()) return;             // sem PLCs cadastradas nada a enviar
     if (licenseKillSwitchTriggered) return;   // desligamento intencional
     if (pollingPaused) return;                // pausa administrativa
-    const silenceMs = lastTxTimestamp > 0 ? (Date.now() - lastTxTimestamp) : (Date.now() - agentStartupAt);
+    // v3.25.16: mede silêncio pela última ATIVIDADE da fila (TX real OU descarte de
+    // polling DESNEC/STALE), não só por TX. Assim, quando todos os pollings são
+    // descartados (estado real já bate com desired), isso conta como atividade
+    // normal e o watchdog NÃO dispara falso-positivo. Só dispara em stall real:
+    // frame para enviar e serial não transmite → lastTxOrSkipAt para de avançar.
+    const activityAt = Math.max(lastTxTimestamp, lastTxOrSkipAt);
+    const silenceMs = activityAt > 0 ? (Date.now() - activityAt) : (Date.now() - agentStartupAt);
     if (silenceMs < WATCHDOG_TX_SILENCE_MS) return;
 
     watchdogRestartCount++;
@@ -728,6 +740,11 @@ const lastOnConfirmAtByEq = new Map();
 const MAX_PLC_SILENCE_WARN_MS = 12 * 60_000;
 const PLC_SILENCE_CHECK_INTERVAL_MS = 60_000;
 const lastPollAtByTsnn = new Map();
+// v3.25.16: timestamp do ÚLTIMO RX de cada PLC (qualquer RX — espontâneo OU resposta
+// a TX). Prova de vida: se a PLC mandou algo nos últimos HEARTBEAT_POLL_MS, está
+// online e o heartbeat NÃO precisa transmitir polling à toa. Atualizado em
+// processTelemFrame para todo RX válido.
+const lastRxAtByTsnn = new Map();
 let plcSilenceCheckTimer = null;
 function noteSuccessfulPoll(tsnn) {
   if (!tsnn) return;
@@ -3600,6 +3617,9 @@ function processTelemFrame(frame) {
 
   // Backoff: qualquer RX desta PLC zera o contador de falhas consecutivas
   noteBackoffSuccess(rxTsnn);
+  // v3.25.16: prova de vida — registra o instante deste RX (espontâneo ou resposta).
+  // Usado pelo heartbeat do polling para não transmitir se a PLC já se manifestou.
+  lastRxAtByTsnn.set(String(rxTsnn), Date.now());
 
   // v3.25.7: sequência de desligamento forçado — resolve o waiter se este RX
   // confirma o bit alvo esperado. NÃO retorna: a telemetria continua sendo
@@ -4482,9 +4502,16 @@ async function pollingSkipReason(frame, tsnn) {
       else if (realBit !== desiredBit) allRealMatchDesired = false;
     }
     if (haveRealForAll && allRealMatchDesired) {
-      const lastPoll = lastPollAtByTsnn.get(String(tsnn)) || 0;
-      if (Date.now() - lastPoll < HEARTBEAT_POLL_MS) return "unnecessary";
-      // fora da janela → deixa transmitir como heartbeat (detecta offline)
+      // v3.25.16: heartbeat baseado em PROVA DE VIDA (último RX — espontâneo OU
+      // resposta), não no último poll. Se a PLC se manifestou nos últimos
+      // HEARTBEAT_POLL_MS, ela está online → descarta como desnecessário mesmo
+      // "fora da janela". Só libera o TX de heartbeat se a PLC estiver TOTALMENTE
+      // silenciosa por >HEARTBEAT_POLL_MS (aí sim precisa checar se está viva).
+      // Corrige o bug de o heartbeat transmitir {1} para bomba ligada local e o
+      // RX confirmar → RPC re-atribuir origem → badge LOCAL sumir.
+      const lastRx = lastRxAtByTsnn.get(String(tsnn)) || 0;
+      if (Date.now() - lastRx < HEARTBEAT_POLL_MS) return "unnecessary";
+      // sem NENHUM RX há >HEARTBEAT_POLL_MS → deixa transmitir como heartbeat (detecta offline)
     }
     return null;
   } catch (_) {
@@ -4643,6 +4670,10 @@ async function processNextCommand() {
         } catch (_) {}
         pushLog("info", "system",
           `[POLLING ${skipReason === "stale" ? "STALE" : "DESNEC"}] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} descartado (payload ${extractTxPayload(frame)})`);
+        // v3.25.16: descarte é ATIVIDADE da fila — reseta o relógio do watchdog
+        // (não é stall). watchdogRestartCount zera porque o ciclo está saudável.
+        lastTxOrSkipAt = Date.now();
+        watchdogRestartCount = 0;
         processing = false;
         setTimeout(() => { void processNextCommand(); }, 50);
         return;
