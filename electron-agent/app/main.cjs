@@ -4436,34 +4436,59 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
 // payload {1} continuam sendo transmitidos por ~90s mesmo após o desired virar {0}.
 // Em erro/dúvida retorna false (NÃO descarta) — segurança: nunca sumir com polling
 // por falha de query.
-async function isPollingFrameStale(frame, tsnn) {
+// v3.25.15: mesmo quando o estado real == desired (poll "desnecessário"), ainda faz
+// UM poll de heartbeat a cada HEARTBEAT_POLL_MS para detectar PLC offline caso ela
+// não emita espontâneo. Espontâneos já atualizam last_communication; isto é o piso.
+const HEARTBEAT_POLL_MS = 3 * 60_000;
+
+// v3.25.15: decide se um polling deve ser DESCARTADO antes do TX. Retorna:
+//   "stale"       → payload não bate mais com o desired_running atual (atuação local
+//                   mudou o desired depois do enqueue);
+//   "unnecessary" → o estado REAL da bomba (last_outputs_state) já bate com o desired
+//                   em todas as saídas → não há divergência para corrigir (evita TX de
+//                   reforço à toa, que confirmava o estado e apagava o badge LOCAL);
+//                   suprimido só dentro da janela de heartbeat.
+//   null          → transmitir.
+// Em erro/dúvida retorna null (NÃO descarta) — segurança: nunca sumir com polling.
+async function pollingSkipReason(frame, tsnn) {
   try {
-    if (!supabase || !farmId || !tsnn) return false;
+    if (!supabase || !farmId || !tsnn) return null;
     const payload = extractTxPayload(frame);
-    if (!payload || !/^[01]{1,6}$/.test(payload)) return false;
+    if (!payload || !/^[01]{1,6}$/.test(payload)) return null;
     const { data, error } = await withCloudTimeout(
       supabase
         .from("equipments")
-        .select("saida, desired_running")
+        .select("saida, desired_running, last_outputs_state")
         .eq("farm_id", farmId)
         .ilike("hw_id", `${String(tsnn)}%`),
-      "polling stale check",
+      "polling skip check",
       CLOUD_READ_TIMEOUT_MS,
     );
     if (error) {
-      pushLog("warn", "system", `[STALE CHECK] query erro: ${error.message} — não descarta`);
-      return false;
+      pushLog("warn", "system", `[POLLING] skip check erro: ${error.message} — transmite`);
+      return null;
     }
-    if (!Array.isArray(data) || data.length === 0) return false;
+    if (!Array.isArray(data) || data.length === 0) return null;
+    let allRealMatchDesired = true; // todos os eqs (com estado real conhecido) já batem
+    let haveRealForAll = true;      // temos last_outputs_state de todos
     for (const eq of data) {
       const saida = Number(eq.saida) || 0;
       if (saida < 1 || saida > payload.length) continue;
-      const wantBit = eq.desired_running ? "1" : "0";
-      if (payload[saida - 1] !== wantBit) return true; // diverge do desired atual → stale
+      const desiredBit = eq.desired_running ? "1" : "0";
+      if (payload[saida - 1] !== desiredBit) return "stale"; // payload != desired atual
+      const los = typeof eq.last_outputs_state === "string" ? eq.last_outputs_state : "";
+      const realBit = (/^[01]+$/.test(los) && saida <= los.length) ? los[saida - 1] : null;
+      if (realBit === null) haveRealForAll = false;
+      else if (realBit !== desiredBit) allRealMatchDesired = false;
     }
-    return false;
+    if (haveRealForAll && allRealMatchDesired) {
+      const lastPoll = lastPollAtByTsnn.get(String(tsnn)) || 0;
+      if (Date.now() - lastPoll < HEARTBEAT_POLL_MS) return "unnecessary";
+      // fora da janela → deixa transmitir como heartbeat (detecta offline)
+    }
+    return null;
   } catch (_) {
-    return false;
+    return null;
   }
 }
 
@@ -4598,24 +4623,26 @@ async function processNextCommand() {
     }
 
     if (cmd.type === "polling") {
-      // v3.25.12: descarta polling STALE antes de transmitir. Se o payload não bate
-      // mais com o desired_running atual (atuação local mudou o desired depois deste
-      // polling ter sido enfileirado), cancela sem TX — fecha a corrida em que
-      // pollings antigos com payload {1} seguiam sendo enviados por ~90s.
-      if (await isPollingFrameStale(frame, expectedTsnn)) {
+      // v3.25.12/15: descarta polling antes do TX se for STALE (payload ≠ desired atual)
+      // ou UNNECESSARY (estado real já == desired → sem divergência a corrigir; evita o
+      // TX de reforço à toa que confirmava o estado e apagava o badge LOCAL).
+      const skipReason = await pollingSkipReason(frame, expectedTsnn);
+      if (skipReason) {
         try {
           await supabase
             .from("commands")
             .update({
               status: "cancelled",
               responded_at: new Date().toISOString(),
-              error_message: "Polling stale: payload não bate com desired_running atual",
+              error_message: skipReason === "stale"
+                ? "Polling stale: payload não bate com desired_running atual"
+                : "Polling desnecessário: estado real já bate com desired_running",
             })
             .eq("id", cmd.id)
             .eq("status", "pending");
         } catch (_) {}
         pushLog("info", "system",
-          `[POLLING STALE] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} descartado (payload ${extractTxPayload(frame)} ≠ desired_running atual)`);
+          `[POLLING ${skipReason === "stale" ? "STALE" : "DESNEC"}] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} descartado (payload ${extractTxPayload(frame)})`);
         processing = false;
         setTimeout(() => { void processNextCommand(); }, 50);
         return;
