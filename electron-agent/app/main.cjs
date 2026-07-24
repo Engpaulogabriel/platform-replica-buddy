@@ -4538,17 +4538,19 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
 // não emita espontâneo. Espontâneos já atualizam last_communication; isto é o piso.
 const HEARTBEAT_POLL_MS = 3 * 60_000;
 
-// v3.25.18: decide se um polling deve ser DESCARTADO antes do TX. Retorna:
-//   "local-mode"  → REGRA DEFINITIVA: alguma bomba da PLC está em modo LOCAL
-//                   (last_actuation_origin='local'). O agente NÃO transmite NADA para
-//                   essa PLC — nem polling, nem heartbeat, nem stale. Só observa
-//                   espontâneos. Volta a transmitir quando um comando manual mudar a
-//                   origem (→ remote-cmd). Tem precedência sobre tudo abaixo.
-//   "stale"       → payload não bate mais com o desired_running atual;
+// v3.25.20: decide se um polling deve ser DESCARTADO antes do TX. Retorna:
+//   "stale"       → payload não bate mais com o desired_running atual (atuação local
+//                   mudou o desired depois do enqueue) → descarta; o próximo enqueue
+//                   traz o payload correto (que bate com o estado real).
 //   "unnecessary" → estado REAL já == desired em todas as saídas E a PLC deu prova de
-//                   vida (RX) nos últimos HEARTBEAT_POLL_MS (heartbeat só p/ NÃO-local);
+//                   vida (RX) nos últimos HEARTBEAT_POLL_MS. SÓ para bombas NÃO-local.
 //   null          → transmitir.
-// Em erro/dúvida retorna null (NÃO descarta) — segurança: nunca sumir com polling.
+// v3.25.20 MUDANÇA CRÍTICA: bomba em modo LOCAL NÃO descarta polling. O INO (PLC) tem
+// watchdog de 15min — se parar de receber TX, desliga a bomba. Então em modo local o
+// agente CONTINUA polando (keep-alive) com o payload que CONFIRMA o estado (não muda
+// nada; polling não atua no relé). A migration 20260723160000 preserva
+// last_actuation_origin='local' quando o polling confirma o estado, então o badge não
+// some. Em erro/dúvida retorna null (NÃO descarta) — nunca sumir com polling.
 async function pollingSkipReason(frame, tsnn) {
   try {
     if (!supabase || !farmId || !tsnn) return null;
@@ -4568,11 +4570,10 @@ async function pollingSkipReason(frame, tsnn) {
       return null;
     }
     if (!Array.isArray(data) || data.length === 0) return null;
-    // v3.25.18: REGRA BINÁRIA — bomba em modo LOCAL (botoeira) = ZERO TX para a PLC.
-    // A bomba está sob controle do operador de campo; o agente só OBSERVA (espontâneos)
-    // e reporta o estado. Tem precedência sobre stale/unnecessary/heartbeat. O modo
-    // local é limpo quando um novo comando manual confirma e a origem vira 'remote-cmd'.
-    if (data.some((e) => e.last_actuation_origin === "local")) return "local-mode";
+    // v3.25.20: bomba em modo LOCAL → keep-alive (o INO precisa receber TX a cada <15min).
+    // Ainda aplicamos o STALE (garante que o payload bata com o desired/estado atual),
+    // mas NUNCA "unnecessary": local sempre transmite o polling confirmando o estado.
+    const anyLocal = data.some((e) => e.last_actuation_origin === "local");
     let allRealMatchDesired = true; // todos os eqs (com estado real conhecido) já batem
     let haveRealForAll = true;      // temos last_outputs_state de todos
     for (const eq of data) {
@@ -4585,6 +4586,10 @@ async function pollingSkipReason(frame, tsnn) {
       if (realBit === null) haveRealForAll = false;
       else if (realBit !== desiredBit) allRealMatchDesired = false;
     }
+    // v3.25.20: modo LOCAL → NUNCA "unnecessary". Continua polando todo ciclo como
+    // keep-alive do watchdog do INO (15min). O payload já bate com o estado real
+    // (desired atualizado pelo LOCAL OVERRIDE) e a RPC preserva a origem 'local'.
+    if (anyLocal) return null;
     if (haveRealForAll && allRealMatchDesired) {
       // v3.25.16: heartbeat baseado em PROVA DE VIDA (último RX — espontâneo OU
       // resposta), não no último poll. Se a PLC se manifestou nos últimos
@@ -4741,12 +4746,8 @@ async function processNextCommand() {
       if (skipReason) {
         const skipMsg = skipReason === "stale"
           ? "Polling stale: payload não bate com desired_running atual"
-          : skipReason === "local-mode"
-            ? "Bomba em modo LOCAL: agente não transmite (só observa espontâneos)"
-            : "Polling desnecessário: estado real já bate com desired_running";
-        const skipTag = skipReason === "stale" ? "STALE"
-          : skipReason === "local-mode" ? "LOCAL"
-            : "DESNEC";
+          : "Polling desnecessário: estado real já bate com desired_running";
+        const skipTag = skipReason === "stale" ? "STALE" : "DESNEC";
         try {
           await supabase
             .from("commands")
