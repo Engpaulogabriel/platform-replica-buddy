@@ -2085,7 +2085,10 @@ async function fireSafetyOff(equipmentId, entry) {
             .update({
               desired_running: inverseBit === "1",
               pending_command_id: null,
-              last_actuation_origin: "local",
+              // v3.25.21: o safety é uma ação do SISTEMA (failsafe), NÃO botoeira.
+              // Origem 'remote-desired' (não 'local') — assim não mostra badge LOCAL
+              // indevido e a PLC segue no fluxo NORMAL de polling (não vira modo local).
+              last_actuation_origin: "remote-desired",
               safety_expired_at: new Date().toISOString(),
               // v3.11.5: NUNCA atualizar last_communication aqui — safety é TX
               // sem RX. last_communication só pode ser tocado por RX real
