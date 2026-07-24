@@ -6127,6 +6127,25 @@ async function reconfigureWithAuth() {
   void stopBridge().finally(() => showSetupWindow());
 }
 
+// Sair (item 5): fechar o agente pelo menu exige o MESMO login admin ONLINE do
+// Reconfigurar. Sem login válido = não fecha. Só protege o clique do menu — os
+// demais caminhos de saída (OTA/relaunch, anti-clone, watchdog) seguem diretos.
+async function quitWithAuth() {
+  let r = null;
+  try { r = await promptAuth("login"); } catch (_) { return; }
+  if (!r) return; // cancelado
+  const check = await validateReconfigLogin(r.email, r.password);
+  if (!check.ok) {
+    try { dialog.showErrorBox("Saída negada", check.reason); } catch (_) {}
+    try { pushLog("warn", "system", `[SECURITY] Saída pelo menu NEGADA (${r.email || "?"}): ${check.reason}`); } catch (_) {}
+    return;
+  }
+  try { pushLog("warn", "system", `[SECURITY] Saída pelo menu AUTORIZADA por ${r.email}`); } catch (_) {}
+  appClosing = true;
+  try { flushLogs(); } catch (_) {}
+  void stopBridge().finally(() => app.quit());
+}
+
 // --- Log window ---
 // item 2: exige senha ("Renov@Log2026") antes de abrir a janela de log.
 async function showLogWindow() {
@@ -7225,11 +7244,7 @@ function createTray() {
     { label: "Configurações", click: () => showConfigWindow() },
     { label: "Reconfigurar (login)", click: () => { void reconfigureWithAuth(); } },
     { type: "separator" },
-    { label: "Sair", click: () => {
-      appClosing = true;
-      flushLogs();
-      void stopBridge().finally(() => app.quit());
-    }},
+    { label: "Sair (login)", click: () => { void quitWithAuth(); } },
   ]);
   tray.setToolTip("RENOV Agent - Iniciando...");
   tray.setContextMenu(contextMenu);
