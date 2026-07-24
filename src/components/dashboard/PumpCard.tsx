@@ -198,7 +198,12 @@ function PumpCardImpl(props: PumpCardProps) {
             </span>
           ) : (
             <>
-              {(pump.pending === "turning_on" || (pump.pending === "error" && pump.running)) && onReset ? (
+              {/* RESET (forçar desligamento) só faz sentido enquanto o comando ainda
+                  não estabilizou. NÃO mostrar quando a bomba mudou por ação LOCAL
+                  (botoeira): o estado ligado é intencional do operador no campo, não
+                  um comando falho. Só aparece em transição (turning_on) ou erro de
+                  comando REMOTO com a bomba ainda ligada. */}
+              {(pump.pending === "turning_on" || (pump.pending === "error" && pump.running && pump.actuationOrigin !== "local")) && onReset ? (
                 <button
                   onClick={(e) => { e.stopPropagation(); onReset(pump.id); }}
                   className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-destructive/15 text-destructive font-bold text-[10px] uppercase tracking-wide border border-destructive/30 hover:bg-destructive/25 transition-colors"
