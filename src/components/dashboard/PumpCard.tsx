@@ -73,14 +73,25 @@ function PumpCardImpl(props: PumpCardProps) {
 
   const stateInfo = derivePumpState(pump);
   const isTransitioning = pump.pending === "turning_on" || pump.pending === "turning_off" || pump.pending === "resetting";
+  // Transição ATIVA de liga/desliga (exclui "resetting" e "error"): usada para os
+  // badges LOCAL e RESET, cujas regras são absolutas quanto a "Ligando/Desligando".
+  const isActiveTransition = pump.pending === "turning_on" || pump.pending === "turning_off";
   const isPending = !!pump.pending;
   const isOffline = pump.communicationStatus === "offline";
   const isUnstable = pump.communicationStatus === "unstable";
   const isCommFail = stateInfo.isCommFail;
 
   // ── Badge de origem LOCAL ─────────────────────────────────────────────────
-  // Indicador permanente: último acionamento foi no painel físico do poço.
-  const showLocal = !isOffline && pump.actuationOrigin === "local";
+  // Só em estado ESTÁVEL: NUNCA durante uma transição (Ligando/Desligando). Um pump
+  // "error" ou já estabilizado (origin local) ainda mostra LOCAL.
+  const showLocal = !isOffline && pump.actuationOrigin === "local" && !isTransitioning;
+
+  // ── Botão/badge RESET (forçar desligamento) ───────────────────────────────
+  // Regra absoluta: SÓ durante uma transição travada (Ligando/Desligando que já
+  // passou do tempo de confirmação). NUNCA em estado estável nem no estado "error".
+  const RESET_STUCK_MS = 60_000;
+  const transitionStuckMs = pump.pendingStartedAt ? (Date.now() - pump.pendingStartedAt) : Infinity;
+  const showReset = isActiveTransition && transitionStuckMs >= RESET_STUCK_MS;
 
   const bg = inMaintenance
     ? "bg-[#FFF3E0] dark:bg-amber-950/30 border-l-[3px] border-l-amber-500 border-amber-300/60"
@@ -198,12 +209,9 @@ function PumpCardImpl(props: PumpCardProps) {
             </span>
           ) : (
             <>
-              {/* RESET (forçar desligamento) só faz sentido enquanto o comando ainda
-                  não estabilizou. NÃO mostrar quando a bomba mudou por ação LOCAL
-                  (botoeira): o estado ligado é intencional do operador no campo, não
-                  um comando falho. Só aparece em transição (turning_on) ou erro de
-                  comando REMOTO com a bomba ainda ligada. */}
-              {(pump.pending === "turning_on" || (pump.pending === "error" && pump.running && pump.actuationOrigin !== "local")) && onReset ? (
+              {/* RESET só durante transição travada (Ligando/Desligando além do tempo
+                  de confirmação). NUNCA em estado estável nem "error". Ver showReset. */}
+              {showReset && onReset ? (
                 <button
                   onClick={(e) => { e.stopPropagation(); onReset(pump.id); }}
                   className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-destructive/15 text-destructive font-bold text-[10px] uppercase tracking-wide border border-destructive/30 hover:bg-destructive/25 transition-colors"

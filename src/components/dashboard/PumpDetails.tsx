@@ -72,7 +72,7 @@ export function PumpDetails({ pumps, onToggle, flowEnabled, consumptionEnabled, 
                       AUTO
                     </span>
                   )}
-                  {pump.actuationOrigin === "local" && !isOffline && (
+                  {pump.actuationOrigin === "local" && !isOffline && !isTransitioning && (
                     <span
                       className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-warning/20 text-warning font-bold text-[10px] uppercase tracking-wide border border-warning/40"
                       title="Acionamento local detectado — bomba não obedeceu o comando remoto"
@@ -186,7 +186,8 @@ export function PumpDetails({ pumps, onToggle, flowEnabled, consumptionEnabled, 
                           <Droplets className="w-3.5 h-3.5 text-primary shrink-0" />
                           <span className="text-xs font-bold text-foreground truncate">{pump.name}</span>
                         </div>
-                        {pump.online && pump.actuationOrigin === "local" ? (
+                        {pump.online && pump.actuationOrigin === "local"
+                          && pump.pending !== "turning_on" && pump.pending !== "turning_off" ? (
                           <span
                             className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-warning/20 text-warning border border-warning/40"
                             title="Acionada localmente no painel"

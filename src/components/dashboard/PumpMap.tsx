@@ -183,8 +183,9 @@ export default function PumpMap({ pumps }: PumpMapProps) {
         }
 
         // Badge LOCAL no canto do ícone: último acionamento foi no painel físico
-        // (last_actuation_origin="local"). Não aparece p/ origem remota nem offline.
-        const showLocal = !isOffline && pump.actuationOrigin === "local";
+        // (last_actuation_origin="local"). Só em estado ESTÁVEL — nunca durante uma
+        // transição (Ligando/Desligando). Não aparece p/ origem remota nem offline.
+        const showLocal = !isOffline && pump.actuationOrigin === "local" && !isTransitioning;
         const localBadge = showLocal
           ? `<div style="
               position:absolute;top:-7px;right:-9px;z-index:1;
@@ -304,7 +305,7 @@ export default function PumpMap({ pumps }: PumpMapProps) {
                         AUTO
                       </span>
                     )}
-                    {!isOffline && pump.actuationOrigin === "local" && (
+                    {!isOffline && pump.actuationOrigin === "local" && !isTransitioning && (
                       <span
                         className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-warning/20 text-warning font-bold text-[9px] uppercase tracking-wide border border-warning/40 shrink-0"
                         title="Último acionamento via painel local/botoeira"
