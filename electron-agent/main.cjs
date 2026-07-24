@@ -4718,15 +4718,21 @@ async function processNextCommand() {
 
       if (candidate.type === "polling") {
         const activeReinforcement = getActiveReinforcementForTsnn(candTsnn);
-        if (activeReinforcement) {
+        // v3.25.25: NÃO suspende o keep-alive durante um reforço de DESLIGAR. O
+        // polling agora é sempre {0} (v3.25.24, passivo — não atua o relé), idêntico
+        // ao {0} do reforço de OFF; deixá-lo passar mantém a PLC viva (sem os ~90s
+        // cegos) e não interfere. Só suspende se o reforço espera bit != '0' (ex.:
+        // uma sequência que precisa de outro estado), onde um {0} de polling poderia
+        // contrariar o reforço.
+        if (activeReinforcement && activeReinforcement.entry.expectedBit !== "0") {
           pushLog("info", "system",
-            `CHECK reforco TX: polling ${candidate.id.substring(0,8)} TSNN=${candTsnn} BLOQUEADO; eq=${String(activeReinforcement.equipmentId).substring(0,8)} cmd=${String(activeReinforcement.entry.cmdId || "?").substring(0,8)} restante=${Math.ceil(activeReinforcement.remainingMs / 1000)}s -> pulando para proxima PLC`);
+            `CHECK reforco TX: polling ${candidate.id.substring(0,8)} TSNN=${candTsnn} BLOQUEADO (reforço bit=${activeReinforcement.entry.expectedBit}); eq=${String(activeReinforcement.equipmentId).substring(0,8)} cmd=${String(activeReinforcement.entry.cmdId || "?").substring(0,8)} restante=${Math.ceil(activeReinforcement.remainingMs / 1000)}s -> pulando para proxima PLC`);
           await supabase
             .from("commands")
             .update({
               status: "cancelled",
               responded_at: new Date().toISOString(),
-              error_message: "Polling suspenso: reforco TX manual ativo nesta PLC",
+              error_message: "Polling suspenso: reforco TX manual (bit!=0) ativo nesta PLC",
             })
             .eq("id", candidate.id)
             .eq("status", "pending");
