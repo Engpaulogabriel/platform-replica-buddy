@@ -2220,6 +2220,10 @@ function maybeCancelSafetyOnRx(equipmentId, rxPayload) {
 
   if (stateBit === entry.expectedBit) {
     clearSafetyTimer(equipmentId, `RX confirmou bit ${stateBit} da saida ${saida || "?"}`);
+    // v3.25.26: safety confirmado → libera o polling da PLC imediatamente (o bloqueio
+    // por-PLC já foi zerado por clearSafetyTimer→clearManualReinforcements). Reenfileira
+    // agora, sem esperar o próximo tick de 11s.
+    void tickEnqueuePolling();
   }
 }
 
@@ -3746,6 +3750,7 @@ function processTelemFrame(frame) {
   try {
     const rx = String(rxPayload || "");
     const rxValid = /^[01]{1,6}$/.test(rx);
+    let anyReinforceCleared = false;
     for (const [eqId, entry] of manualReinforceByEquipment.entries()) {
       if (!entry || entry.tsnn !== rxTsnn) continue;
       if (!rxValid || !entry.expectedBit) continue;
@@ -3758,10 +3763,20 @@ function processTelemFrame(frame) {
         pushLog("info", "system",
           `[REFORCO] Confirmado TSNN ${rxTsnn} (RX bit=${stateBit} correto, saida=${saida})`);
         clearManualReinforcements(eqId, `RX confirmou bit ${stateBit} da saida ${saida}`);
+        anyReinforceCleared = true;
       } else {
         pushLog("info", "system",
           `[REFORCO] RX intermediario TSNN ${rxTsnn} (recebido=${stateBit}, esperado=${entry.expectedBit}) — reforco mantido`);
       }
+    }
+    // v3.25.26: reforço confirmado → o bloqueio por-PLC já foi ZERADO acima
+    // (clearManualReinforcements deleta a entrada → getActiveReinforcementForTsnn
+    // retorna null). Aqui forçamos um enqueue IMEDIATO para a PLC voltar ao polling
+    // sem esperar o próximo tick de 11s — "zero tempo morto". tickEnqueuePolling tem
+    // guardas próprias (throttle/manuais pendentes), então é seguro chamar aqui.
+    if (anyReinforceCleared) {
+      pushLog("info", "system", `[REFORCO] polling liberado para TSNN ${rxTsnn} — reenfileirando imediatamente`);
+      void tickEnqueuePolling();
     }
   } catch (e) { pushLog("warn", "system", `clearReinforce on RX erro: ${e.message}`); }
 
