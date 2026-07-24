@@ -1,4 +1,4 @@
-project_id = "dnyukgfedredvxpzjpqz"
+project_id = "vabguxllyguztneumahq"
 
 [functions.cleanup-agent-logs]
 verify_jwt = false

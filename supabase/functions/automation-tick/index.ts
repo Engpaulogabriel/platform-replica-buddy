@@ -27,7 +27,7 @@ Deno.serve(async (req) => {
   // ── Auth: aceita SERVICE_ROLE, CRON_SECRET, ou QUALQUER JWT válido emitido por
   // este projeto Supabase (anon/authenticated). Cron envia apikey/Authorization
   // com a publishable key do projeto — basta validar o `ref` do payload.
-  const projectRef = "dnyukgfedredvxpzjpqz";
+  const projectRef = "vabguxllyguztneumahq";
   const serviceRole = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const cronSecret = Deno.env.get("CRON_SECRET") ?? "";
   const authHeader = req.headers.get("Authorization") ?? "";
