@@ -4487,13 +4487,15 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
 // não emita espontâneo. Espontâneos já atualizam last_communication; isto é o piso.
 const HEARTBEAT_POLL_MS = 3 * 60_000;
 
-// v3.25.15: decide se um polling deve ser DESCARTADO antes do TX. Retorna:
-//   "stale"       → payload não bate mais com o desired_running atual (atuação local
-//                   mudou o desired depois do enqueue);
-//   "unnecessary" → o estado REAL da bomba (last_outputs_state) já bate com o desired
-//                   em todas as saídas → não há divergência para corrigir (evita TX de
-//                   reforço à toa, que confirmava o estado e apagava o badge LOCAL);
-//                   suprimido só dentro da janela de heartbeat.
+// v3.25.18: decide se um polling deve ser DESCARTADO antes do TX. Retorna:
+//   "local-mode"  → REGRA DEFINITIVA: alguma bomba da PLC está em modo LOCAL
+//                   (last_actuation_origin='local'). O agente NÃO transmite NADA para
+//                   essa PLC — nem polling, nem heartbeat, nem stale. Só observa
+//                   espontâneos. Volta a transmitir quando um comando manual mudar a
+//                   origem (→ remote-cmd). Tem precedência sobre tudo abaixo.
+//   "stale"       → payload não bate mais com o desired_running atual;
+//   "unnecessary" → estado REAL já == desired em todas as saídas E a PLC deu prova de
+//                   vida (RX) nos últimos HEARTBEAT_POLL_MS (heartbeat só p/ NÃO-local);
 //   null          → transmitir.
 // Em erro/dúvida retorna null (NÃO descarta) — segurança: nunca sumir com polling.
 async function pollingSkipReason(frame, tsnn) {
@@ -4504,7 +4506,7 @@ async function pollingSkipReason(frame, tsnn) {
     const { data, error } = await withCloudTimeout(
       supabase
         .from("equipments")
-        .select("saida, desired_running, last_outputs_state")
+        .select("saida, desired_running, last_outputs_state, last_actuation_origin")
         .eq("farm_id", farmId)
         .ilike("hw_id", `${String(tsnn)}%`),
       "polling skip check",
@@ -4515,6 +4517,11 @@ async function pollingSkipReason(frame, tsnn) {
       return null;
     }
     if (!Array.isArray(data) || data.length === 0) return null;
+    // v3.25.18: REGRA BINÁRIA — bomba em modo LOCAL (botoeira) = ZERO TX para a PLC.
+    // A bomba está sob controle do operador de campo; o agente só OBSERVA (espontâneos)
+    // e reporta o estado. Tem precedência sobre stale/unnecessary/heartbeat. O modo
+    // local é limpo quando um novo comando manual confirma e a origem vira 'remote-cmd'.
+    if (data.some((e) => e.last_actuation_origin === "local")) return "local-mode";
     let allRealMatchDesired = true; // todos os eqs (com estado real conhecido) já batem
     let haveRealForAll = true;      // temos last_outputs_state de todos
     for (const eq of data) {
@@ -4676,26 +4683,32 @@ async function processNextCommand() {
     }
 
     if (cmd.type === "polling") {
-      // v3.25.12/15: descarta polling antes do TX se for STALE (payload ≠ desired atual)
-      // ou UNNECESSARY (estado real já == desired → sem divergência a corrigir; evita o
-      // TX de reforço à toa que confirmava o estado e apagava o badge LOCAL).
+      // v3.25.12/15/18: descarta polling antes do TX se: LOCAL-MODE (bomba em modo
+      // local → ZERO TX), STALE (payload ≠ desired atual), ou UNNECESSARY (estado real
+      // já == desired → sem divergência; evita reforço à toa que apagava o badge LOCAL).
       const skipReason = await pollingSkipReason(frame, expectedTsnn);
       if (skipReason) {
+        const skipMsg = skipReason === "stale"
+          ? "Polling stale: payload não bate com desired_running atual"
+          : skipReason === "local-mode"
+            ? "Bomba em modo LOCAL: agente não transmite (só observa espontâneos)"
+            : "Polling desnecessário: estado real já bate com desired_running";
+        const skipTag = skipReason === "stale" ? "STALE"
+          : skipReason === "local-mode" ? "LOCAL"
+            : "DESNEC";
         try {
           await supabase
             .from("commands")
             .update({
               status: "cancelled",
               responded_at: new Date().toISOString(),
-              error_message: skipReason === "stale"
-                ? "Polling stale: payload não bate com desired_running atual"
-                : "Polling desnecessário: estado real já bate com desired_running",
+              error_message: skipMsg,
             })
             .eq("id", cmd.id)
             .eq("status", "pending");
         } catch (_) {}
         pushLog("info", "system",
-          `[POLLING ${skipReason === "stale" ? "STALE" : "DESNEC"}] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} descartado (payload ${extractTxPayload(frame)})`);
+          `[POLLING ${skipTag}] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} descartado (payload ${extractTxPayload(frame)})`);
         // v3.25.16: descarte é ATIVIDADE da fila — reseta o relógio do watchdog
         // (não é stall). watchdogRestartCount zera porque o ciclo está saudável.
         lastTxOrSkipAt = Date.now();
