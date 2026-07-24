@@ -933,6 +933,45 @@ function clearManualReinforcements(equipmentId, reason) {
   return true;
 }
 
+// v3.25.27 (Fix 2a): reforço de DESLIGAR esgotou e a bomba segue ligada → assume
+// controle LOCAL. Espelha o LOCAL OVERRIDE: desired_running=true + origin='local',
+// cancela o comando manual pendente e libera o polling (que passa a ser {0} passivo).
+// Evita a PLC ficar presa aguardando o safety (120s) e corrige o desired para bater
+// com a realidade (a bomba está ligada pela botoeira).
+async function resolveStuckOffAsLocal(equipmentId, tsnn) {
+  try {
+    pushLog("warn", "system",
+      `[REFORCO→LOCAL] OFF esgotado e bomba segue ligada (eq ${String(equipmentId).substring(0, 8)}, TSNN ${tsnn}) → tratando como acionamento local; cancelando comando e liberando polling`);
+    clearSafetyTimer(equipmentId, "reforço OFF esgotado — bomba em modo local");
+    clearManualReinforcements(equipmentId, "reforço OFF esgotado — bomba em modo local");
+    if (supabase && farmId) {
+      try {
+        await withCloudTimeout(
+          supabase.from("equipments")
+            .update({ desired_running: true, last_actuation_origin: "local" })
+            .eq("id", equipmentId),
+          "reforço→local desired", CLOUD_WRITE_TIMEOUT_MS);
+      } catch (e) { pushLog("warn", "cloud", `[REFORCO→LOCAL] update desired falhou: ${e.message}`); }
+      try {
+        await withCloudTimeout(
+          supabase.from("commands")
+            .update({
+              status: "cancelled",
+              responded_at: new Date().toISOString(),
+              error_message: "Bomba em modo local (reforço OFF esgotado, RX persistente ligada)",
+            })
+            .eq("farm_id", farmId)
+            .eq("equipment_id", equipmentId)
+            .in("status", ["pending", "sent"]),
+          "reforço→local cancel cmd", CLOUD_WRITE_TIMEOUT_MS);
+      } catch (e) { pushLog("warn", "cloud", `[REFORCO→LOCAL] cancel comando falhou: ${e.message}`); }
+    }
+    void tickEnqueuePolling();
+  } catch (e) {
+    pushLog("warn", "system", `[REFORCO→LOCAL] falhou: ${e.message}`);
+  }
+}
+
 // Agenda os reenvios (15s, 30s) do mesmo frame para garantir entrega via RF.
 // Cada reenvio so dispara se o safety timer do equipamento ainda existir
 // (ou seja, a bomba ainda nao confirmou o estado desejado) E o cmdId combinar.
@@ -3767,6 +3806,18 @@ function processTelemFrame(frame) {
       } else {
         pushLog("info", "system",
           `[REFORCO] RX intermediario TSNN ${rxTsnn} (recebido=${stateBit}, esperado=${entry.expectedBit}) — reforco mantido`);
+        // v3.25.27 (Fix 2a): reforço de DESLIGAR esgotou as 4 tentativas e a bomba
+        // SEGUE ligada (RX bit=1 vs esperado 0) → o {0} não desliga, a bomba está sob
+        // controle LOCAL (botoeira). Trata como acionamento local: desired=true,
+        // origin=local, cancela o comando e libera o polling — sem esperar o safety
+        // (120s). blockUntil = início + 45s + 5s; passado (blockUntil - 5s) as 4
+        // tentativas já foram enviadas.
+        if (entry.expectedBit === "0" && stateBit === "1"
+            && !entry.resolvingLocal
+            && Date.now() >= (entry.blockUntil || 0) - 5_000) {
+          entry.resolvingLocal = true; // idempotência: dispara uma única vez
+          void resolveStuckOffAsLocal(eqId, rxTsnn);
+        }
       }
     }
     // v3.25.26: reforço confirmado → o bloqueio por-PLC já foi ZERADO acima
@@ -4574,16 +4625,48 @@ const FAST_DETECT_MAX_PLCS = 3;
 // nada; polling não atua no relé). A migration 20260723160000 preserva
 // last_actuation_origin='local' quando o polling confirma o estado, então o badge não
 // some. Em erro/dúvida retorna null (NÃO descarta) — nunca sumir com polling.
-// v3.25.24: um POLLING é keep-alive e SEMPRE leva {0} em TODAS as saídas — nunca
-// {1}, em modo local OU remoto. Modelo do relé: {0} = estado NORMAL (relé solto,
-// botoeira/contator controlam a bomba); {1} = override momentâneo que SÓ existe na
-// sequência MANUAL de desligamento forçado ({1}→{0}), que não passa pelo polling.
-// Segurar {1} num polling religaria a bomba ao desligar na botoeira (ciclo que
-// queima o motor). O INO watchdog (15min) é alimentado por qualquer frame, então
-// {0} mantém a prova de vida. Zera o payload inteiro (síncrono, sem consulta).
-function forcePollingKeepAliveZero(frame) {
-  return String(frame).replace(TX_PAYLOAD_RE, (match, p) =>
-    match.replace(p, "0".repeat(p.length)));
+// v3.25.27: normaliza o payload do polling por SAÍDA, conforme a origem e o desired:
+//   • last_actuation_origin === 'local'  → bit 0  (relé passivo; a botoeira controla,
+//                                          o polling não participa — keep-alive)
+//   • desired_running === true (não-local) → bit 1  (mantém o relé acionado; a bomba
+//                                          foi LIGADA por comando remoto e deve seguir)
+//   • desired_running === false (não-local) → bit 0  (relé solto)
+// CORRIGE a v3.25.24 (forcePollingKeepAliveZero): forçar {0} incondicional DESLIGAVA
+// bombas ligadas remotamente (o polling {0} solta o relé). O pulso {1}→{0} de
+// desligamento forçado é a runForcedShutdownSequence (separada, não passa por aqui).
+async function normalizePollingFrame(frame, tsnn) {
+  try {
+    if (!supabase || !farmId || !tsnn) return frame;
+    const payload = extractTxPayload(frame);
+    if (!payload || !/^[01]{1,6}$/.test(payload)) return frame;
+    const { data, error } = await withCloudTimeout(
+      supabase
+        .from("equipments")
+        .select("saida, desired_running, last_actuation_origin")
+        .eq("farm_id", farmId)
+        .ilike("hw_id", `${String(tsnn)}%`),
+      "polling payload normalize",
+      CLOUD_READ_TIMEOUT_MS,
+    );
+    if (error || !Array.isArray(data) || data.length === 0) return frame;
+    const bits = payload.split("");
+    let changed = false;
+    for (const eq of data) {
+      const saida = Number(eq.saida) || 0;
+      if (saida < 1 || saida > bits.length) continue;
+      let bit;
+      if (eq.last_actuation_origin === "local") bit = "0";      // LOCAL: relé passivo
+      else if (eq.desired_running === true) bit = "1";          // REMOTO ligada: mantém relé
+      else bit = "0";                                           // REMOTO desligada: relé solto
+      if (bits[saida - 1] !== bit) { bits[saida - 1] = bit; changed = true; }
+    }
+    if (!changed) return frame;
+    const np = bits.join("");
+    return String(frame).replace(TX_PAYLOAD_RE, (m, p) =>
+      p.length === np.length ? m.replace(p, np) : m);
+  } catch (_) {
+    return frame;
+  }
 }
 
 async function pollingSkipReason(frame, tsnn) {
@@ -4606,15 +4689,13 @@ async function pollingSkipReason(frame, tsnn) {
     }
     if (!Array.isArray(data) || data.length === 0) return null;
     const anyLocal = data.some((e) => e.last_actuation_origin === "local");
-    // v3.25.23/24: modelo CORRETO do relé — {0} é o estado NORMAL (relé solto, a
-    // botoeira/contator controlam), {1} é override momentâneo que só existe na
-    // sequência MANUAL de desligamento forçado ({1}→{0}). Um polling é keep-alive e
-    // NUNCA leva {1} (o frame já foi zerado por forcePollingKeepAliveZero). Bomba em
-    // modo LOCAL → SEMPRE transmite o keep-alive {0}, nunca descartado.
+    // v3.25.27: o payload do polling é normalizado por saída em normalizePollingFrame
+    // (LOCAL→0, REMOTO liga→1, REMOTO desliga→0), então ele SEMPRE espelha origin/
+    // desired atuais — não fica "stale". Bomba em modo LOCAL → SEMPRE transmite o
+    // keep-alive {0} (relé passivo), nunca descartado.
     if (anyLocal) return null;
-    // v3.25.24: NÃO existe mais "stale" — o payload de polling é SEMPRE {0}, não
-    // deriva do desired_running, então nunca fica "defasado". Mantemos só o
-    // "unnecessary" (heartbeat) para não congestionar a serial.
+    // Sem "stale": o payload já reflete o desired atual (normalizado no TX). Mantemos
+    // só o "unnecessary" (heartbeat) para não congestionar a serial em fazenda grande.
     let allRealMatchDesired = true; // todos os eqs (com estado real conhecido) já batem
     let haveRealForAll = true;      // temos last_outputs_state de todos
     for (const eq of data) {
@@ -4784,19 +4865,18 @@ async function processNextCommand() {
     }
 
     if (cmd.type === "polling") {
-      // v3.25.24: keep-alive é SEMPRE {0} em TODAS as saídas (local E remoto) — nunca
-      // segura {1} (que religaria a bomba ao desligar na botoeira/contator). Normaliza
-      // o frame ANTES do skip check e do TX. O {1} só é pulsado na sequência MANUAL de
-      // desligamento forçado (runForcedShutdownSequence), que não passa por aqui.
-      const zeroed = forcePollingKeepAliveZero(frame);
-      if (zeroed !== frame) {
+      // v3.25.27: normaliza o payload por saída (LOCAL→0, REMOTO ligada→1, REMOTO
+      // desligada→0) ANTES do skip check e do TX. Corrige o {0} incondicional da
+      // v3.25.24 que desligava bombas ligadas remotamente. O pulso {1}→{0} de
+      // desligamento forçado é a runForcedShutdownSequence (separada, não passa aqui).
+      const normalized = await normalizePollingFrame(frame, expectedTsnn);
+      if (normalized !== frame) {
         pushLog("info", "system",
-          `[POLLING] keep-alive normalizado para {0} (TSNN=${expectedTsnn}; polling não atua o relé)`);
-        frame = zeroed;
+          `[POLLING] payload normalizado (TSNN=${expectedTsnn}; local→0, remoto liga→1, remoto desliga→0)`);
+        frame = normalized;
       }
-      // v3.25.24: descarta polling antes do TX só como UNNECESSARY (heartbeat, fazenda
-      // grande). Não existe mais STALE (payload é sempre {0}). Bomba LOCAL e fazenda
-      // pequena sempre transmitem o keep-alive {0} (pollingSkipReason retorna null).
+      // Descarta polling antes do TX só como UNNECESSARY (heartbeat, fazenda grande).
+      // Bomba LOCAL e fazenda pequena sempre transmitem (pollingSkipReason → null).
       const skipReason = await pollingSkipReason(frame, expectedTsnn);
       if (skipReason) {
         const skipMsg = skipReason === "stale"
