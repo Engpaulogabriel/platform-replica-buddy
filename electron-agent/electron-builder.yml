@@ -20,6 +20,8 @@ files:
   - "log-preload.cjs"
   - "config.html"
   - "config-preload.cjs"
+  - "auth.html"
+  - "auth-preload.cjs"
   - "icon.png"
   - "icon.ico"
   - "package.json"

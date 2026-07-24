@@ -1545,7 +1545,20 @@ function appendLogFile(entry) {
         fs.renameSync(file, file.replace(/\.log$/, `.part-${ts}.log`));
       }
     } catch (_) { /* arquivo ainda não existe */ }
-    const line = JSON.stringify(entry) + "\n";
+    // v3.25.33: logs em disco criptografados (safeStorage/DPAPI — atrelado à máquina/
+    // usuário). Se alguém copiar o .log pra outro PC, não consegue ler (chave difere).
+    // Cada linha: "E:" + base64(cipher) + "\n". Fallback texto puro se indisponível.
+    let line;
+    try {
+      const json = JSON.stringify(entry);
+      let enc = false;
+      try { enc = !!(safeStorage && safeStorage.isEncryptionAvailable()); } catch (_) { enc = false; }
+      line = enc
+        ? "E:" + safeStorage.encryptString(json).toString("base64") + "\n"
+        : json + "\n";
+    } catch (_) {
+      line = JSON.stringify(entry) + "\n";
+    }
     fs.appendFile(file, line, () => {});
   } catch (_) {}
 }
@@ -6009,13 +6022,132 @@ function showSetupWindow() {
   setupWindow.on("closed", () => { setupWindow = null; });
 }
 
+// ── v3.25.33: autenticação do Tray (Ver Log / Reconfigurar) ──────────────────
+const LOG_VIEW_PASSWORD = process.env.RENOV_LOG_PASSWORD || "Renov@Log2026";
+const RECONFIG_ADMIN_ROLES = ["admin", "owner"];
+let authPromptMode = "password";
+let authPromptOpen = false;
+
+// Janela de auth reutilizável. Resolve com {email, password} ou null (cancelou).
+function promptAuth(mode) {
+  return new Promise((resolve) => {
+    if (authPromptOpen) return resolve(null);
+    authPromptOpen = true;
+    authPromptMode = mode;
+    let win = null;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      authPromptOpen = false;
+      try { ipcMain.removeListener("auth:submit", onSubmit); } catch (_) {}
+      try { ipcMain.removeListener("auth:cancel", onCancel); } catch (_) {}
+      try { if (win && !win.isDestroyed()) win.close(); } catch (_) {}
+      win = null;
+      resolve(result);
+    };
+    const onSubmit = (_e, data) => finish(data || {});
+    const onCancel = () => finish(null);
+    try {
+      win = new BrowserWindow({
+        width: 380, height: mode === "login" ? 320 : 240,
+        resizable: false, minimizable: false, maximizable: false, fullscreenable: false,
+        title: "RENOV Agent", alwaysOnTop: true, icon: path.join(__dirname, "icon.png"),
+        webPreferences: { preload: path.join(__dirname, "auth-preload.cjs"), contextIsolation: true, nodeIntegration: false },
+      });
+      ipcMain.on("auth:submit", onSubmit);
+      ipcMain.on("auth:cancel", onCancel);
+      win.on("closed", () => finish(null));
+      win.loadFile(path.join(__dirname, "auth.html")).catch(() => finish(null));
+    } catch (e) {
+      finish(null);
+    }
+  });
+}
+ipcMain.handle("auth:get-mode", () => authPromptMode);
+
+// Valida login ONLINE para reconfigurar: signInWithPassword + role admin/owner.
+async function validateReconfigLogin(email, password) {
+  if (!email || !password) return { ok: false, reason: "Informe email e senha." };
+  let cfg = null;
+  try { cfg = (typeof loadConfig === "function") ? loadConfig() : null; } catch (_) {}
+  const url = (cfg && cfg.supabaseUrl) || SUPABASE_URL_DEFAULT;
+  const anon = (cfg && cfg.supabaseAnonKey) || SUPABASE_ANON_DEFAULT;
+  let tmp;
+  try { tmp = createClient(url, anon, { auth: { persistSession: false, autoRefreshToken: false } }); }
+  catch (e) { return { ok: false, reason: "Falha ao inicializar autenticação." }; }
+  let signIn;
+  try {
+    signIn = await tmp.auth.signInWithPassword({ email, password });
+  } catch (e) {
+    return { ok: false, reason: "Reconfiguração requer conexão com a internet." };
+  }
+  if (signIn && signIn.error) {
+    const msg = String(signIn.error.message || "").toLowerCase();
+    if (msg.includes("fetch") || msg.includes("network") || msg.includes("timeout") || msg.includes("failed to")) {
+      return { ok: false, reason: "Reconfiguração requer conexão com a internet." };
+    }
+    return { ok: false, reason: "Credenciais inválidas." };
+  }
+  const user = signIn && signIn.data && signIn.data.user;
+  if (!user || !user.id) return { ok: false, reason: "Credenciais inválidas." };
+  try {
+    const { data: roles, error } = await tmp.from("user_roles").select("role,farm_id").eq("user_id", user.id);
+    if (error) return { ok: false, reason: "Não foi possível verificar a permissão (online)." };
+    const isAdmin = (roles || []).some((r) =>
+      RECONFIG_ADMIN_ROLES.includes(r.role) && (!farmId || !r.farm_id || String(r.farm_id) === String(farmId)));
+    if (!isAdmin) return { ok: false, reason: "Apenas administrador/owner pode reconfigurar este agente." };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: "Reconfiguração requer conexão com a internet." };
+  } finally {
+    try { await tmp.auth.signOut(); } catch (_) {}
+  }
+}
+
+// Reconfigurar (item 1): exige login admin ONLINE antes de resetar o agente.
+async function reconfigureWithAuth() {
+  let r = null;
+  try { r = await promptAuth("login"); } catch (_) { return; }
+  if (!r) return; // cancelado
+  const check = await validateReconfigLogin(r.email, r.password);
+  if (!check.ok) {
+    try { dialog.showErrorBox("Reconfiguração negada", check.reason); } catch (_) {}
+    try { pushLog("warn", "system", `[SECURITY] Reconfiguração NEGADA (${r.email || "?"}): ${check.reason}`); } catch (_) {}
+    return;
+  }
+  try { pushLog("warn", "system", `[SECURITY] Reconfiguração AUTORIZADA por ${r.email}`); } catch (_) {}
+  try {
+    if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
+    if (pollTimer) clearInterval(pollTimer);
+    if (pollingEnqueueTimer) clearInterval(pollingEnqueueTimer);
+    if (pollingTimeoutTimer) clearInterval(pollingTimeoutTimer);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+  } catch (_) {}
+  void stopBridge().finally(() => showSetupWindow());
+}
+
 // --- Log window ---
-function showLogWindow() {
+// item 2: exige senha ("Renov@Log2026") antes de abrir a janela de log.
+async function showLogWindow() {
   if (logWindow && !logWindow.isDestroyed()) {
     logWindow.show();
     logWindow.focus();
     return;
   }
+  try {
+    const r = await promptAuth("password");
+    if (!r) return; // cancelado
+    if ((r.password || "") !== LOG_VIEW_PASSWORD) {
+      try { dialog.showErrorBox("Senha incorreta", "A senha para ver o log está incorreta."); } catch (_) {}
+      return;
+    }
+  } catch (_) { return; }
+  openLogWindow();
+}
+
+function openLogWindow() {
+  if (logWindow && !logWindow.isDestroyed()) { logWindow.show(); logWindow.focus(); return; }
   logWindow = new BrowserWindow({
     width: 720, height: 480,
     title: "RENOV Agent - Log",
@@ -7091,14 +7223,7 @@ function createTray() {
     { type: "separator" },
     { label: "Ver Log", click: () => showLogWindow() },
     { label: "Configurações", click: () => showConfigWindow() },
-    { label: "Reconfigurar (login)", click: () => {
-      if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
-      if (pollTimer) clearInterval(pollTimer);
-      if (pollingEnqueueTimer) clearInterval(pollingEnqueueTimer);
-      if (pollingTimeoutTimer) clearInterval(pollingTimeoutTimer);
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      void stopBridge().finally(() => showSetupWindow());
-    }},
+    { label: "Reconfigurar (login)", click: () => { void reconfigureWithAuth(); } },
     { type: "separator" },
     { label: "Sair", click: () => {
       appClosing = true;

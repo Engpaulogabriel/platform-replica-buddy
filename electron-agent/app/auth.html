@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>RENOV Agent</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #17181b; color: #e7e7e7; margin: 0; padding: 18px; }
+    h3 { margin: 0 0 12px; font-size: 15px; }
+    label { display: block; font-size: 12px; color: #a9adb3; margin: 8px 0 3px; }
+    input { width: 100%; padding: 9px 10px; box-sizing: border-box; background: #23252a; color: #e7e7e7; border: 1px solid #3a3d44; border-radius: 6px; font-size: 14px; }
+    input:focus { outline: none; border-color: #4293507f; }
+    .row { display: none; }
+    .buttons { margin-top: 16px; display: flex; gap: 8px; }
+    button { padding: 9px 16px; border: 0; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
+    .ok { background: #2e7d32; color: #fff; }
+    .ok:disabled { opacity: .6; cursor: default; }
+    .cancel { background: #3a3d44; color: #e7e7e7; }
+    .hint { font-size: 11px; color: #7d8189; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h3 id="title">Autenticação</h3>
+  <div class="row" id="emailRow">
+    <label for="email">Email</label>
+    <input id="email" type="email" autocomplete="off" spellcheck="false" />
+  </div>
+  <label for="password">Senha</label>
+  <input id="password" type="password" autocomplete="off" />
+  <div class="buttons">
+    <button class="ok" id="ok">Confirmar</button>
+    <button class="cancel" id="cancel">Cancelar</button>
+  </div>
+  <div class="hint" id="hint"></div>
+  <script>
+    (async function () {
+      var mode = "password";
+      try { mode = await window.authAPI.getMode(); } catch (e) {}
+      var titleEl = document.getElementById("title");
+      var hintEl = document.getElementById("hint");
+      if (mode === "login") {
+        document.getElementById("emailRow").style.display = "block";
+        titleEl.textContent = "Reconfigurar — login de administrador";
+        hintEl.textContent = "Requer conexão com internet e usuário admin/owner.";
+      } else {
+        titleEl.textContent = "Ver Log — senha necessária";
+      }
+      var okBtn = document.getElementById("ok");
+      function submit() {
+        okBtn.disabled = true;
+        window.authAPI.submit({
+          email: (document.getElementById("email").value || "").trim(),
+          password: document.getElementById("password").value || "",
+        });
+      }
+      okBtn.onclick = submit;
+      document.getElementById("cancel").onclick = function () { window.authAPI.cancel(); };
+      document.getElementById("password").addEventListener("keydown", function (e) { if (e.key === "Enter") submit(); });
+      document.getElementById("email").addEventListener("keydown", function (e) { if (e.key === "Enter") document.getElementById("password").focus(); });
+      document.getElementById(mode === "login" ? "email" : "password").focus();
+    })();
+  </script>
+</body>
+</html>
