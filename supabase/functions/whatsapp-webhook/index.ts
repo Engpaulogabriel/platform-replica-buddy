@@ -11422,6 +11422,13 @@ Deno.serve(async (req) => {
   const url = new URL(req.url);
 
   if (req.method === "GET") {
+    // Keepalive/health: responde instantâneo, SEM tocar no banco. Usado pelo
+    // cron (pg_net) a cada poucos minutos pra manter a função quente e evitar
+    // cold start — a Meta corta o webhook se o 1º request pós-cold-start passar
+    // de ~5s. Não interfere na verificação real (hub.mode=subscribe).
+    if (url.searchParams.get("health") === "1" || url.searchParams.get("ping") === "1") {
+      return new Response("warm", { status: 200, headers: corsHeaders });
+    }
     return handleVerification(url);
   }
 
@@ -11473,6 +11480,12 @@ Deno.serve(async (req) => {
       return new Response("ok", { status: 200, headers: corsHeaders });
     }
 
+    // A Meta exige 200 em <5s; senão marca o webhook como falho e entra em
+    // backoff exponencial (as mensagens param de chegar). Respondemos 200
+    // IMEDIATAMENTE (logo abaixo) e processamos tudo — queries, transcrição de
+    // áudio, respostas ao usuário — em BACKGROUND via EdgeRuntime.waitUntil,
+    // que mantém a função viva após a resposta HTTP.
+    const __bgProcess = (async () => {
     try {
       const entries = payload?.entry ?? [];
       for (const entry of entries) {
@@ -11711,6 +11724,17 @@ Deno.serve(async (req) => {
       }
     } catch (e) {
       console.error("WA webhook parse err", e);
+    }
+    })();
+
+    // Agenda o processamento em background e responde 200 na hora.
+    // @ts-ignore — EdgeRuntime existe no runtime Deno do Supabase
+    if (typeof EdgeRuntime !== "undefined" && typeof EdgeRuntime.waitUntil === "function") {
+      // @ts-ignore
+      EdgeRuntime.waitUntil(__bgProcess);
+    } else {
+      // Fallback fire-and-forget caso waitUntil não exista no ambiente.
+      __bgProcess.catch((e) => console.error("[WEBHOOK bg]", e));
     }
 
     return new Response(JSON.stringify({ ok: true }), {
