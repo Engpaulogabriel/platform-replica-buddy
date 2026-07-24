@@ -2229,6 +2229,32 @@ function hasActiveSafetyForTsnn(tsnn) {
 // que o operador remoto veja o estado real em tempo real. Origem = 'local'.
 async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
   if (!supabase || !farmId) return false;
+  // v3.25.17: se há REFORÇO TX manual ativo para esta PLC e o RX DIVERGE do bit
+  // esperado pelo reforço, é leitura intermediária ("comando ainda não confirmado,
+  // aguardando" — ex.: Ligar {1}, motor não partiu, bomba responde {0}). O caminho
+  // do reforço (processTelemFrame) já tratou isso mantendo o reforço. NÃO classificar
+  // como acionamento LOCAL aqui — senão o LOCAL OVERRIDE cancelaria reforço+safety e
+  // marcaria desired=false prematuramente. Retorna false → o chamador grava a
+  // telemetria com origem PRESERVADA (queueTelemetry null), sem re-atribuir origem.
+  try {
+    const reinf = getActiveReinforcementForTsnn(tsnn);
+    const expBit = reinf && reinf.entry ? reinf.entry.expectedBit : null;
+    if (expBit === "0" || expBit === "1") {
+      const rx = String(rawPayload || "");
+      const reinfSaida = Number(reinf.entry.saida) || 0;
+      let rxBit = null;
+      if (/^[01]{1,6}$/.test(rx)) {
+        if (rx.length === 1) rxBit = rx[0];
+        else if (reinfSaida >= 1 && reinfSaida <= rx.length) rxBit = rx[reinfSaida - 1];
+        else rxBit = rx[rx.length - 1];
+      }
+      if (rxBit && rxBit !== expBit) {
+        pushLog("info", "system",
+          `[REFORCO] RX intermediário TSNN=${tsnn} (recebido=${rxBit} ≠ esperado=${expBit}) — reforço ativo já tratou; não classifica como local`);
+        return false;
+      }
+    }
+  } catch (_) { /* na dúvida, segue o fluxo normal */ }
   try {
     // ─────────────────────────────────────────────────────────────────
     // CLASSIFICACAO DE ORIGEM ANTES da RPC (v3.8.6)
