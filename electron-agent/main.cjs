@@ -956,18 +956,23 @@ async function resolveStuckOffAsLocal(equipmentId, tsnn) {
           "reforço→local desired", CLOUD_WRITE_TIMEOUT_MS);
       } catch (e) { pushLog("warn", "cloud", `[REFORCO→LOCAL] update desired falhou: ${e.message}`); }
       try {
+        // v3.25.30: marca como TIMEOUT (falha), NÃO 'cancelled'. O comando é um
+        // DESLIGAR REMOTO que a bomba não obedeceu — no relatório deve ficar
+        // origin='remote', result='falha', PRESERVANDO o created_by/usuário. 'cancelled'
+        // fazia o log perder a atribuição. (O relé segue seguro: origin='local' acima
+        // mantém o polling em {0}; a correção do RELATÓRIO é server-side.)
         await withCloudTimeout(
           supabase.from("commands")
             .update({
-              status: "cancelled",
+              status: "timeout",
               responded_at: new Date().toISOString(),
-              error_message: "Bomba em modo local (reforço OFF esgotado, RX persistente ligada)",
+              error_message: "Desligamento remoto não confirmado (bomba seguiu ligada após reforço)",
             })
             .eq("farm_id", farmId)
             .eq("equipment_id", equipmentId)
             .in("status", ["pending", "sent"]),
-          "reforço→local cancel cmd", CLOUD_WRITE_TIMEOUT_MS);
-      } catch (e) { pushLog("warn", "cloud", `[REFORCO→LOCAL] cancel comando falhou: ${e.message}`); }
+          "reforço→falha marca comando", CLOUD_WRITE_TIMEOUT_MS);
+      } catch (e) { pushLog("warn", "cloud", `[REFORCO→LOCAL] marcar comando falhou: ${e.message}`); }
     }
     void tickEnqueuePolling();
   } catch (e) {
