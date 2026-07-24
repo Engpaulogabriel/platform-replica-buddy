@@ -102,10 +102,14 @@ const MANUAL_FIRST_TX_GAP_MS = 3_000; // v3.8.13: gap mínimo entre último TX d
 const MANUAL_QUEUED_HOLD_MS = 3_000;
 // v3.25.7: desligamento forçado de bomba ligada localmente. Quando o operador
 // desliga (bit=0) pela plataforma uma bomba com last_actuation_origin='local' e
-// forced_shutdown_enabled=true, o agente executa {1} -> espera RX -> estabiliza -> {0}
-// UMA ÚNICA VEZ (sem reforços/safety). Ver runForcedShutdownSequence().
-const FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS = 13_000; // espera do RX confirmando o {1} (mesma janela do manual)
-const FORCED_SHUTDOWN_STABILIZE_MS = POLL_INTERVAL_MS; // 10s p/ firmware/LoRa estabilizar antes do {0}
+// forced_shutdown_enabled=true, o agente executa o "truque" do INO: o INO só aceita
+// desligar remoto se o ÚLTIMO liga foi remoto — então cada ciclo manda {1} (registra
+// liga remoto) -> 2s -> {0} (agora aceita desligar) -> espera RX. Repete até 3x,
+// PARANDO no 1º ciclo que confirmar o desligamento. Ver runForcedShutdownSequence().
+const FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS = 13_000; // v3.25.29: janela p/ o RX confirmar o {0} (desligou)
+const FORCED_ON_TO_OFF_MS = 2_000;               // v3.25.29: 2s entre o {1} e o {0} de cada ciclo
+const FORCED_BETWEEN_CYCLES_MS = 15_000;         // v3.25.29: 15s entre ciclos (nova tentativa)
+const FORCED_MAX_CYCLES = 3;                     // v3.25.29: no máximo 3 tentativas
 let lastPollingEndAt = 0;             // timestamp do último RX/timeout de polling
 let lastPollingEndedWithTimeout = false; // true se o último polling acabou em timeout
 const lastTxByTsnn = new Map(); // TSNN -> { at, type, cmdId, frame }
@@ -4534,12 +4538,14 @@ function buildForcedOnFrame(offFrame, targetIndex) {
   });
 }
 
-// v3.25.7: sequência de desligamento forçado para bomba ligada localmente.
-// Executa UMA ÚNICA VEZ: TX {1} -> espera RX (13s) -> estabiliza (10s) -> TX {0}.
-// NÃO seta inflightCmd (evita que o matching de RX em processTelemFrame trate o
-// {1} como divergente e arme safety). NÃO agenda reforços nem safety timer — assim
-// o pessoal no campo continua podendo desligar pela botoeira. O rate-limiter
-// anti-colisão (TX_MIN_GAP_MS/RX_AVOID_GAP_MS) do processTxQueue permanece ativo.
+// v3.25.29: sequência de desligamento forçado para bomba ligada localmente.
+// O INO só aceita desligar remoto se o ÚLTIMO liga foi remoto. Então cada ciclo faz:
+// TX {1} (registra liga remoto) -> 2s -> TX {0} (agora aceita desligar) -> espera RX.
+// Até FORCED_MAX_CYCLES (3) ciclos, com FORCED_BETWEEN_CYCLES_MS (15s) entre eles,
+// PARANDO no 1º ciclo em que o RX confirmar o desligamento (bit 0). Se após 3 ciclos
+// não confirmar, desiste — o polling normal mantém {0} daí em diante.
+// NÃO seta inflightCmd (evita matching divergente/safety). NÃO arma safety timer —
+// o pessoal no campo continua podendo religar pela botoeira.
 async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetIndex) {
   forcedShutdownActive = true;
   processing = true;
@@ -4547,35 +4553,50 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
   try {
     const onFrame = buildForcedOnFrame(offFrame, targetIndex);
     pushLog("warn", "system",
-      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} saida=${targetIndex + 1}: bomba local -> sequência {1}->RX->${FORCED_SHUTDOWN_STABILIZE_MS}ms->{0}`);
+      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} saida=${targetIndex + 1}: bomba local -> até ${FORCED_MAX_CYCLES}x {1}->2s->{0}->RX (para no 1º off confirmado)`);
 
-    // Passo 1: TX {1} (assume controle remoto)
-    pushLog("info", "tx", formatTxWithOrigin(cmd, onFrame, " [FORCED OFF: {1}]"), onFrame);
-    sendTxFrame(onFrame, { priority: "manual" });
-    rememberTxForTsnn(expectedTsnn, "forced-on", cmd.id, onFrame);
-    const r1 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "1", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
-    pushLog("info", "system",
-      `[FORCED OFF] {1} ${r1 === "rx" ? "confirmado pelo RX" : "sem RX no timeout — prosseguindo mesmo assim"}; estabilizando ${FORCED_SHUTDOWN_STABILIZE_MS}ms antes do {0}`);
+    let confirmed = false;
+    for (let cycle = 1; cycle <= FORCED_MAX_CYCLES && !confirmed; cycle++) {
+      // A partir do 2º ciclo, espera 15s antes de tentar de novo.
+      if (cycle > 1) {
+        await new Promise((res) => setTimeout(res, FORCED_BETWEEN_CYCLES_MS));
+      }
 
-    // Passo 2: estabilização (10s) para o firmware/LoRa processar
-    await new Promise((res) => setTimeout(res, FORCED_SHUTDOWN_STABILIZE_MS));
+      // Passo 1: TX {1} — registra "liga remoto" (INO passa a aceitar desligar remoto)
+      pushLog("info", "tx", formatTxWithOrigin(cmd, onFrame, ` [FORCED OFF ${cycle}/${FORCED_MAX_CYCLES}: {1}]`), onFrame);
+      sendTxFrame(onFrame, { priority: "manual" });
+      rememberTxForTsnn(expectedTsnn, "forced-on", cmd.id, onFrame);
 
-    // Passo 3: TX {0} (desliga de fato)
-    pushLog("info", "tx", formatTxWithOrigin(cmd, offFrame, " [FORCED OFF: {0}]"), offFrame);
-    sendTxFrame(offFrame, { priority: "manual" });
-    rememberTxForTsnn(expectedTsnn, "forced-off", cmd.id, offFrame);
-    const r0 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "0", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
-    pushLog(r0 === "rx" ? "info" : "warn", "system",
-      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} -> {0} ${r0 === "rx" ? "confirmado pelo RX (desligado)" : "enviado sem confirmação no timeout"}`);
+      // Passo 2: espera 2s antes do {0}
+      await new Promise((res) => setTimeout(res, FORCED_ON_TO_OFF_MS));
 
-    // Grava o resultado no banco. Sem safety/reforço: sequência é executada uma vez.
+      // Passo 3: TX {0} — agora o INO aceita desligar (último liga foi remoto)
+      pushLog("info", "tx", formatTxWithOrigin(cmd, offFrame, ` [FORCED OFF ${cycle}/${FORCED_MAX_CYCLES}: {0}]`), offFrame);
+      sendTxFrame(offFrame, { priority: "manual" });
+      rememberTxForTsnn(expectedTsnn, "forced-off", cmd.id, offFrame);
+
+      // Passo 4: espera o RX confirmar bit=0 (desligou). Se confirmar, PARA.
+      const r0 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "0", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
+      if (r0 === "rx") {
+        confirmed = true;
+        pushLog("info", "system",
+          `[FORCED OFF] ciclo ${cycle}/${FORCED_MAX_CYCLES}: RX confirmou desligamento (bit 0) — PARANDO`);
+      } else {
+        pushLog("warn", "system",
+          `[FORCED OFF] ciclo ${cycle}/${FORCED_MAX_CYCLES}: sem confirmação de off no timeout${cycle < FORCED_MAX_CYCLES ? " — nova tentativa em 15s" : " — desiste (polling mantém {0})"}`);
+      }
+    }
+
+    // Grava o resultado no banco (sem safety/reforço extra).
     try {
       await withCloudTimeout(
         supabase
           .from("commands")
           .update({
-            status: r0 === "rx" ? "executed" : "sent",
-            response: r0 === "rx" ? "(desligamento forçado confirmado)" : "(desligamento forçado enviado, sem confirmação serial)",
+            status: confirmed ? "executed" : "sent",
+            response: confirmed
+              ? "(desligamento forçado confirmado)"
+              : "(desligamento forçado: 3 ciclos sem confirmação; polling mantém {0})",
             responded_at: new Date().toISOString(),
           })
           .eq("id", cmd.id),
