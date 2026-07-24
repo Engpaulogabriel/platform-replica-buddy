@@ -4554,6 +4554,46 @@ const HEARTBEAT_POLL_MS = 3 * 60_000;
 // nada; polling não atua no relé). A migration 20260723160000 preserva
 // last_actuation_origin='local' quando o polling confirma o estado, então o badge não
 // some. Em erro/dúvida retorna null (NÃO descarta) — nunca sumir com polling.
+// v3.25.23: normaliza o frame de polling para keep-alive {0} nas saídas em modo
+// LOCAL (last_actuation_origin='local'). Modelo do relé: {0} = normal (botoeira
+// controla); {1} = override momentâneo que SÓ existe na sequência MANUAL de
+// desligamento forçado ({1}→{0}). Um polling NUNCA leva {1}: segurar {1} numa saída
+// local deixaria o relé acionado — ao desligar na botoeira a bomba religaria sozinha
+// (ciclo liga/desliga que queima o motor). O INO watchdog (15min) aceita qualquer
+// frame, então {0} mantém a prova de vida. Só reescreve os bits das saídas locais;
+// preserva as demais saídas do mesmo PLC.
+async function forceLocalKeepAliveZero(frame, tsnn) {
+  try {
+    if (!supabase || !farmId || !tsnn) return frame;
+    const payload = extractTxPayload(frame);
+    if (!payload || !/^[01]{1,6}$/.test(payload)) return frame;
+    const { data, error } = await withCloudTimeout(
+      supabase
+        .from("equipments")
+        .select("saida, last_actuation_origin")
+        .eq("farm_id", farmId)
+        .ilike("hw_id", `${String(tsnn)}%`),
+      "polling local keep-alive zero",
+      CLOUD_READ_TIMEOUT_MS,
+    );
+    if (error || !Array.isArray(data) || data.length === 0) return frame;
+    const bits = payload.split("");
+    let changed = false;
+    for (const eq of data) {
+      if (eq.last_actuation_origin !== "local") continue;
+      const saida = Number(eq.saida) || 0;
+      if (saida < 1 || saida > bits.length) continue;
+      if (bits[saida - 1] !== "0") { bits[saida - 1] = "0"; changed = true; }
+    }
+    if (!changed) return frame;
+    const newPayload = bits.join("");
+    return String(frame).replace(TX_PAYLOAD_RE, (match, p) =>
+      p.length === newPayload.length ? match.replace(p, newPayload) : match);
+  } catch (_) {
+    return frame;
+  }
+}
+
 async function pollingSkipReason(frame, tsnn) {
   try {
     if (!supabase || !farmId || !tsnn) return null;
@@ -4573,34 +4613,29 @@ async function pollingSkipReason(frame, tsnn) {
       return null;
     }
     if (!Array.isArray(data) || data.length === 0) return null;
-    // v3.25.20: bomba em modo LOCAL → keep-alive (o INO precisa receber TX a cada <15min).
-    // Ainda aplicamos o STALE (garante que o payload bata com o desired/estado atual),
-    // mas NUNCA "unnecessary": local sempre transmite o polling confirmando o estado.
     const anyLocal = data.some((e) => e.last_actuation_origin === "local");
+    // v3.25.23: modelo CORRETO do relé — {0} é o estado NORMAL (relé solto, botoeira
+    // controla), {1} é override momentâneo que só existe na sequência MANUAL de
+    // desligamento forçado ({1}→{0}). Um polling é keep-alive e NUNCA leva {1}.
+    // Bomba em modo LOCAL → SEMPRE transmite o keep-alive (nunca stale/unnecessary);
+    // o frame já foi normalizado para {0} nas saídas locais (forceLocalKeepAliveZero).
+    // Segurar {1} numa saída local deixaria o relé acionado — ao desligar na botoeira
+    // a bomba religaria sozinha (ciclo liga/desliga que queima o motor). O INO
+    // watchdog (15min) é alimentado por QUALQUER frame, então {0} mantém a prova de
+    // vida igual. (Reverte a lógica invertida da v3.25.22.)
+    if (anyLocal) return null;
     let allRealMatchDesired = true; // todos os eqs (com estado real conhecido) já batem
     let haveRealForAll = true;      // temos last_outputs_state de todos
     for (const eq of data) {
       const saida = Number(eq.saida) || 0;
       if (saida < 1 || saida > payload.length) continue;
       const desiredBit = eq.desired_running ? "1" : "0";
+      if (payload[saida - 1] !== desiredBit) return "stale"; // payload != desired atual
       const los = typeof eq.last_outputs_state === "string" ? eq.last_outputs_state : "";
       const realBit = (/^[01]+$/.test(los) && saida <= los.length) ? los[saida - 1] : null;
-      // v3.25.22 SAFETY NET (race-free): um polling NUNCA pode DESLIGAR (bit 0) uma
-      // saída que o último RX confirmou LIGADA (real=1). Keep-alive/confirmação não
-      // atua o relé para OFF — desligar é SEMPRE via comando manual/reset. Usa o
-      // estado REAL (last_outputs_state, atualizado a cada RX), imune à oscilação do
-      // desired_running por origem externa (ex.: night cycle mexendo no desired de
-      // uma bomba ligada localmente). Impede o ciclo liga/desliga/liga que danifica
-      // a bomba. NÃO afeta pollings {1} → nunca suprime keep-alive.
-      if (realBit === "1" && payload[saida - 1] === "0") return "stale";
-      if (payload[saida - 1] !== desiredBit) return "stale"; // payload != desired atual
       if (realBit === null) haveRealForAll = false;
       else if (realBit !== desiredBit) allRealMatchDesired = false;
     }
-    // v3.25.20: modo LOCAL → NUNCA "unnecessary". Continua polando todo ciclo como
-    // keep-alive do watchdog do INO (15min). O payload já bate com o estado real
-    // (desired atualizado pelo LOCAL OVERRIDE) e a RPC preserva a origem 'local'.
-    if (anyLocal) return null;
     if (haveRealForAll && allRealMatchDesired) {
       // v3.25.16: heartbeat baseado em PROVA DE VIDA (último RX — espontâneo OU
       // resposta), não no último poll. Se a PLC se manifestou nos últimos
@@ -4750,9 +4785,19 @@ async function processNextCommand() {
     }
 
     if (cmd.type === "polling") {
-      // v3.25.12/15/18: descarta polling antes do TX se: LOCAL-MODE (bomba em modo
-      // local → ZERO TX), STALE (payload ≠ desired atual), ou UNNECESSARY (estado real
-      // já == desired → sem divergência; evita reforço à toa que apagava o badge LOCAL).
+      // v3.25.23: keep-alive é SEMPRE {0} nas saídas em modo LOCAL — nunca segura {1}
+      // (que religaria a bomba ao desligar na botoeira). Normaliza o frame ANTES do
+      // skip check e do TX. O {1} só é pulsado na sequência MANUAL de desligamento
+      // forçado (runForcedShutdownSequence), que não passa por aqui.
+      const zeroed = await forceLocalKeepAliveZero(frame, expectedTsnn);
+      if (zeroed !== frame) {
+        pushLog("info", "system",
+          `[POLLING LOCAL] keep-alive normalizado para {0} (TSNN=${expectedTsnn}; saída local não segura o relé em {1})`);
+        frame = zeroed;
+      }
+      // v3.25.12/15/23: descarta polling antes do TX se STALE (payload ≠ desired atual)
+      // ou UNNECESSARY (estado real já == desired). Bomba LOCAL sempre transmite o
+      // keep-alive {0} (pollingSkipReason retorna null p/ local).
       const skipReason = await pollingSkipReason(frame, expectedTsnn);
       if (skipReason) {
         const skipMsg = skipReason === "stale"
