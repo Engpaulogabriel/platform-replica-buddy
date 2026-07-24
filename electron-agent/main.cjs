@@ -109,6 +109,7 @@ const MANUAL_QUEUED_HOLD_MS = 3_000;
 // entre TX (o ritmo é o RX/timeout). Ver runForcedShutdownSequence().
 const FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS = 13_000; // v3.25.29: janela p/ esperar o RX de cada TX
 const FORCED_MAX_ON_ATTEMPTS = 5;                // v3.25.29: máx tentativas de {1} até RX (Fase 1)
+const FORCED_MAX_CYCLES = 3;                     // v3.25.32: se o {0} não confirmar off, repete o ciclo ({1}->{0}) até 3x
 let lastPollingEndAt = 0;             // timestamp do último RX/timeout de polling
 let lastPollingEndedWithTimeout = false; // true se o último polling acabou em timeout
 const lastTxByTsnn = new Map(); // TSNN -> { at, type, cmdId, frame }
@@ -862,6 +863,7 @@ let inflightRetryCount = 0;
 // forcedShutdownRxWaiter é um waiter one-shot resolvido pelo processTelemFrame
 // quando o RX confirma o bit alvo esperado.
 let forcedShutdownActive = false;
+let forcedShutdownTsnn = null;        // v3.25.32: TSNN em desligamento forçado — suprime o fluxo normal de RX dessa PLC
 let forcedShutdownRxWaiter = null;    // { tsnn, targetIndex, wantBit, resolve }
 
 // Aguarda um RX confirmando `wantBit` na saída `targetIndex` do `tsnn`, ou expira.
@@ -3753,8 +3755,7 @@ function processTelemFrame(frame) {
   lastRxAtByTsnn.set(String(rxTsnn), Date.now());
 
   // v3.25.7: sequência de desligamento forçado — resolve o waiter se este RX
-  // confirma o bit alvo esperado. NÃO retorna: a telemetria continua sendo
-  // gravada normalmente (queremos registrar os estados {1} e {0}).
+  // confirma o bit alvo esperado.
   if (forcedShutdownRxWaiter && forcedShutdownRxWaiter.tsnn === rxTsnn) {
     const w = forcedShutdownRxWaiter;
     const rx = String(rxPayload || "");
@@ -3762,6 +3763,13 @@ function processTelemFrame(frame) {
       const bit = rx.length === 1 ? rx[0] : (w.targetIndex < rx.length ? rx[w.targetIndex] : null);
       if (bit === w.wantBit) w.resolve();
     }
+  }
+  // v3.25.32: durante o forced shutdown, TODO RX da PLC em desligamento é tratado SÓ
+  // pela sequência (o waiter acima). Suprime o fluxo normal (LOCAL OVERRIDE / telemetria /
+  // desired) para essa PLC — senão o LOCAL OVERRIDE interceptava o RX do {1} e gravava
+  // desired_running=true no meio da sequência.
+  if (forcedShutdownActive && forcedShutdownTsnn && String(rxTsnn) === forcedShutdownTsnn) {
+    return;
   }
 
   // Camada 1: se ha um inflightCmd aguardando OUTRO TSNN, este RX eh
@@ -4553,50 +4561,59 @@ function buildForcedOnFrame(offFrame, targetIndex) {
 // depois do {0} (não religa). Sem inflightCmd/safety (campo pode religar pela botoeira).
 async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetIndex) {
   forcedShutdownActive = true;
+  forcedShutdownTsnn = String(expectedTsnn);
   processing = true;
   processingSince = Date.now();
   try {
     const onFrame = buildForcedOnFrame(offFrame, targetIndex);
     pushLog("warn", "system",
-      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} saida=${targetIndex + 1}: bomba local -> Fase 1: {1} até RX (máx ${FORCED_MAX_ON_ATTEMPTS}x), depois {0} uma vez`);
+      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} saida=${targetIndex + 1}: bomba local -> até ${FORCED_MAX_CYCLES} ciclos [Fase 1: {1} até RX (máx ${FORCED_MAX_ON_ATTEMPTS}x) -> {0} -> espera RX bit=0]; para no 1º ciclo que confirmar off`);
 
-    // ── FASE 1: manda {1} até o RX confirmar que a bomba respondeu (bit 1). Máx 5x. ──
-    let onConfirmed = false;
-    for (let attempt = 1; attempt <= FORCED_MAX_ON_ATTEMPTS && !onConfirmed; attempt++) {
-      pushLog("info", "tx", formatTxWithOrigin(cmd, onFrame, ` [FORCED OFF: {1} ${attempt}/${FORCED_MAX_ON_ATTEMPTS}]`), onFrame);
-      sendTxFrame(onFrame, { priority: "manual" });
-      rememberTxForTsnn(expectedTsnn, "forced-on", cmd.id, onFrame);
-      const rxOn = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "1", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
-      if (rxOn === "rx") {
-        onConfirmed = true;
-        pushLog("info", "system", `[FORCED OFF] {1} confirmado pelo RX na tentativa ${attempt} — mandando {0}`);
+    let success = false;
+    // ── LOOP EXTERNO: repete o ciclo inteiro ({1}->{0}) até confirmar off, máx 3x. ──
+    for (let cycle = 1; cycle <= FORCED_MAX_CYCLES && !success; cycle++) {
+      // ── FASE 1: manda {1} até o RX confirmar que a bomba respondeu (bit 1). Máx 5x. ──
+      let onConfirmed = false;
+      for (let attempt = 1; attempt <= FORCED_MAX_ON_ATTEMPTS && !onConfirmed; attempt++) {
+        pushLog("info", "tx", formatTxWithOrigin(cmd, onFrame, ` [FORCED OFF ciclo ${cycle}/${FORCED_MAX_CYCLES}: {1} ${attempt}/${FORCED_MAX_ON_ATTEMPTS}]`), onFrame);
+        sendTxFrame(onFrame, { priority: "manual" });
+        rememberTxForTsnn(expectedTsnn, "forced-on", cmd.id, onFrame);
+        const rxOn = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "1", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
+        if (rxOn === "rx") {
+          onConfirmed = true;
+          pushLog("info", "system", `[FORCED OFF] ciclo ${cycle}: {1} confirmado pelo RX (tentativa ${attempt}) — mandando {0}`);
+        } else {
+          pushLog("warn", "system",
+            `[FORCED OFF] ciclo ${cycle}: {1} sem RX (tentativa ${attempt}/${FORCED_MAX_ON_ATTEMPTS})${attempt < FORCED_MAX_ON_ATTEMPTS ? " — retransmitindo" : " — FALLBACK: manda {0} mesmo assim"}`);
+        }
+      }
+
+      // ── FASE 2: manda {0} UMA vez e espera o RX confirmar o desligamento (bit 0). ──
+      pushLog("info", "tx", formatTxWithOrigin(cmd, offFrame, ` [FORCED OFF ciclo ${cycle}/${FORCED_MAX_CYCLES}: {0}${onConfirmed ? "" : " FALLBACK"}]`), offFrame);
+      sendTxFrame(offFrame, { priority: "manual" });
+      rememberTxForTsnn(expectedTsnn, "forced-off", cmd.id, offFrame);
+      const r0 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "0", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
+      if (r0 === "rx") {
+        success = true;
+        pushLog("info", "system", `[FORCED OFF] ciclo ${cycle}/${FORCED_MAX_CYCLES}: RX confirmou desligamento (bit 0) — SUCESSO, parando`);
       } else {
         pushLog("warn", "system",
-          `[FORCED OFF] {1} sem RX (tentativa ${attempt}/${FORCED_MAX_ON_ATTEMPTS})${attempt < FORCED_MAX_ON_ATTEMPTS ? " — retransmitindo no próximo ciclo" : " — FALLBACK: manda {0} mesmo assim"}`);
+          `[FORCED OFF] ciclo ${cycle}/${FORCED_MAX_CYCLES}: {0} sem confirmação de off${cycle < FORCED_MAX_CYCLES ? " — REPETINDO o ciclo inteiro" : " — desiste (polling mantém {0})"}`);
       }
     }
 
-    // ── FASE 2 / FALLBACK: manda {0} UMA vez ──
-    pushLog("info", "tx", formatTxWithOrigin(cmd, offFrame, onConfirmed ? " [FORCED OFF: {0}]" : " [FORCED OFF: {0} FALLBACK]"), offFrame);
-    sendTxFrame(offFrame, { priority: "manual" });
-    rememberTxForTsnn(expectedTsnn, "forced-off", cmd.id, offFrame);
-
-    // Confirma o desligamento (bit 0). Se não vier, o polling normal mantém {0}.
-    const r0 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "0", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
-    const success = r0 === "rx";
-    pushLog(success ? "info" : "warn", "system",
-      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} -> {0} ${success ? "confirmado pelo RX (desligado)" : "sem confirmação — polling mantém {0} (provavelmente já desligou)"}`);
-
-    // Grava o resultado no banco (sem safety/reforço extra).
+    // Grava o resultado no banco. Falha após 3 ciclos → 'timeout' (o relatório atribui
+    // ao usuário via log_manual_command). Sem safety/reforço extra.
     try {
       await withCloudTimeout(
         supabase
           .from("commands")
           .update({
-            status: success ? "executed" : "sent",
+            status: success ? "executed" : "timeout",
             response: success
-              ? (onConfirmed ? "(desligamento forçado confirmado)" : "(desligamento forçado confirmado via fallback)")
-              : "(desligamento forçado: {0} enviado, sem confirmação serial; polling mantém {0})",
+              ? "(desligamento forçado confirmado)"
+              : `(desligamento forçado: ${FORCED_MAX_CYCLES} ciclos sem confirmação de off; polling mantém {0})`,
+            error_message: success ? null : `Desligamento forçado não confirmado após ${FORCED_MAX_CYCLES} ciclos`,
             responded_at: new Date().toISOString(),
           })
           .eq("id", cmd.id),
@@ -4610,6 +4627,7 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
     pushLog("error", "system", `[FORCED OFF] sequência falhou: ${e.message}`);
   } finally {
     forcedShutdownActive = false;
+    forcedShutdownTsnn = null;
     processing = false;
     // Libera a fila e pega o próximo comando imediatamente
     setImmediate(() => { void processNextCommand(); });
