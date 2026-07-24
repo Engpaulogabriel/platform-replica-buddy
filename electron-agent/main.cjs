@@ -4583,9 +4583,17 @@ async function pollingSkipReason(frame, tsnn) {
       const saida = Number(eq.saida) || 0;
       if (saida < 1 || saida > payload.length) continue;
       const desiredBit = eq.desired_running ? "1" : "0";
-      if (payload[saida - 1] !== desiredBit) return "stale"; // payload != desired atual
       const los = typeof eq.last_outputs_state === "string" ? eq.last_outputs_state : "";
       const realBit = (/^[01]+$/.test(los) && saida <= los.length) ? los[saida - 1] : null;
+      // v3.25.22 SAFETY NET (race-free): um polling NUNCA pode DESLIGAR (bit 0) uma
+      // saída que o último RX confirmou LIGADA (real=1). Keep-alive/confirmação não
+      // atua o relé para OFF — desligar é SEMPRE via comando manual/reset. Usa o
+      // estado REAL (last_outputs_state, atualizado a cada RX), imune à oscilação do
+      // desired_running por origem externa (ex.: night cycle mexendo no desired de
+      // uma bomba ligada localmente). Impede o ciclo liga/desliga/liga que danifica
+      // a bomba. NÃO afeta pollings {1} → nunca suprime keep-alive.
+      if (realBit === "1" && payload[saida - 1] === "0") return "stale";
+      if (payload[saida - 1] !== desiredBit) return "stale"; // payload != desired atual
       if (realBit === null) haveRealForAll = false;
       else if (realBit !== desiredBit) allRealMatchDesired = false;
     }
