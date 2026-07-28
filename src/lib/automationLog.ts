@@ -252,8 +252,9 @@ const originFromDb = (o: DbOrigin): AutomationOrigin =>
   o === "local" ? "Manual"
   : o === "auto" ? "Automático"
   : o === "system" ? "Sistema"
+  : o === "reading" ? "Sistema"   // leituras de estado — NÃO são comandos remotos
   : "Remoto";
-  // 'remote' e 'reading' caem como "Remoto"
+  // só 'remote' cai como "Remoto"
 
 const actionToDb = (a: AutomationAction): DbAction =>
   a === "Ligada" ? "turn_on" : "turn_off";
@@ -315,8 +316,12 @@ const classifyAction = (r: DbRow): { action: AutomationAction; origin: Automatio
     return { action: "Equipamento religado", origin: "Sistema" };
   }
 
-  // Leituras periódicas
-  if (r.action === "status_read") {
+  // Leituras periódicas — por AÇÃO (status_read) OU por ORIGEM (reading).
+  // BUG corrigido: linhas origin='reading' com action turn_on/turn_off são
+  // OBSERVAÇÕES de estado (o agente registrando que a bomba está ligada/desligada),
+  // NÃO comandos. Antes caíam no ramo de comando → originFromDb('reading')='Remoto'
+  // → apareciam no relatório como comando "Remoto" pelo actor_label 'Acionamento Local'.
+  if (r.action === "status_read" || r.origin === "reading") {
     if (r.result === "timeout" || r.result === "fail") {
       return { action: "Sem resposta", origin: "Sistema" };
     }
