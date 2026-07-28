@@ -101,7 +101,21 @@ export const useAutomationLog = create<LogState>()(
           // Isolamento: ignora eventos de outras fazendas que cheguem por algum
           // canal residual (defesa em profundidade — Realtime já filtra por farm).
           if (s.activeFarmId && entry.farmId && entry.farmId !== s.activeFarmId) return s;
-          if (s.entries.some((e) => e.id === entry.id)) return s;
+          const idx = s.entries.findIndex((e) => e.id === entry.id);
+          if (idx >= 0) {
+            // Já existe: ATUALIZA se o conteúdo relevante mudou (ex.: actor_label
+            // corrigido no banco). Antes só pulava por id — o que deixava o cache
+            // preso com o valor antigo mesmo após correção no banco.
+            const ex = s.entries[idx];
+            if (ex.user === entry.user && ex.action === entry.action &&
+                ex.result === entry.result && ex.origin === entry.origin &&
+                ex.pump === entry.pump) {
+              return s; // idêntico — no-op
+            }
+            const next = s.entries.slice();
+            next[idx] = { ...ex, ...entry };
+            return { entries: next };
+          }
           const merged = [entry, ...s.entries].sort((a, b) =>
             b.ts.localeCompare(a.ts),
           );
@@ -135,7 +149,9 @@ export const useAutomationLog = create<LogState>()(
       clear: () => set({ entries: [] }),
     }),
     {
-      name: "automation_log_v2",
+      // v3: cache-bust — descarta caches antigos (v2) que ficaram presos com
+      // actor_label desatualizado ("Acionamento Local") antes da correção no banco.
+      name: "automation_log_v3",
       storage: createJSONStorage(() => localStorage),
     },
   ),
