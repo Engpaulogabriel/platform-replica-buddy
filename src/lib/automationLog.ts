@@ -330,7 +330,7 @@ const rowToEntry = (r: DbRow): AutomationLogEntry => {
     action,
     origin,
     user: resolveUser(r),
-    result: (r.result === "fail" || r.result === "timeout" ? "fail" : "success"),
+    result: (["fail", "failed", "timeout", "error"].includes(String(r.result)) ? "fail" : "success"),
     synced: true,
   };
 };

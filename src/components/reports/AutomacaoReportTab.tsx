@@ -17,16 +17,6 @@ interface AutomacaoReportTabProps {
 
 const LOG_PAGE_SIZE = 50;
 
-const SYSTEM_USER_LABELS = new Set<string>([
-  "Acionamento Local",
-  "Local (painel)",
-  "Automação",
-  "Sistema",
-  "Operador",
-  "Usuário",
-  "Desconhecido",
-]);
-
 const SYSTEM_ACTIONS = new Set<string>([
   "Sem resposta",
   "Equipamento religado",
@@ -81,7 +71,9 @@ function getActionStyle(action: string): { cls: string; Icon: typeof Power } {
 }
 
 function getUserLabel(user?: string | null) {
-  return user && user.trim() ? user.trim() : "Sistema";
+  // actor_label vem pronto do banco (trigger). Usa DIRETO; se null/vazio → "Desconhecido"
+  // (nunca "Remoto (usuário não registrado)").
+  return user && user.trim() ? user.trim() : "Desconhecido";
 }
 
 function buildPageList(current: number, total: number): Array<number | "..."> {
@@ -101,7 +93,6 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
   const [logPage, setLogPage] = useState(1);
   const [loadingRange, setLoadingRange] = useState(false);
   const [farmHeader, setFarmHeader] = useState<{ name: string; city: string | null; state: string | null }>({ name: "Fazenda", city: null, state: null });
-  const [farmMemberLabels, setFarmMemberLabels] = useState<Set<string>>(new Set());
 
   const liveAutomationLog = useAutomationLog((s) => s.entries);
   // Defer expensive re-filter when store updates rapidly (Realtime / boot hydration)
@@ -113,39 +104,15 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
     setActiveFarm(farmId);
     let cancelled = false;
     (async () => {
-      const [{ data: farm }, { data: roles }] = await Promise.all([
-        supabase
-          .from("farms")
-          .select("name, city, state")
-          .eq("id", farmId)
-          .maybeSingle(),
-        supabase
-          .from("user_roles")
-          .select("user_id")
-          .eq("farm_id", farmId),
-      ]);
-
+      // Apenas o cabeçalho da fazenda (nome/cidade/UF) para o PDF. O nome do usuário
+      // no relatório vem DIRETO do actor_label do banco — sem JOIN com profiles/user_roles.
+      const { data: farm } = await supabase
+        .from("farms")
+        .select("name, city, state")
+        .eq("id", farmId)
+        .maybeSingle();
       if (cancelled) return;
       if (farm) setFarmHeader({ name: farm.name ?? "Fazenda", city: farm.city ?? null, state: farm.state ?? null });
-
-      const ids = Array.from(new Set((roles ?? []).map((r: any) => r.user_id).filter(Boolean)));
-      if (ids.length === 0) {
-        setFarmMemberLabels(new Set());
-        return;
-      }
-
-      const { data: profs } = await supabase
-        .from("profiles")
-        .select("id, full_name, email")
-        .in("id", ids);
-
-      if (cancelled) return;
-      const labels = new Set<string>();
-      for (const p of (profs ?? []) as Array<{ full_name: string | null; email: string | null }>) {
-        if (p.full_name) labels.add(p.full_name.trim());
-        if (p.email) labels.add(p.email.trim());
-      }
-      setFarmMemberLabels(labels);
     })();
     return () => { cancelled = true; };
   }, [farmId, setActiveFarm]);
@@ -189,16 +156,11 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
         if (isSystem) return false;
         if (!showReadings && e.action === "Leitura OK") return false;
         return e.origin === "Remoto" || e.origin === "Manual" || e.origin === "WhatsApp";
-      })
-      .map((e) => {
-        const u = (e.user ?? "").trim();
-        if (!u || SYSTEM_USER_LABELS.has(u) || u === "Agente") return e;
-        // WhatsApp actor labels ("WhatsApp · Nome") sempre passam — vêm do webhook.
-        if (e.origin === "WhatsApp" || u.startsWith("WhatsApp")) return e;
-        if (farmMemberLabels.has(u)) return e;
-        return { ...e, user: "Operador" };
       });
-  }, [rawAutomationLog, farmId, farmMemberLabels, showReadings, rangeBounds]);
+    // O nome exibido (item.user) vem DIRETO do actor_label do banco (resolveUser já o
+    // prioriza) — sem override, sem JOIN com profiles, sem resolver por user_id.
+    // null/vazio → "Desconhecido" (getUserLabel).
+  }, [rawAutomationLog, farmId, showReadings, rangeBounds]);
 
   const filteredLog = useMemo(
     () => (selectedPump === "all"

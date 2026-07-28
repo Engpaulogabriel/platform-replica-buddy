@@ -10,7 +10,9 @@ export interface FarmHeaderInfo {
 }
 
 const DEFAULT_FARM: FarmHeaderInfo = { name: "Fazenda", city: null, state: null, phone: null };
-const safeAutomationUser = (user?: string | null) => user && user.trim() ? user.trim() : "Sistema";
+// Usa o actor_label como veio (já resolvido no componente). null/vazio → "Desconhecido"
+// (nunca "Sistema" inventado nem "Remoto (usuário não registrado)").
+const safeAutomationUser = (user?: string | null) => user && user.trim() ? user.trim() : "Desconhecido";
 
 // ============================================================================
 // Premium PDF Design System — shared across all reports
@@ -230,7 +232,11 @@ export interface AutomacaoExportRow {
   result?: "success" | "fail" | string;
 }
 
-const resultLabel = (r?: string) => (r === "fail" ? "Falhou" : "OK");
+// "OK" só para sucesso/executed; timeout/error/fail → "Falhou".
+const resultLabel = (r?: string) => {
+  const s = (r ?? "").toLowerCase();
+  return s === "fail" || s === "failed" || s === "timeout" || s === "error" ? "Falhou" : "OK";
+};
 
 export async function exportAutomacaoPDF(data: AutomacaoExportRow[], farm: FarmHeaderInfo = DEFAULT_FARM, period?: { from: string; to: string }) {
   const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
@@ -251,8 +257,8 @@ export async function exportAutomacaoPDF(data: AutomacaoExportRow[], farm: FarmH
     head: upperHead(["Data", "Hora", "Equipamento", "Ação", "Origem", "Usuário", "Resultado"]),
     body: data.map((r) => [r.date, r.time, r.pump, r.action, r.origin, safeAutomationUser(r.user), resultLabel(r.result)]),
     columnStyles: {
-      0: { cellWidth: 20 },
-      1: { cellWidth: 16 },
+      0: { cellWidth: 24 },   // Data — largura suficiente p/ "DD/MM/AAAA" sem cortar o ano
+      1: { cellWidth: 15 },
       6: { halign: "center", cellWidth: 20 },
     },
     didParseCell: (data) => {
