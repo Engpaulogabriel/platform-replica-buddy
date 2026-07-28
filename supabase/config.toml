@@ -33,6 +33,9 @@ verify_jwt = false
 [functions.agent-logs-cleanup]
 verify_jwt = false
 
+[functions.verify-master-password]
+verify_jwt = false
+
 
 
 
