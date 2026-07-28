@@ -104,7 +104,8 @@ const RestrictedAuth = ({ children, title, description }: RestrictedAuthProps) =
     e.preventDefault();
     if (masterLocked) return;
 
-    if (masterPassword === MASTER_PASSWORD) {
+    // .trim(): evita "Senha incorreta" por espaço/quebra de linha colado junto.
+    if (masterPassword.trim() === MASTER_PASSWORD) {
       setAuthenticated(true);
       setRestrictedAuthenticated();
       setAttempts(0);
