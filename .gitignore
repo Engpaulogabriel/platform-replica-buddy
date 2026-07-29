@@ -15,3 +15,8 @@ electron-builds/
 node_modules/
 dist/
 release/
+
+# Fonte OTA do agente (NÃO trackear — Lovable-compat, 340KB)
+electron-agent/app/main.cjs
+# Estado local do supabase CLI
+supabase/.temp/
