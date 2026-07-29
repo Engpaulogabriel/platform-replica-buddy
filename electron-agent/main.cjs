@@ -556,6 +556,11 @@ let activeSupabaseAnonKey = SUPABASE_ANON_DEFAULT;
 let activeAccessToken = null;
 let pollTimer = null;
 let heartbeatTimer = null;
+// v3.25.36: timer DEDICADO só do upsert de site_health, independente do
+// sendHeartbeat (que pode travar na validação de licença). + watchdog.
+let siteHealthTimer = null;
+let heartbeatWatchdogTimer = null;
+let lastSiteHealthOkAt = 0;
 let logRotationTimer = null;
 let pollingEnqueueTimer = null;
 let pollingTimeoutTimer = null;
@@ -5308,8 +5313,43 @@ async function processNextCommand() {
 }
 
 // --- Heartbeat ---
+// v3.25.36: upsert de site_health DEDICADO e blindado. Roda no seu PRÓPRIO timer
+// (siteHealthTimer), independente da validação de licença / force-reboot / cleanup —
+// que antes podiam TRAVAR o sendHeartbeat (fetch de license-validate sem timeout) e
+// congelar o heartbeat pra sempre. Erro NÃO é engolido: loga. Nunca lança pra fora.
+async function upsertSiteHealth() {
+  if (!supabase || !farmId) return;
+  try {
+    const { error } = await withCloudTimeout(
+      supabase.from("site_health").upsert(
+        {
+          farm_id: farmId,
+          agent_status: "online",
+          last_heartbeat: new Date().toISOString(),
+          com_port: comPort,
+          com_connected: bridgeReady,
+          agent_version: AGENT_VERSION,
+          last_error: lastBridgeError,
+        },
+        { onConflict: "farm_id" }
+      ),
+      "site_health upsert",
+      15_000,
+    );
+    if (error) {
+      try { pushLog("warn", "system", `[HEARTBEAT] upsert site_health FALHOU: ${error.message || error} — retenta no próximo ciclo`); } catch (_) {}
+    } else {
+      lastSiteHealthOkAt = Date.now();
+    }
+  } catch (e) {
+    try { pushLog("warn", "system", `[HEARTBEAT] upsert site_health ERRO: ${formatError(e)} — retenta no próximo ciclo`); } catch (_) {}
+  }
+}
+
 async function sendHeartbeat() {
   if (!supabase || !farmId) return;
+  // O heartbeat de verdade (site_health) NÃO fica mais preso a nada abaixo:
+  // roda no siteHealthTimer dedicado. Aqui só ficam as tarefas "pesadas".
   // v3.10.7 SECURITY: valida licença na nuvem a cada heartbeat (30s).
   // Se revogada/suspensa → desliga bombas e encerra. Grace offline = 72h.
   try {
@@ -5321,21 +5361,6 @@ async function sendHeartbeat() {
   if (Date.now() - equipmentCacheLoadedAt > 5 * 60 * 1000) {
     void refreshEquipmentCache();
   }
-
-  try {
-    await supabase.from("site_health").upsert(
-      {
-        farm_id: farmId,
-        agent_status: "online",
-        last_heartbeat: new Date().toISOString(),
-        com_port: comPort,
-        com_connected: bridgeReady,
-        agent_version: AGENT_VERSION,
-        last_error: lastBridgeError,
-      },
-      { onConflict: "farm_id" }
-    );
-  } catch (e) {}
 
   await checkForceRebootInsideHeartbeat();
 
@@ -6123,6 +6148,8 @@ async function reconfigureWithAuth() {
     if (pollingEnqueueTimer) clearInterval(pollingEnqueueTimer);
     if (pollingTimeoutTimer) clearInterval(pollingTimeoutTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (siteHealthTimer) clearInterval(siteHealthTimer);
+    if (heartbeatWatchdogTimer) clearInterval(heartbeatWatchdogTimer);
   } catch (_) {}
   void stopBridge().finally(() => showSetupWindow());
 }
@@ -7064,6 +7091,8 @@ async function startAgent(cfg) {
     if (pollingEnqueueTimer) { clearInterval(pollingEnqueueTimer); pollingEnqueueTimer = null; }
     if (pollingTimeoutTimer) { clearInterval(pollingTimeoutTimer); pollingTimeoutTimer = null; }
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    if (siteHealthTimer) { clearInterval(siteHealthTimer); siteHealthTimer = null; }
+    if (heartbeatWatchdogTimer) { clearInterval(heartbeatWatchdogTimer); heartbeatWatchdogTimer = null; }
     if (agentConfigWatchTimer) { clearInterval(agentConfigWatchTimer); agentConfigWatchTimer = null; }
     processing = false;
     inflightCmd = null;
@@ -7189,6 +7218,28 @@ async function startAgent(cfg) {
     startupStep = "enviar heartbeat";
     void sendHeartbeat();
     heartbeatTimer = setInterval(() => { sendHeartbeat(); flushLogs(); flushTelemetryQueue(); }, HEARTBEAT_INTERVAL_MS);
+
+    // v3.25.36: HEARTBEAT INDESTRUTÍVEL — timer DEDICADO só do upsert de site_health,
+    // decoplado do sendHeartbeat (que pode travar na validação de licença). Roda a cada
+    // 30s independente de qualquer erro/hang das tarefas pesadas.
+    lastSiteHealthOkAt = Date.now(); // baseline p/ o watchdog
+    void upsertSiteHealth();
+    if (siteHealthTimer) clearInterval(siteHealthTimer);
+    siteHealthTimer = setInterval(() => { void upsertSiteHealth(); }, HEARTBEAT_INTERVAL_MS);
+
+    // Watchdog: se o site_health não teve upsert BEM-SUCEDIDO há > 5 min, algo travou
+    // (timer morto, upsert em erro persistente) → recria o timer dedicado e força retry.
+    if (heartbeatWatchdogTimer) clearInterval(heartbeatWatchdogTimer);
+    heartbeatWatchdogTimer = setInterval(() => {
+      if (!farmId || !supabase) return;
+      const ageMs = Date.now() - lastSiteHealthOkAt;
+      if (ageMs > 5 * 60_000) {
+        try { pushLog("warn", "system", `[HEARTBEAT-WATCHDOG] site_health sem sucesso há ${Math.round(ageMs / 60000)}min — recriando timer + retry forçado`); } catch (_) {}
+        try { if (siteHealthTimer) clearInterval(siteHealthTimer); } catch (_) {}
+        siteHealthTimer = setInterval(() => { void upsertSiteHealth(); }, HEARTBEAT_INTERVAL_MS);
+        void upsertSiteHealth();
+      }
+    }, 60_000);
 
     // Enqueue de polling de bombas no PROPRIO main process — independente do
     // navegador/renderer (que sofre throttle quando minimizado).
@@ -7838,14 +7889,16 @@ async function validateLicenseHeartbeat(cfg) {
   const baseUrl = cfg.supabaseUrl || SUPABASE_URL_DEFAULT;
   const anon = cfg.supabaseAnonKey || SUPABASE_ANON_DEFAULT;
   try {
-    const resp = await fetch(`${baseUrl}/functions/v1/license-validate`, {
+    // v3.25.36: timeout de 20s — SEM isto, um license-validate travado prende o
+    // sendHeartbeat indefinidamente (era a causa raiz do heartbeat congelado).
+    const resp = await withCloudTimeout(fetch(`${baseUrl}/functions/v1/license-validate`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "apikey": anon,
         "Authorization": `Bearer ${cfg.licenseToken}`,
       },
-    });
+    }), "license-validate", 20_000);
     const body = await resp.json().catch(() => ({}));
 
     if (resp.ok && body?.valid) {
