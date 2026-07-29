@@ -29,25 +29,9 @@ export default function Produtividade() {
   const farmId = useDefaultFarmId();
   const [periodDays, setPeriodDays] = useState("30");
 
-  if (accessLoading) {
-    return <div className="p-6 text-sm text-muted-foreground">Carregando…</div>;
-  }
-  // Administrador (owner) e platform_admin acessam — Supervisor e Operador NÃO.
-  if (!canViewFinancial) {
-    return (
-      <div className="p-6">
-        <Alert variant="destructive">
-          <Lock className="h-4 w-4" />
-          <AlertTitle>Acesso restrito</AlertTitle>
-          <AlertDescription>
-            Esta área contém dados financeiros (ROI e tarifas) e está disponível apenas
-            para o Administrador da fazenda.
-          </AlertDescription>
-        </Alert>
-      </div>
-    );
-  }
-
+  // ─── TODOS os hooks ANTES de qualquer return condicional (regra dos hooks) ───
+  // React #310 acontece se um hook rodar em um render e não em outro. Os early
+  // returns de acesso (accessLoading / canViewFinancial) ficam DEPOIS de tudo.
   const { from, to } = useMemo(() => {
     const t = new Date();
     const f = new Date(t.getTime() - Number(periodDays) * 86400_000);
@@ -74,6 +58,26 @@ export default function Produtividade() {
     })();
     return () => { alive = false; };
   }, [inema.farmId, farmId]);
+
+  // ─── Guardas de acesso — agora depois dos hooks, nunca antes ───
+  if (accessLoading) {
+    return <div className="p-6 text-sm text-muted-foreground">Carregando…</div>;
+  }
+  // Administrador (owner) e platform_admin acessam — Supervisor e Operador NÃO.
+  if (!canViewFinancial) {
+    return (
+      <div className="p-6">
+        <Alert variant="destructive">
+          <Lock className="h-4 w-4" />
+          <AlertTitle>Acesso restrito</AlertTitle>
+          <AlertDescription>
+            Esta área contém dados financeiros (ROI e tarifas) e está disponível apenas
+            para o Administrador da fazenda.
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
 
   const pieData = [
     { name: "Reservado", value: data.pumps.reduce((s, p) => s + p.hours_by_post.reserved, 0), color: "hsl(217 91% 60%)" },
