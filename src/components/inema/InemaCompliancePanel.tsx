@@ -81,6 +81,7 @@ export function useInemaCompliance(farmId: string | null | undefined) {
   const [permits, setPermits] = useState<InemaPermit[]>([]);
   const [equip, setEquip] = useState<Record<string, { name: string; estimated_flow_m3h: number | null; flow_total_m3: number | null; flow_daily_start_m3: number | null; outorga_volume_max_mensal_m3: number | null }>>({});
   const [farmHeader, setFarmHeader] = useState<{ name: string; city: string | null; state: string | null }>({ name: "Fazenda", city: null, state: null });
+  const [score, setScore] = useState<{ scorePct: number | null; total: number; excedido: number } | null>(null);
   const [loading, setLoading] = useState(true);
 
   const todayStart = useMemo(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }, []);
@@ -102,6 +103,13 @@ export function useInemaCompliance(farmId: string | null | undefined) {
       map[e.id] = { name: e.name, estimated_flow_m3h: e.estimated_flow_m3h ?? null, flow_total_m3: e.flow_total_m3 ?? null, flow_daily_start_m3: e.flow_daily_start_m3 ?? null, outorga_volume_max_mensal_m3: (e as any).outorga_volume_max_mensal_m3 ?? null };
     }
     setEquip(map);
+    // Score de conformidade (30d) — histórico persistido. Defensivo: se a migration
+    // ainda não foi aplicada (RPC inexistente), apenas oculta.
+    try {
+      const { data: sc, error: scErr } = await supabase.rpc("inema_farm_score" as any, { _farm_id: farmId, _days: 30 });
+      const row: any = Array.isArray(sc) ? sc[0] : sc;
+      setScore(!scErr && row ? { scorePct: row.score_pct ?? null, total: Number(row.total_dias ?? 0), excedido: Number(row.dias_excedido ?? 0) } : null);
+    } catch { setScore(null); }
     setLoading(false);
   }, [farmId]);
   useEffect(() => { void load(); }, [load]);
@@ -168,7 +176,7 @@ export function useInemaCompliance(farmId: string | null | undefined) {
     [wells],
   );
 
-  return { wells, expiring, loading: loading || hori.loading, reload: load, permits, farmHeader };
+  return { wells, expiring, loading: loading || hori.loading, reload: load, permits, farmHeader, score };
 }
 
 function Bar({ label, icon, value, limit, unit, pct, source }: {
@@ -192,7 +200,7 @@ const statusLabel = (s: WellCompliance["status"]) =>
   s === "over" ? "Risco" : s === "warn" ? "Atenção" : s === "no-permit" ? "Sem outorga" : "OK";
 
 export function InemaCompliancePanel({ farmId }: { farmId: string | null | undefined }) {
-  const { wells, expiring, loading, reload, farmHeader } = useInemaCompliance(farmId);
+  const { wells, expiring, loading, reload, farmHeader, score } = useInemaCompliance(farmId);
 
   const exportPdf = () => {
     const rows: InemaComplianceRow[] = wells.filter((w) => w.permit).map((w) => ({
@@ -210,8 +218,13 @@ export function InemaCompliancePanel({ farmId }: { farmId: string | null | undef
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h3 className="text-sm font-semibold flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-primary" />Compliance Hídrico — Risco de Multa</h3>
+        {score && score.total > 0 && (
+          <Badge variant={score.scorePct != null && score.scorePct >= 95 ? "secondary" : "destructive"} className="gap-1">
+            Conformidade 30d: {score.scorePct ?? "—"}% ({score.total - score.excedido}/{score.total} dias)
+          </Badge>
+        )}
         <Button size="sm" variant="outline" onClick={exportPdf} disabled={wells.filter((w) => w.permit).length === 0}>
           <FileDown className="w-4 h-4 mr-1.5" />PDF de Compliance
         </Button>
