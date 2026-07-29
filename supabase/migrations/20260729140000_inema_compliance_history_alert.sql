@@ -1,19 +1,19 @@
 -- ============================================================================
 -- INEMA — Parte 1: histórico de compliance (tabela + RPCs). DDL PURO.
--- SEM pg_cron / SEM pg_net (indisponíveis no Supabase gerenciado pelo Lovable).
--- O snapshot periódico + alerta WhatsApp 95% = Parte 2 (AGENTE ELECTRON), que
--- apenas CHAMA as RPCs abaixo. Aplicar no SQL Editor.
+-- SEM pg_cron / SEM pg_net. Parte 2 (alerta 95%) = AGENTE ELECTRON, que chama
+-- inema_snapshot(_farm_id) no heartbeat. A RPC é farm-scoped (has_farm_access),
+-- então o agente (role authenticated) chama só a fazenda dele — sem service_role.
+-- Aplicar no SQL Editor.
 -- ============================================================================
 
--- Limpeza de qualquer versão anterior parcial (a tabela/funções serão recriadas).
--- NÃO dropa system_alerts (pode ser usada por outros módulos).
+-- Limpeza de qualquer versão anterior (recria tudo limpo). Não dropa system_alerts.
 DROP FUNCTION IF EXISTS public.inema_snapshot_and_alert();
 DROP FUNCTION IF EXISTS public.inema_snapshot();
+DROP FUNCTION IF EXISTS public.inema_snapshot(uuid);
 DROP FUNCTION IF EXISTS public.inema_mark_alerted(uuid, date);
 DROP FUNCTION IF EXISTS public.inema_farm_score(uuid, int);
 DROP TABLE IF EXISTS public.inema_daily_compliance CASCADE;
 
--- system_alerts (idempotente — usado pelo alerta na Parte 2 e pelo dashboard)
 CREATE TABLE IF NOT EXISTS public.system_alerts (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -22,8 +22,7 @@ CREATE TABLE IF NOT EXISTS public.system_alerts (
   resolved boolean NOT NULL DEFAULT false, resolved_at timestamptz
 );
 
--- Histórico diário de compliance (1 linha por poço por dia).
-CREATE TABLE IF NOT EXISTS public.inema_daily_compliance (
+CREATE TABLE public.inema_daily_compliance (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL,
   equipment_id uuid NOT NULL,
@@ -32,24 +31,22 @@ CREATE TABLE IF NOT EXISTS public.inema_daily_compliance (
   hours numeric, hours_limit numeric, hours_pct numeric,
   volume_m3 numeric, volume_limit numeric, volume_pct numeric,
   volume_source text,
-  peak_pct numeric,                        -- max(hours_pct, volume_pct)
-  status text,                             -- ok / warn / over
-  alerted boolean NOT NULL DEFAULT false,  -- alerta de 95% já enviado hoje
+  peak_pct numeric,
+  status text,
+  alerted boolean NOT NULL DEFAULT false,
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT inema_daily_unique UNIQUE (equipment_id, day)
 );
-CREATE INDEX IF NOT EXISTS idx_inema_daily_farm_day ON public.inema_daily_compliance(farm_id, day DESC);
+CREATE INDEX idx_inema_daily_farm_day ON public.inema_daily_compliance(farm_id, day DESC);
 
 ALTER TABLE public.inema_daily_compliance ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS inema_daily_select ON public.inema_daily_compliance;
 CREATE POLICY inema_daily_select ON public.inema_daily_compliance FOR SELECT
   USING (farm_id IN (SELECT ur.farm_id FROM public.user_roles ur WHERE ur.user_id = auth.uid()));
 
--- ── RPC inema_snapshot(): calcula horas (pump_runtime) + volume, faz UPSERT do dia
---    e RETORNA os poços que cruzaram ≥95% e ainda NÃO foram alertados (para a Parte 2
---    enviar o WhatsApp e depois chamar inema_mark_alerted). SEM pg_net aqui.
---    Chamada só pela Edge Function/agente (service_role) — revogada de anon/authenticated.
-CREATE OR REPLACE FUNCTION public.inema_snapshot()
+-- ── RPC inema_snapshot(_farm_id): farm-scoped. Calcula horas (pump_runtime) + volume,
+--    faz UPSERT do dia; para poços ≥95% ainda não alertados grava system_alerts e os
+--    RETORNA (o agente envia o WhatsApp e chama inema_mark_alerted). SEM pg_net.
+CREATE OR REPLACE FUNCTION public.inema_snapshot(_farm_id uuid)
 RETURNS TABLE(farm_id uuid, equipment_id uuid, equipment_name text,
               hours numeric, hours_limit numeric, volume_m3 numeric,
               volume_limit numeric, peak_pct numeric)
@@ -61,10 +58,16 @@ DECLARE
   v_day_end   timestamptz := ((v_today + 1)::timestamp AT TIME ZONE 'America/Bahia');
   r record; v_hours numeric; v_vol numeric; v_vol_src text; v_hpct numeric; v_vpct numeric; v_peak numeric; v_status text;
 BEGIN
+  -- guarda: só a(s) fazenda(s) que o chamador (agente/usuário) tem acesso
+  IF NOT public.has_farm_access(auth.uid(), _farm_id) THEN
+    RAISE EXCEPTION 'Sem permissao para fazenda %', _farm_id;
+  END IF;
+
   FOR r IN
     SELECT p.equipment_id, p.farm_id, p.max_daily_hours, p.max_daily_volume_m3,
            e.name AS eq_name, e.estimated_flow_m3h, e.flow_total_m3, e.flow_daily_start_m3
     FROM public.inema_permits p JOIN public.equipments e ON e.id = p.equipment_id
+    WHERE p.farm_id = _farm_id
   LOOP
     SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (
              LEAST(
@@ -107,27 +110,40 @@ BEGIN
       equipment_name=EXCLUDED.equipment_name, updated_at=now();
   END LOOP;
 
-  -- poços que precisam de alerta (≥95% e ainda não alertados hoje)
+  -- registro no dashboard (uma vez/poço/dia) para os que cruzaram 95% e não foram alertados
+  INSERT INTO public.system_alerts (severity, source, title, details)
+  SELECT 'warning', 'inema-compliance', '⚠️ Poço próximo do limite INEMA',
+         jsonb_build_object('equipment', c.equipment_name, 'farm_id', c.farm_id, 'day', c.day,
+                            'hours', c.hours, 'peak_pct', c.peak_pct)
+  FROM public.inema_daily_compliance c
+  WHERE c.farm_id = _farm_id AND c.day = v_today AND c.peak_pct >= 95 AND c.alerted = false;
+
   RETURN QUERY
     SELECT c.farm_id, c.equipment_id, c.equipment_name, c.hours, c.hours_limit,
            c.volume_m3, c.volume_limit, c.peak_pct
     FROM public.inema_daily_compliance c
-    WHERE c.day = v_today AND c.peak_pct >= 95 AND c.alerted = false;
+    WHERE c.farm_id = _farm_id AND c.day = v_today AND c.peak_pct >= 95 AND c.alerted = false;
 
-  -- retenção de 400 dias
   DELETE FROM public.inema_daily_compliance WHERE day < v_today - 400;
 END
 $fn$;
 
--- Marca o alerta como enviado (chamada pela Parte 2 após enviar o WhatsApp).
+-- Marca o alerta como enviado (chamada pelo agente após enviar o WhatsApp). Farm-scoped.
 CREATE OR REPLACE FUNCTION public.inema_mark_alerted(_equipment_id uuid, _day date DEFAULT NULL)
-RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path TO 'public' AS $$
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS $fn$
+DECLARE v_farm uuid; v_d date := COALESCE(_day, (now() AT TIME ZONE 'America/Bahia')::date);
+BEGIN
+  SELECT farm_id INTO v_farm FROM public.inema_daily_compliance
+   WHERE equipment_id = _equipment_id AND day = v_d;
+  IF v_farm IS NULL THEN RETURN; END IF;
+  IF NOT public.has_farm_access(auth.uid(), v_farm) THEN
+    RAISE EXCEPTION 'Sem permissao';
+  END IF;
   UPDATE public.inema_daily_compliance SET alerted = true
-   WHERE equipment_id = _equipment_id
-     AND day = COALESCE(_day, (now() AT TIME ZONE 'America/Bahia')::date);
-$$;
+   WHERE equipment_id = _equipment_id AND day = v_d;
+END $fn$;
 
--- Score por fazenda (últimos N dias) — usado pelo dashboard (frontend).
+-- Score por fazenda (dashboard).
 CREATE OR REPLACE FUNCTION public.inema_farm_score(_farm_id uuid, _days int DEFAULT 30)
 RETURNS TABLE(total_dias bigint, dias_ok bigint, dias_excedido bigint, score_pct numeric)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
@@ -141,6 +157,5 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
     AND public.has_farm_access(auth.uid(), _farm_id);
 $$;
 
--- Segurança: snapshot/mark_alerted só para a Parte 2 (service_role), não p/ usuários.
-REVOKE EXECUTE ON FUNCTION public.inema_snapshot() FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.inema_mark_alerted(uuid, date) FROM anon, authenticated;
+-- NÃO revoga de authenticated: o agente (role authenticated) precisa chamar, e as
+-- funções já se auto-limitam por has_farm_access.

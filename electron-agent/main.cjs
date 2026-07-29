@@ -561,6 +561,9 @@ let heartbeatTimer = null;
 let siteHealthTimer = null;
 let heartbeatWatchdogTimer = null;
 let lastSiteHealthOkAt = 0;
+// v3.25.37: compliance INEMA — chama inema_snapshot(farmId) periodicamente e alerta 95%.
+let inemaTimer = null;
+const INEMA_CHECK_INTERVAL_MS = 15 * 60_000;
 let logRotationTimer = null;
 let pollingEnqueueTimer = null;
 let pollingTimeoutTimer = null;
@@ -5346,6 +5349,55 @@ async function upsertSiteHealth() {
   }
 }
 
+// v3.25.37 — Compliance INEMA: chama a RPC farm-scoped inema_snapshot (atualiza o
+// histórico do dia e retorna poços ≥95% ainda não alertados), envia WhatsApp aos
+// operadores com receive_alerts e marca como alertado. Best-effort; nunca lança.
+async function checkInemaCompliance() {
+  if (!supabase || !farmId) return;
+  try {
+    const { data: wells, error } = await withCloudTimeout(
+      supabase.rpc("inema_snapshot", { _farm_id: farmId }),
+      "inema_snapshot", CLOUD_READ_TIMEOUT_MS);
+    if (error) { pushLog("warn", "system", `[INEMA] inema_snapshot falhou: ${error.message || error}`); return; }
+    if (!Array.isArray(wells) || wells.length === 0) return;
+
+    // token + destinatários (best-effort — depende do RLS do agente nessas tabelas)
+    let token = null, phoneId = "1122648170939922", recipients = [];
+    try {
+      const { data: cfg } = await supabase.from("whatsapp_config").select("api_token, phone_number_id").limit(1).maybeSingle();
+      token = cfg && cfg.api_token ? cfg.api_token : null;
+      if (cfg && cfg.phone_number_id) phoneId = cfg.phone_number_id;
+      const { data: ops } = await supabase.from("whatsapp_operators")
+        .select("phone").eq("farm_id", farmId).eq("is_active", true).eq("receive_alerts", true);
+      recipients = (ops || []).map((o) => String(o.phone || "").replace(/\D/g, "")).filter(Boolean);
+    } catch (_) {}
+
+    for (const w of wells) {
+      const msg = `⚠️ INEMA — ${w.equipment_name} atingiu ${w.hours}h de uso hoje (limite ${w.hours_limit}h`
+        + (w.volume_limit ? `; volume ${w.volume_m3}/${w.volume_limit} m³` : "")
+        + `). Risco de infração — reduza o uso.`;
+      if (token && recipients.length) {
+        for (const to of recipients) {
+          try {
+            await fetch(`https://graph.facebook.com/v21.0/${phoneId}/messages`, {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body: msg } }),
+            });
+          } catch (e) { pushLog("warn", "system", `[INEMA] envio WhatsApp falhou (${to}): ${e && e.message || e}`); }
+        }
+        pushLog("warn", "system", `[INEMA] ${w.equipment_name} em ${w.peak_pct}% do limite — alerta enviado a ${recipients.length} operador(es)`);
+      } else {
+        pushLog("warn", "system", `[INEMA] ${w.equipment_name} em ${w.peak_pct}% do limite — sem token/destinatário p/ WhatsApp (registrado em system_alerts)`);
+      }
+      // marca alertado mesmo se o WhatsApp falhou, p/ não repetir a cada 15 min
+      try { await supabase.rpc("inema_mark_alerted", { _equipment_id: w.equipment_id }); } catch (_) {}
+    }
+  } catch (e) {
+    pushLog("warn", "system", `[INEMA] check falhou: ${formatError(e)}`);
+  }
+}
+
 async function sendHeartbeat() {
   if (!supabase || !farmId) return;
   // O heartbeat de verdade (site_health) NÃO fica mais preso a nada abaixo:
@@ -6150,6 +6202,7 @@ async function reconfigureWithAuth() {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (siteHealthTimer) clearInterval(siteHealthTimer);
     if (heartbeatWatchdogTimer) clearInterval(heartbeatWatchdogTimer);
+    if (inemaTimer) clearInterval(inemaTimer);
   } catch (_) {}
   void stopBridge().finally(() => showSetupWindow());
 }
@@ -7093,6 +7146,7 @@ async function startAgent(cfg) {
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     if (siteHealthTimer) { clearInterval(siteHealthTimer); siteHealthTimer = null; }
     if (heartbeatWatchdogTimer) { clearInterval(heartbeatWatchdogTimer); heartbeatWatchdogTimer = null; }
+    if (inemaTimer) { clearInterval(inemaTimer); inemaTimer = null; }
     if (agentConfigWatchTimer) { clearInterval(agentConfigWatchTimer); agentConfigWatchTimer = null; }
     processing = false;
     inflightCmd = null;
@@ -7240,6 +7294,11 @@ async function startAgent(cfg) {
         void upsertSiteHealth();
       }
     }, 60_000);
+
+    // v3.25.37 — Compliance INEMA a cada 15 min (1ª checagem 60s após subir).
+    setTimeout(() => { void checkInemaCompliance(); }, 60_000).unref?.();
+    if (inemaTimer) clearInterval(inemaTimer);
+    inemaTimer = setInterval(() => { void checkInemaCompliance(); }, INEMA_CHECK_INTERVAL_MS);
 
     // Enqueue de polling de bombas no PROPRIO main process — independente do
     // navegador/renderer (que sofre throttle quando minimizado).
