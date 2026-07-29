@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { notify } from "@/lib/notify";
+import { InemaCompliancePanel } from "@/components/inema/InemaCompliancePanel";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
 import {
   TrendingUp, DollarSign, Droplets, Zap, AlertTriangle, FileText, Save, Download, Info, Settings, Truck, Lock,
@@ -216,6 +217,9 @@ export default function Produtividade() {
 
         {/* ============ ABA INEMA ============ */}
         <TabsContent value="inema" className="space-y-4 mt-4">
+          {/* Compliance diário por poço (risco de multa) — outorgas por poço em inema_permits */}
+          <InemaCompliancePanel farmId={inema.farmId} />
+
           <Card>
             <CardHeader className="flex-row items-center justify-between">
               <div>
