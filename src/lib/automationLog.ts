@@ -341,7 +341,11 @@ const rowToEntry = (r: DbRow): AutomationLogEntry => {
   const d = new Date(r.occurred_at);
   const { action, origin } = classifyAction(r);
   return {
-    id: r.client_event_id,
+    // Fallback p/ r.id (PK, sempre presente): linhas gravadas server-side (ex.:
+    // pump_on/pump_off de reservatório, eventos de sistema) podem vir com
+    // client_event_id NULL — sem fallback, todas colapsariam num único id nulo
+    // no dedup do store e sumiriam do relatório.
+    id: r.client_event_id ?? r.id,
     farmId: r.farm_id,
     date: formatDate(d),
     time: formatTime(d),
