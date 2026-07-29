@@ -446,3 +446,48 @@ function downloadFile(content: string, filename: string, mimeType: string) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// ============================================================================
+// INEMA — Compliance (kit fiscalização): uso do dia vs limites da outorga.
+// ============================================================================
+export interface InemaComplianceRow {
+  well: string;
+  hoursToday: number;
+  hoursLimit: number | null;
+  volumeToday: number | null;
+  volumeLimit: number | null;
+  monthVolume: number | null;
+  monthVolumeLimit: number | null;
+  status: string;              // "OK" | "Atenção" | "Risco"
+  portaria: string | null;
+  titular: string | null;
+  expiry: string | null;       // dd/mm/aaaa
+}
+
+const nOr = (v: number | null, d = 0) => (v == null ? "—" : v.toLocaleString("pt-BR", { maximumFractionDigits: d }));
+
+export async function exportInemaCompliancePDF(rows: InemaComplianceRow[], farm: FarmHeaderInfo = DEFAULT_FARM) {
+  const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape" });
+  const gen = new Date().toLocaleString("pt-BR");
+  const startY = await drawHeader(doc, farm, "Relatório de Compliance Hídrico — INEMA",
+    `Uso do dia vs. outorga · Gerado em ${gen}`);
+  autoTable(doc, sharedTableOptions(startY, {
+    head: upperHead(["Poço", "Horas hoje", "Limite h", "Volume hoje (m³)", "Limite/dia", "Volume mês (m³)", "Limite/mês", "Status", "Portaria", "Validade"]),
+    body: rows.map((r) => [
+      r.well, nOr(r.hoursToday, 2), nOr(r.hoursLimit, 0),
+      nOr(r.volumeToday, 0), nOr(r.volumeLimit, 0),
+      nOr(r.monthVolume, 0), nOr(r.monthVolumeLimit, 0),
+      r.status, r.portaria ?? "—", r.expiry ?? "—",
+    ]),
+    columnStyles: { 1: { halign: "right" }, 2: { halign: "right" }, 3: { halign: "right" }, 4: { halign: "right" }, 5: { halign: "right" }, 6: { halign: "right" } },
+    didParseCell: (data) => {
+      if (data.section !== "body" || data.column.index !== 7) return;
+      const t = (data.cell.text?.[0] ?? "").toLowerCase();
+      if (t.includes("risco")) { data.cell.styles.textColor = COLOR.red; data.cell.styles.fontStyle = "bold"; }
+      else if (t.includes("aten")) { data.cell.styles.textColor = [180, 130, 0]; data.cell.styles.fontStyle = "bold"; }
+      else if (t === "ok") { data.cell.styles.textColor = COLOR.green; }
+    },
+  }));
+  applyFooterToAllPages(doc);
+  doc.save("compliance-inema.pdf");
+}

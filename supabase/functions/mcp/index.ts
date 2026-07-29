@@ -118,7 +118,7 @@ var list_notifications_default = defineTool4({
 });
 
 // src/lib/mcp/index.ts
-var projectRef = "vabguxllyguztneumahq";
+var projectRef = "dnyukgfedredvxpzjpqz";
 var mcp_default = defineMcp({
   name: "renov-gestor-bombas-mcp",
   title: "RENOV Gestor de Bombas",

@@ -147,6 +147,21 @@ const Dashboard = () => {
   const { startMainTour } = useGuidedTour();
   const { user } = useAuth();
   const farmId = useDefaultFarmId();
+  // Sede da fazenda (marcador no mapa) — farms.latitude_sede/longitude_sede.
+  const [sedeCoords, setSedeCoords] = useState<{ lat: number; lng: number; name?: string } | null>(null);
+  useEffect(() => {
+    if (!farmId) { setSedeCoords(null); return; }
+    let cancelled = false;
+    void supabase.from("farms").select("name, latitude_sede, longitude_sede" as any).eq("id", farmId).maybeSingle()
+      .then(({ data }) => {
+        if (cancelled) return;
+        const d = data as any;
+        if (d?.latitude_sede != null && d?.longitude_sede != null)
+          setSedeCoords({ lat: Number(d.latitude_sede), lng: Number(d.longitude_sede), name: d.name ?? "Sede" });
+        else setSedeCoords(null);
+      });
+    return () => { cancelled = true; };
+  }, [farmId]);
   const { role: farmRole, isPlatformAdmin: isFarmPlatformAdmin } = useFarmAccess();
   const canViewIndicators = farmRole === "owner" || isFarmPlatformAdmin;
   const { isMasterManager, permissions } = useMasterManager();
@@ -1063,7 +1078,7 @@ const Dashboard = () => {
         <div className="flex-1 min-h-0 overflow-hidden">
           <MapErrorBoundary>
             <Suspense fallback={<div className="h-full flex items-center justify-center text-sm text-muted-foreground">Carregando mapa…</div>}>
-              <PumpMap pumps={orderedPumps} flowEnabled={flowEnabled} consumptionEnabled={consumptionEnabled} />
+              <PumpMap pumps={orderedPumps} flowEnabled={flowEnabled} consumptionEnabled={consumptionEnabled} sede={sedeCoords} />
             </Suspense>
           </MapErrorBoundary>
         </div>

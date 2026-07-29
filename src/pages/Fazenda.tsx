@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Building2, Copy, KeyRound, Check } from "lucide-react";
 import { notify } from "@/lib/notify";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
+import SedeCoordsCard from "@/components/SedeCoordsCard";
 
 export const FAZENDA_STORAGE_KEY = "fazenda_data";
 
@@ -45,6 +46,7 @@ const FazendaContent = () => {
 
   return (
     <div className="space-y-4">
+      <SedeCoordsCard />
       <Card className="bg-card border-border">
         <CardHeader>
           <CardTitle className="text-base text-foreground flex items-center gap-2">

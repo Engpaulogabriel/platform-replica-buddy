@@ -8,15 +8,18 @@ interface PumpMapProps {
   pumps: Pump[];
   flowEnabled: boolean;
   consumptionEnabled: boolean;
+  /** Sede da fazenda (marcador distinto no mapa). */
+  sede?: { lat: number; lng: number; name?: string } | null;
 }
 
 const abbreviateWellName = (name: string): string =>
   name.replace(/\bpo(?:ç|c|Ã§)o\s*[-_.:/#]?\s*(\d+)/giu, "P$1");
 
-export default function PumpMap({ pumps }: PumpMapProps) {
+export default function PumpMap({ pumps, sede }: PumpMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<L.Layer[]>([]);
+  const sedeMarkerRef = useRef<L.Marker | null>(null);
   const [mapError, setMapError] = useState(false);
 
   const wells = useMemo(
@@ -105,17 +108,37 @@ export default function PumpMap({ pumps }: PumpMapProps) {
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || wells.length === 0) return;
-    if (didFitRef.current === wellsCoordKey) return;
+    const hasSede = !!(sede && sede.lat != null && sede.lng != null);
+    if (!map || (wells.length === 0 && !hasSede)) return;
+    const fitKey = wellsCoordKey + (hasSede ? `|S:${sede!.lat.toFixed(5)},${sede!.lng.toFixed(5)}` : "");
+    if (didFitRef.current === fitKey) return;
 
-    const bounds = L.latLngBounds(
-      wells.map((pump) => [pump.lat as number, pump.lng as number] as [number, number]),
-    );
+    const pts: [number, number][] = wells.map((p) => [p.lat as number, p.lng as number]);
+    if (hasSede) pts.push([sede!.lat, sede!.lng]);
+    const bounds = L.latLngBounds(pts);
 
     map.fitBounds(bounds, { padding: [40, 40] });
     map.invalidateSize();
-    didFitRef.current = wellsCoordKey;
-  }, [wellsCoordKey, wells]);
+    didFitRef.current = fitKey;
+  }, [wellsCoordKey, wells, sede]);
+
+  // Marcador DISTINTO da sede (independente do cleanup dos marcadores de poço).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (sedeMarkerRef.current) { try { sedeMarkerRef.current.remove(); } catch { /* noop */ } sedeMarkerRef.current = null; }
+    if (!map || !sede || sede.lat == null || sede.lng == null) return;
+    const icon = L.divIcon({
+      className: "",
+      html: `<div style="display:flex;flex-direction:column;align-items:center;transform:translateY(-4px)">
+        <div style="background:#1e3a5f;color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:6px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.4)">🏠 ${(sede.name ?? "Sede").replace(/[<>&]/g, "")}</div>
+        <div style="width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:7px solid #1e3a5f"></div>
+      </div>`,
+      iconAnchor: [0, 0],
+    });
+    const m = L.marker([sede.lat, sede.lng], { icon, zIndexOffset: 1000 }).addTo(map);
+    sedeMarkerRef.current = m;
+    return () => { try { m.remove(); } catch { /* noop */ } };
+  }, [sede, wells]);
 
   useEffect(() => {
     const map = mapRef.current;

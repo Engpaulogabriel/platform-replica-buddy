@@ -16,7 +16,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { AlertTriangle, CalendarClock, Droplet, Clock, Pencil, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CalendarClock, Droplet, Clock, Pencil, ShieldCheck, FileDown } from "lucide-react";
+import { exportInemaCompliancePDF, type InemaComplianceRow } from "@/lib/reportExport";
 
 // Thresholds globais (o cliente quer alerta ANTES de estourar).
 const YELLOW_PCT = 80;
@@ -43,10 +44,14 @@ interface WellCompliance {
   hoursToday: number;
   hoursLimit: number | null;
   hoursPct: number | null;
+  hoursRemaining: number | null;
   volumeToday: number | null;
   volumeLimit: number | null;
   volumePct: number | null;
   volumeSource: "telemetria" | "estimado" | "—";
+  monthVolume: number | null;
+  monthVolumeLimit: number | null;
+  monthVolumePct: number | null;
   status: "ok" | "warn" | "over" | "no-permit";
   permit: InemaPermit | null;
   daysToExpiry: number | null;
@@ -74,7 +79,8 @@ function daysBetween(dateIso: string | null): number | null {
 /** Hook de compliance: outorgas + horas de hoje + volume do dia por poço. */
 export function useInemaCompliance(farmId: string | null | undefined) {
   const [permits, setPermits] = useState<InemaPermit[]>([]);
-  const [equip, setEquip] = useState<Record<string, { name: string; estimated_flow_m3h: number | null; flow_total_m3: number | null; flow_daily_start_m3: number | null }>>({});
+  const [equip, setEquip] = useState<Record<string, { name: string; estimated_flow_m3h: number | null; flow_total_m3: number | null; flow_daily_start_m3: number | null; outorga_volume_max_mensal_m3: number | null }>>({});
+  const [farmHeader, setFarmHeader] = useState<{ name: string; city: string | null; state: string | null }>({ name: "Fazenda", city: null, state: null });
   const [loading, setLoading] = useState(true);
 
   const todayStart = useMemo(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }, []);
@@ -84,14 +90,16 @@ export function useInemaCompliance(farmId: string | null | undefined) {
   const load = useCallback(async () => {
     if (!farmId) return;
     setLoading(true);
-    const [{ data: perms }, { data: eqs }] = await Promise.all([
+    const [{ data: perms }, { data: eqs }, { data: farm }] = await Promise.all([
       supabase.from("inema_permits" as any).select("*").eq("farm_id", farmId),
-      supabase.from("equipments").select("id,name,estimated_flow_m3h,flow_total_m3,flow_daily_start_m3").eq("farm_id", farmId).eq("type", "poco"),
+      supabase.from("equipments").select("id,name,estimated_flow_m3h,flow_total_m3,flow_daily_start_m3,outorga_volume_max_mensal_m3").eq("farm_id", farmId).eq("type", "poco"),
+      supabase.from("farms").select("name,city,state").eq("id", farmId).maybeSingle(),
     ]);
+    if (farm) setFarmHeader({ name: (farm as any).name ?? "Fazenda", city: (farm as any).city ?? null, state: (farm as any).state ?? null });
     setPermits(((perms as any[]) ?? []) as InemaPermit[]);
     const map: typeof equip = {};
     for (const e of ((eqs as any[]) ?? [])) {
-      map[e.id] = { name: e.name, estimated_flow_m3h: e.estimated_flow_m3h ?? null, flow_total_m3: e.flow_total_m3 ?? null, flow_daily_start_m3: e.flow_daily_start_m3 ?? null };
+      map[e.id] = { name: e.name, estimated_flow_m3h: e.estimated_flow_m3h ?? null, flow_total_m3: e.flow_total_m3 ?? null, flow_daily_start_m3: e.flow_daily_start_m3 ?? null, outorga_volume_max_mensal_m3: (e as any).outorga_volume_max_mensal_m3 ?? null };
     }
     setEquip(map);
     setLoading(false);
@@ -101,6 +109,13 @@ export function useInemaCompliance(farmId: string | null | undefined) {
   const hoursByEq = useMemo(() => {
     const m: Record<string, number> = {};
     for (const p of (hori.byPump ?? [])) m[p.equipmentId] = p.monthTotal; // range = hoje
+    return m;
+  }, [hori.byPump]);
+
+  // Horas do MÊS corrente por poço (para o volume mensal vs limite mensal).
+  const monthHoursByEq = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const p of (hori.byPump ?? [])) m[p.equipmentId] = p.currentMonthTotal ?? 0;
     return m;
   }, [hori.byPump]);
 
@@ -117,6 +132,7 @@ export function useInemaCompliance(farmId: string | null | undefined) {
       const hoursToday = Math.round((hoursByEq[id] ?? 0) * 100) / 100;
       const hoursLimit = permit?.max_daily_hours ?? null;
       const hoursPct = hoursLimit && hoursLimit > 0 ? Math.round((hoursToday / hoursLimit) * 1000) / 10 : null;
+      const hoursRemaining = hoursLimit != null ? Math.max(0, Math.round((hoursLimit - hoursToday) * 10) / 10) : null;
 
       // volume: telemetria (flow_total - flow_daily_start) quando houver; senão horas × vazão estimada
       let volumeToday: number | null = null;
@@ -129,23 +145,30 @@ export function useInemaCompliance(farmId: string | null | undefined) {
       const volumeLimit = permit?.max_daily_volume_m3 ?? null;
       const volumePct = volumeLimit && volumeLimit > 0 && volumeToday != null ? Math.round((volumeToday / volumeLimit) * 1000) / 10 : null;
 
+      // Volume do MÊS (estimado: horas do mês × vazão) vs limite mensal da outorga.
+      const monthVolume = e?.estimated_flow_m3h ? Math.round((monthHoursByEq[id] ?? 0) * e.estimated_flow_m3h) : null;
+      const monthVolumeLimit = e?.outorga_volume_max_mensal_m3 ?? null;
+      const monthVolumePct = monthVolumeLimit && monthVolumeLimit > 0 && monthVolume != null ? Math.round((monthVolume / monthVolumeLimit) * 1000) / 10 : null;
+
       out.push({
-        equipmentId: id, name, hoursToday, hoursLimit, hoursPct,
+        equipmentId: id, name, hoursToday, hoursLimit, hoursPct, hoursRemaining,
         volumeToday, volumeLimit, volumePct, volumeSource,
-        status: permit ? worstStatus(hoursPct, volumePct) : "no-permit",
+        monthVolume, monthVolumeLimit, monthVolumePct,
+        status: permit ? worstStatus(Math.max(hoursPct ?? 0, monthVolumePct ?? 0) || null, volumePct) : "no-permit",
         permit, daysToExpiry: daysBetween(permit?.expiration_date ?? null),
       });
     }
     return out.sort((a, b) => (b.hoursPct ?? -1) - (a.hoursPct ?? -1));
   }, [permits, equip, hoursByEq]);
 
+  // Renovação: faixas 180 / 90 / 30 dias antes do vencimento.
   const expiring = useMemo(
-    () => wells.filter((w) => w.daysToExpiry != null && w.daysToExpiry <= 90)
+    () => wells.filter((w) => w.daysToExpiry != null && w.daysToExpiry <= 180)
       .sort((a, b) => (a.daysToExpiry ?? 0) - (b.daysToExpiry ?? 0)),
     [wells],
   );
 
-  return { wells, expiring, loading: loading || hori.loading, reload: load, permits };
+  return { wells, expiring, loading: loading || hori.loading, reload: load, permits, farmHeader };
 }
 
 function Bar({ label, icon, value, limit, unit, pct, source }: {
@@ -165,21 +188,49 @@ function Bar({ label, icon, value, limit, unit, pct, source }: {
   );
 }
 
+const statusLabel = (s: WellCompliance["status"]) =>
+  s === "over" ? "Risco" : s === "warn" ? "Atenção" : s === "no-permit" ? "Sem outorga" : "OK";
+
 export function InemaCompliancePanel({ farmId }: { farmId: string | null | undefined }) {
-  const { wells, expiring, loading, reload } = useInemaCompliance(farmId);
+  const { wells, expiring, loading, reload, farmHeader } = useInemaCompliance(farmId);
+
+  const exportPdf = () => {
+    const rows: InemaComplianceRow[] = wells.filter((w) => w.permit).map((w) => ({
+      well: w.name,
+      hoursToday: w.hoursToday, hoursLimit: w.hoursLimit,
+      volumeToday: w.volumeToday, volumeLimit: w.volumeLimit,
+      monthVolume: w.monthVolume, monthVolumeLimit: w.monthVolumeLimit,
+      status: statusLabel(w.status),
+      portaria: w.permit?.portaria_number ?? null,
+      titular: w.permit?.titular_name ?? null,
+      expiry: w.permit?.expiration_date ? new Date(w.permit.expiration_date + "T00:00:00").toLocaleDateString("pt-BR") : null,
+    }));
+    void exportInemaCompliancePDF(rows, farmHeader);
+  };
 
   return (
     <div className="space-y-4">
-      {/* Vencimento < 90 dias */}
-      {expiring.length > 0 && (
-        <Alert className="border-amber-500/40">
-          <CalendarClock className="h-4 w-4" />
-          <AlertDescription className="text-sm">
-            <strong>Renovação de outorga:</strong>{" "}
-            {expiring.map((w) => `${w.name} vence em ${w.daysToExpiry} dia${(w.daysToExpiry ?? 0) === 1 ? "" : "s"}`).join(" · ")}.
-          </AlertDescription>
-        </Alert>
-      )}
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-primary" />Compliance Hídrico — Risco de Multa</h3>
+        <Button size="sm" variant="outline" onClick={exportPdf} disabled={wells.filter((w) => w.permit).length === 0}>
+          <FileDown className="w-4 h-4 mr-1.5" />PDF de Compliance
+        </Button>
+      </div>
+      {/* Renovação de outorga — faixas 180 / 90 / 30 dias */}
+      {expiring.length > 0 && (() => {
+        const min = expiring[0].daysToExpiry ?? 999;
+        const tier = min <= 30 ? "destructive" : min <= 90 ? "border-amber-500/60" : "border-amber-500/30";
+        const faixa = min <= 30 ? "≤ 30 dias — URGENTE" : min <= 90 ? "≤ 90 dias" : "≤ 180 dias";
+        return (
+          <Alert className={tier === "destructive" ? "border-destructive/60" : tier}>
+            <CalendarClock className="h-4 w-4" />
+            <AlertDescription className="text-sm">
+              <strong>Renovação de outorga ({faixa}):</strong>{" "}
+              {expiring.map((w) => `${w.name} vence em ${w.daysToExpiry}d`).join(" · ")}.
+            </AlertDescription>
+          </Alert>
+        );
+      })()}
 
       {loading && wells.length === 0 ? (
         <p className="text-sm text-muted-foreground px-1">Carregando compliance…</p>
@@ -201,7 +252,17 @@ export function InemaCompliancePanel({ farmId }: { farmId: string | null | undef
               </CardHeader>
               <CardContent className="space-y-3">
                 <Bar label="Horas hoje" icon={<Clock className="w-3 h-3" />} value={w.hoursToday} limit={w.hoursLimit} unit="h" pct={w.hoursPct} />
+                {w.hoursRemaining != null && (
+                  <p className="text-[11px] -mt-1.5 text-muted-foreground">
+                    {w.hoursRemaining > 0
+                      ? <>Faltam <strong className={w.hoursPct != null && w.hoursPct >= YELLOW_PCT ? "text-amber-600" : ""}>{w.hoursRemaining}h</strong> para o limite diário.</>
+                      : <span className="text-destructive font-medium">Limite diário de horas ATINGIDO.</span>}
+                  </p>
+                )}
                 <Bar label="Volume hoje" icon={<Droplet className="w-3 h-3" />} value={w.volumeToday} limit={w.volumeLimit} unit="m³" pct={w.volumePct} source={w.volumeSource} />
+                {w.monthVolumeLimit != null && (
+                  <Bar label="Volume no mês" icon={<Droplet className="w-3 h-3" />} value={w.monthVolume} limit={w.monthVolumeLimit} unit="m³" pct={w.monthVolumePct} source="estimado" />
+                )}
                 {w.permit?.portaria_number && (
                   <p className="text-[11px] text-muted-foreground pt-1 border-t">
                     Portaria {w.permit.portaria_number} · {w.permit.titular_name ?? "—"}
