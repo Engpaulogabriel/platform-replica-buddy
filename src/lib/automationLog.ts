@@ -274,6 +274,20 @@ const getActorLabel = (r: DbRow): string | null => {
  */
 const resolveUser = (r: DbRow): string => {
   const actorLabel = getActorLabel(r);
+  // actor_label já pronto no formato "WhatsApp · Nome" (insert direto do webhook) → usa.
+  if (actorLabel && actorLabel.startsWith("WhatsApp")) return actorLabel;
+
+  // Comando WhatsApp gravado via trigger: o actor_label pode estar MIS-ATRIBUÍDO ao
+  // owner (fallback do bot quando o operador WhatsApp não tem user_id vinculado — ex.:
+  // comando da Alcione creditado ao Luiz). O operador REAL vem no source_device
+  // "whatsapp:Nome|telefone" e tem PRECEDÊNCIA sobre o actor_label.
+  const waSrc = r.source_device ?? "";
+  if (waSrc.toLowerCase().startsWith("whatsapp:")) {
+    const who = waSrc.slice(waSrc.indexOf(":") + 1).split("|")[0].trim();
+    // só usa se for um nome (não só telefone/dígitos)
+    if (who && !/^\+?[\d\s()-]+$/.test(who)) return `WhatsApp · ${who}`;
+  }
+
   if (actorLabel) return actorLabel;
 
   const explicitName = (r.details as { user_name?: string } | null)?.user_name;
