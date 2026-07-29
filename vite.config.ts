@@ -11,6 +11,11 @@ import { mcpPlugin } from "@lovable.dev/mcp-js/stacks/supabase/vite";
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
   base: '/',
+  // Segurança: remove TODOS os console.* e `debugger` do bundle de PRODUÇÃO
+  // (dev mantém para depuração). Evita vazar estrutura interna/logs no cliente.
+  esbuild: {
+    drop: mode === "production" ? ["console", "debugger"] : [],
+  },
   server: {
     host: "::",
     port: 8080,

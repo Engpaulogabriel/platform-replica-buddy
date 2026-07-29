@@ -1,0 +1,16 @@
+# Headers de segurança HTTP (reais — os <meta> de X-Frame/frame-ancestors são
+# IGNORADOS pelo navegador; só valem aqui). Formato Cloudflare Pages / Netlify.
+# IMPORTANTE: só tem efeito se o HOST (Lovable/Cloudflare) honrar o arquivo _headers.
+# Verifique após deploy no DevTools → Network → resposta do documento.
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  Permissions-Policy: geolocation=(self), camera=(), microphone=(), payment=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin
+  # CSP: script/style/connect permissivos o suficiente p/ não quebrar Supabase
+  # (REST+realtime wss) nem scripts injetados pelo host. As diretivas de framing/
+  # object/base dão proteção real (clickjacking) sem risco de quebrar o app.
+  # Se após deploy algo quebrar (tela branca / requisição bloqueada), afrouxe aqui.
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://graph.facebook.com; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests
