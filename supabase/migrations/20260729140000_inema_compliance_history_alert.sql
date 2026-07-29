@@ -1,9 +1,17 @@
 -- ============================================================================
 -- INEMA — Parte 1: histórico de compliance (tabela + RPCs). DDL PURO.
 -- SEM pg_cron / SEM pg_net (indisponíveis no Supabase gerenciado pelo Lovable).
--- O snapshot periódico + alerta WhatsApp 95% = Parte 2 (Edge Function ou agente),
--- que apenas CHAMAM as RPCs abaixo. Aplicar no SQL Editor.
+-- O snapshot periódico + alerta WhatsApp 95% = Parte 2 (AGENTE ELECTRON), que
+-- apenas CHAMA as RPCs abaixo. Aplicar no SQL Editor.
 -- ============================================================================
+
+-- Limpeza de qualquer versão anterior parcial (a tabela/funções serão recriadas).
+-- NÃO dropa system_alerts (pode ser usada por outros módulos).
+DROP FUNCTION IF EXISTS public.inema_snapshot_and_alert();
+DROP FUNCTION IF EXISTS public.inema_snapshot();
+DROP FUNCTION IF EXISTS public.inema_mark_alerted(uuid, date);
+DROP FUNCTION IF EXISTS public.inema_farm_score(uuid, int);
+DROP TABLE IF EXISTS public.inema_daily_compliance CASCADE;
 
 -- system_alerts (idempotente — usado pelo alerta na Parte 2 e pelo dashboard)
 CREATE TABLE IF NOT EXISTS public.system_alerts (
