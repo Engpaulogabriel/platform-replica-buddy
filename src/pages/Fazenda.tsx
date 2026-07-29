@@ -3,9 +3,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Building2, Copy, KeyRound, Check } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Building2, Copy, KeyRound, Check, FileText } from "lucide-react";
 import { notify } from "@/lib/notify";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
+import { supabase } from "@/integrations/supabase/client";
 import SedeCoordsCard from "@/components/SedeCoordsCard";
 
 export const FAZENDA_STORAGE_KEY = "fazenda_data";
@@ -23,6 +25,80 @@ export function loadFazendaData(): FazendaData {
     if (saved) return JSON.parse(saved);
   } catch {}
   return { nome: "Fazenda Santa Maria", proprietario: "João Silva", cidadeEstado: "Uberaba - MG", telefone: "(34) 99999-0000" };
+}
+
+function InemaToggleCard({ farmId }: { farmId: string | null }) {
+  const [enabled, setEnabled] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    if (!farmId) return;
+    setLoading(true);
+    (async () => {
+      const { data, error } = await supabase
+        .from("farms")
+        .select("inema_enabled" as any)
+        .eq("id", farmId)
+        .maybeSingle();
+      if (!alive) return;
+      if (!error && data) setEnabled(Boolean((data as any).inema_enabled));
+      setLoading(false);
+    })();
+    return () => { alive = false; };
+  }, [farmId]);
+
+  const toggle = async (next: boolean) => {
+    if (!farmId || saving) return;
+    setSaving(true);
+    const prev = enabled;
+    setEnabled(next);
+    const { error } = await supabase
+      .from("farms")
+      .update({ inema_enabled: next } as any)
+      .eq("id", farmId);
+    setSaving(false);
+    if (error) {
+      setEnabled(prev);
+      notify.fail("INEMA", "Não foi possível salvar o módulo INEMA.");
+    } else {
+      notify.ok("INEMA", `Módulo INEMA ${next ? "ativado" : "desativado"} para esta fazenda.`);
+    }
+  };
+
+  return (
+    <Card className="bg-card border-border">
+      <CardHeader>
+        <CardTitle className="text-base text-foreground flex items-center gap-2">
+          <FileText className="w-4 h-4 text-primary" /> Módulo INEMA
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm text-foreground font-medium">
+              Conformidade Hídrica INEMA
+            </p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Quando ativo, a aba "Conformidade INEMA" aparece em Produtividade e o
+              agente monitora as outorgas desta fazenda.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-xs text-muted-foreground w-12 text-right">
+              {loading ? "..." : enabled ? "Ativo" : "Inativo"}
+            </span>
+            <Switch
+              checked={enabled}
+              onCheckedChange={toggle}
+              disabled={loading || saving || !farmId}
+            />
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 const FazendaContent = () => {
@@ -47,6 +123,7 @@ const FazendaContent = () => {
   return (
     <div className="space-y-4">
       <SedeCoordsCard />
+      <InemaToggleCard farmId={farmId} />
       <Card className="bg-card border-border">
         <CardHeader>
           <CardTitle className="text-base text-foreground flex items-center gap-2">

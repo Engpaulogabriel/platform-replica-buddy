@@ -57,6 +57,24 @@ export default function Produtividade() {
   const data = useProductivityData({ from, to });
   const inema = useInemaConfig();
 
+  // Módulo INEMA é opt-in por fazenda (farms.inema_enabled). A aba só aparece
+  // quando ativado no Suporte Técnico → aba Fazenda.
+  const [inemaEnabled, setInemaEnabled] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const fid = inema.farmId ?? farmId;
+    if (!fid) return;
+    (async () => {
+      const { data: row } = await supabase
+        .from("farms")
+        .select("inema_enabled" as any)
+        .eq("id", fid)
+        .maybeSingle();
+      if (alive && row) setInemaEnabled(Boolean((row as any).inema_enabled));
+    })();
+    return () => { alive = false; };
+  }, [inema.farmId, farmId]);
+
   const pieData = [
     { name: "Reservado", value: data.pumps.reduce((s, p) => s + p.hours_by_post.reserved, 0), color: "hsl(217 91% 60%)" },
     { name: "Fora-Ponta", value: data.pumps.reduce((s, p) => s + p.hours_by_post.off_peak, 0), color: "hsl(142 71% 45%)" },
@@ -89,7 +107,9 @@ export default function Produtividade() {
       <Tabs defaultValue="roi" className="w-full">
         <TabsList>
           <TabsTrigger value="roi"><DollarSign className="w-4 h-4 mr-1.5" />ROI & Energia</TabsTrigger>
-          <TabsTrigger value="inema"><FileText className="w-4 h-4 mr-1.5" />Conformidade INEMA</TabsTrigger>
+          {inemaEnabled && (
+            <TabsTrigger value="inema"><FileText className="w-4 h-4 mr-1.5" />Conformidade INEMA</TabsTrigger>
+          )}
           <TabsTrigger value="config"><Settings className="w-4 h-4 mr-1.5" />Configurações {!isPlatformAdmin && <Lock className="w-3 h-3 ml-1" />}</TabsTrigger>
         </TabsList>
 
@@ -215,7 +235,8 @@ export default function Produtividade() {
           )}
         </TabsContent>
 
-        {/* ============ ABA INEMA ============ */}
+        {/* ============ ABA INEMA (opt-in por fazenda: farms.inema_enabled) ============ */}
+        {inemaEnabled && (
         <TabsContent value="inema" className="space-y-4 mt-4">
           {/* Compliance diário por poço (risco de multa) — outorgas por poço em inema_permits */}
           <InemaCompliancePanel farmId={inema.farmId} />
@@ -297,6 +318,7 @@ export default function Produtividade() {
             </CardContent>
           </Card>
         </TabsContent>
+        )}
 
         {/* ============ ABA CONFIG ============ */}
         <TabsContent value="config" className="space-y-4 mt-4">
