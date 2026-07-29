@@ -60,6 +60,9 @@ interface LogState {
   add: (entry: Omit<AutomationLogEntry, "id" | "date" | "time" | "ts">) => void;
   /** Insere/mescla um evento já formatado (usado pelo Realtime). Idempotente por id. */
   upsertRemote: (entry: AutomationLogEntry) => void;
+  /** Mescla um LOTE de uma vez (dedup + sort únicos). Usado no carregamento de
+   *  intervalo — evita o O(n²) de N chamadas de upsertRemote e dispara 1 re-render. */
+  bulkUpsertRemote: (entries: AutomationLogEntry[]) => void;
   markSynced: (id: string) => void;
   /** Define a fazenda ativa e remove entradas de outras fazendas (isolamento de dados). */
   setActiveFarm: (farmId: string) => void;
@@ -119,6 +122,29 @@ export const useAutomationLog = create<LogState>()(
           const merged = [entry, ...s.entries].sort((a, b) =>
             b.ts.localeCompare(a.ts),
           );
+          return { entries: merged.slice(0, 20000) };
+        });
+      },
+      bulkUpsertRemote: (incoming) => {
+        set((s) => {
+          const active = s.activeFarmId;
+          const byId = new Map(s.entries.map((e) => [e.id, e]));
+          let changed = false;
+          for (const entry of incoming) {
+            if (active && entry.farmId && entry.farmId !== active) continue;
+            const ex = byId.get(entry.id);
+            if (ex) {
+              if (ex.user !== entry.user || ex.action !== entry.action ||
+                  ex.result !== entry.result || ex.origin !== entry.origin ||
+                  ex.pump !== entry.pump) {
+                byId.set(entry.id, { ...ex, ...entry }); changed = true;
+              }
+            } else {
+              byId.set(entry.id, entry); changed = true;
+            }
+          }
+          if (!changed) return s;
+          const merged = Array.from(byId.values()).sort((a, b) => b.ts.localeCompare(a.ts));
           return { entries: merged.slice(0, 20000) };
         });
       },
@@ -522,21 +548,28 @@ export async function loadAutomationLogRange(
   if (!farmId || !fromIso || !toIso) return;
   try {
     const PAGE = 1000;
-    const MAX_PAGES = 20; // até 20.000 eventos por intervalo (suficiente p/ meses)
-    const upsert = useAutomationLog.getState().upsertRemote;
+    const MAX_PAGES = 20;
+    // PERF: filtra só COMANDOS na origem. O log é dominado por status_read (leituras
+    // periódicas de todos os equipamentos) — 2 ordens de grandeza mais frequentes — e
+    // o relatório os DESCARTA. Puxar "*" trazia até 20.000 linhas (quase todas leituras)
+    // e travava o período de 30+ dias. Comandos reais cobrem meses em poucas centenas.
+    const collected: AutomationLogEntry[] = [];
     for (let page = 0; page < MAX_PAGES; page++) {
       const { data: rows, error } = await supabase
         .from("automation_log")
         .select("*")
         .eq("farm_id", farmId)
+        .in("action", ["turn_on", "turn_off", "pump_on", "pump_off"])
         .gte("occurred_at", fromIso)
         .lte("occurred_at", toIso)
         .order("occurred_at", { ascending: false })
         .range(page * PAGE, (page + 1) * PAGE - 1);
       if (error || !rows || rows.length === 0) break;
-      for (const r of rows) upsert(rowToEntry(r));
+      for (const r of rows) collected.push(rowToEntry(r));
       if (rows.length < PAGE) break;
     }
+    // Um único merge (dedup + sort) → evita O(n²) e dispara 1 re-render, não N.
+    if (collected.length) useAutomationLog.getState().bulkUpsertRemote(collected);
   } catch (e) {
     console.warn("[automationLog] loadAutomationLogRange falhou:", e);
   }
