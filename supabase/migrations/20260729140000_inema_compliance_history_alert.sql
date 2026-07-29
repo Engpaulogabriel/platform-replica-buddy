@@ -52,6 +52,7 @@ RETURNS TABLE(farm_id uuid, equipment_id uuid, equipment_name text,
               volume_limit numeric, peak_pct numeric)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public'
 AS $fn$
+#variable_conflict use_column
 DECLARE
   v_today     date        := (now() AT TIME ZONE 'America/Bahia')::date;
   v_day_start timestamptz := (v_today::timestamp AT TIME ZONE 'America/Bahia');
