@@ -6101,7 +6101,11 @@ function showSetupWindow() {
 
 // ── v3.25.33: autenticação do Tray (Ver Log / Reconfigurar) ──────────────────
 const LOG_VIEW_PASSWORD = process.env.RENOV_LOG_PASSWORD || "Renov@Log2026";
-const RECONFIG_ADMIN_ROLES = ["admin", "owner"];
+// v3.25.38: inclui platform_admin (o super-admin real do sistema — o frontend
+// inteiro usa isPlatformAdmin). Antes só ["admin","owner"] rejeitava o super-admin
+// na reconfiguração/saída pelo Tray ("Apenas administrador/owner..."). super_admin
+// incluído por robustez caso o role exista em algum ambiente.
+const RECONFIG_ADMIN_ROLES = ["admin", "owner", "platform_admin", "super_admin"];
 let authPromptMode = "password";
 let authPromptOpen = false;
 
@@ -7204,16 +7208,36 @@ async function startAgent(cfg) {
     // mas NUNCA bloqueia a inicialização do bridge/polling.
     startupStep = "gate de licença (legacy-friendly)";
     _loadLicenseGrace();
-    const hasLegacyLicense = !!(cfg.email && cfg.password && cfg.farmId && supabase);
-    if (!hasLegacyLicense && !cfg.licenseToken) {
+    // v3.25.38: MODO LOCAL RESILIENTE — a "licença" do agente legacy é o CACHE LOCAL
+    // de credenciais (email+senha+farm_id, salvo criptografado em renov-agent-config.enc
+    // via DPAPI), NÃO a conexão viva com a nuvem. Internet caída no boot NÃO é "licença
+    // ausente": o agente inicia em MODO LOCAL (COM/serial opera as bombas normalmente) e
+    // reconecta/valida em background (grace offline 72h; reconnect a cada 15s).
+    // ANTES o gate exigia `&& supabase` e, offline, mostrava um modal BLOQUEANTE + return
+    // → o bridge serial nunca abria e a fazenda parava. Este era o bug. CORRIGIDO.
+    const hasLocalLicense = !!(cfg.email && cfg.password && cfg.farmId);
+    if (!hasLocalLicense && !cfg.licenseToken) {
+      // Agente CRU (nunca vinculado): não há farm_id nem cache local → nada para operar.
+      // Aviso NÃO-bloqueante no tray (nunca um modal que trava a UI/operação).
       pushLog("error", "system",
-        "[SECURITY] Sem credenciais nem licença — agente não iniciará. Reconfigure pelo Tray → 'Reconfigurar (login)'.");
-      if (tray) tray.setToolTip("RENOV Agent - SEM LICENÇA");
-      try {
-        dialog.showErrorBox("Renov Agent — Licença ausente",
-          "Este agente não está vinculado a uma fazenda. Use o ícone na bandeja → 'Reconfigurar (login)' para ativar.");
-      } catch (_) {}
+        "[SECURITY] Sem credenciais locais nem licença — reconfigure pelo Tray → 'Reconfigurar (login)'.");
+      if (tray) {
+        try {
+          tray.setToolTip("RENOV Agent - NÃO VINCULADO");
+          if (typeof tray.displayBalloon === "function") {
+            tray.displayBalloon({ title: "RENOV Agent",
+              content: "Não vinculado a uma fazenda. Tray → 'Reconfigurar (login)'." });
+          }
+        } catch (_) {}
+      }
       return;
+    }
+    if (!supabase) {
+      // Boot offline COM cache local: segue para o bridge. NÃO bloqueia.
+      if (tray) { try { tray.setToolTip("RENOV Agent - MODO LOCAL (sem nuvem)"); } catch (_) {} }
+      pushLog("warn", "system",
+        "[SECURITY] Nuvem indisponível no boot — iniciando em MODO LOCAL (COM/serial opera normalmente). " +
+        "Reconexão + validação de licença rodam em background (reconnect 15s, grace offline 72h).");
     }
     // Se já temos licenseToken novo, valida — mas SÓ desliga se servidor responder revogado.
     // Falha de rede / token ausente NÃO bloqueia o legacy.
