@@ -468,9 +468,11 @@ const BRIDGE_PING_TIMEOUT_MS = 4_000;
 const AUTO_RESET_TIMEOUT_THRESHOLD = 3;
 const BRIDGE_RESET_SETTLE_MS = 800;
 const LOG_FLUSH_MAX_BUFFER = 50;
-const CLOUD_READ_TIMEOUT_MS = 15_000;
-const CLOUD_WRITE_TIMEOUT_MS = 15_000;
-const CLOUD_LOGIN_TIMEOUT_MS = 30_000;
+// v3.25.39 HARDENING: teto de 10s em TODA chamada de nuvem (Starlink standby).
+// Nuvem é best-effort: se estourar, loga e segue operação local (COM). Nunca bloqueia.
+const CLOUD_READ_TIMEOUT_MS = 8_000;   // era 15s
+const CLOUD_WRITE_TIMEOUT_MS = 8_000;  // era 15s
+const CLOUD_LOGIN_TIMEOUT_MS = 10_000; // era 30s
 const CLOUD_TELEMETRY_TIMEOUT_MS = 8_000; // 8s para gravacao IMEDIATA de estado
 const TELEMETRY_QUEUE_MAX = 500;
 const TELEMETRY_RETRY_MS = 3_000; // fila so eh fallback - retry rapido
@@ -486,6 +488,73 @@ const POLLING_TIMEOUT_SWEEP_MS = 5_000;
 // (a cada 60s) pelo registro de agent_config da fazenda.
 let activePollingEnqueueIntervalMs = POLLING_ENQUEUE_INTERVAL_MS;
 let activeSweepTimeoutMs = POLLING_TIMEOUT_SWEEP_MS;
+
+// ─── v3.25.39 HARDENING: modo degradado + watchdog interno + liveness ───────
+const DEGRADED_RTT_MS = 2_000;             // RTT de nuvem acima disto → modo degradado
+const DEGRADED_POLL_MS = 15_000;           // polling HTTP mais lento em degradado
+const REALTIME_MAX_FAILS = 3;              // 3 quedas seguidas de Realtime → desliga, só HTTP
+const INTERNAL_WATCHDOG_INTERVAL_MS = 60_000;
+const INTERNAL_WATCHDOG_MAX_STRIKES = 3;   // bridge caído 3 ciclos (3min) → relaunch do processo
+const LIVENESS_INTERVAL_MS = 30_000;       // escrita do liveness.txt (o watchdog .bat lê o mtime)
+let degradedMode = false;
+let lastCloudRttMs = 0;
+let realtimeConsecutiveFails = 0;
+let realtimeDisabled = false;              // após REALTIME_MAX_FAILS: opera só por polling HTTP
+let internalWatchdogTimer = null;
+let internalWatchdogStrikes = 0;
+let bridgeWasEverReady = false;            // só escala p/ relaunch se a bridge já funcionou nesta sessão
+
+// LIVENESS: o watchdog externo (.bat) lê o mtime deste arquivo. Escrito a cada 30s
+// pelo timer indestrutível de site_health. Se parar de ser atualizado por >5min, o
+// agente está congelado (deadlock/leak) e o .bat mata+relança. (boot.log NÃO serve:
+// só é escrito no boot, então um agente saudável nunca o toca → mataria em falso.)
+const LIVENESS_FILE = process.resourcesPath
+  ? path.join(process.resourcesPath, "..", "liveness.txt")   // C:\Renov\liveness.txt
+  : path.join(app.getPath("userData"), "liveness.txt");
+function writeLiveness() {
+  try { fs.writeFileSync(LIVENESS_FILE, new Date().toISOString()); } catch (_) {}
+}
+
+// MODO DEGRADADO: polling HTTP mais lento quando o RTT da nuvem está alto (Starlink standby).
+function applyDegradedPolling() {
+  const target = degradedMode ? DEGRADED_POLL_MS : activePollingEnqueueIntervalMs;
+  if (pollingEnqueueTimer && pollingEnqueueTimer._renovIntervalMs === target) return;
+  if (pollingEnqueueTimer) { clearInterval(pollingEnqueueTimer); pollingEnqueueTimer = null; }
+  pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, target);
+  try { pollingEnqueueTimer._renovIntervalMs = target; } catch (_) {}
+  try { pushLog("info", "system", `[DEGRADED] polling HTTP → ${target}ms (RTT ${lastCloudRttMs}ms, degradado=${degradedMode})`); } catch (_) {}
+}
+function noteCloudRtt(ms) {
+  lastCloudRttMs = ms;
+  const was = degradedMode;
+  if (!degradedMode && ms > DEGRADED_RTT_MS) degradedMode = true;         // entra > 2000ms
+  else if (degradedMode && ms < DEGRADED_RTT_MS * 0.6) degradedMode = false; // sai < 1200ms (histerese)
+  if (degradedMode !== was) applyDegradedPolling();
+}
+
+// WATCHDOG INTERNO: relaunch do processo se a bridge ficar caída ~3min (deadlock/leak
+// que o recoverBridge não resolve). Complementa o watchdog de bridge (PING→recoverBridge)
+// e o externo (.bat/liveness). Um setInterval JS NÃO detecta freeze do event-loop (não
+// dispara) — por isso o liveness externo é o detector real de freeze; este cobre bridge travada.
+function stopInternalWatchdog() {
+  if (internalWatchdogTimer) { clearInterval(internalWatchdogTimer); internalWatchdogTimer = null; }
+  internalWatchdogStrikes = 0;
+}
+function startInternalWatchdog() {
+  stopInternalWatchdog();
+  internalWatchdogTimer = setInterval(() => {
+    if (appClosing || portManuallyClosed || bridgeStopping || bridgeRecovering) { internalWatchdogStrikes = 0; return; }
+    if (bridgeReady) { internalWatchdogStrikes = 0; return; }
+    if (!bridgeWasEverReady) return; // bridge nunca subiu → hardware/porta, não travamento
+    internalWatchdogStrikes++;
+    try { pushLog("warn", "system", `[WATCHDOG-INT] bridge não-pronta há ${internalWatchdogStrikes} ciclo(s) de 60s`); } catch (_) {}
+    if (internalWatchdogStrikes >= INTERNAL_WATCHDOG_MAX_STRIKES) {
+      try { pushLog("error", "system", "[WATCHDOG-INT] bridge travada ~3min — relaunch do processo"); } catch (_) {}
+      try { writeLiveness(); } catch (_) {}
+      try { app.relaunch(); app.exit(0); } catch (_) { try { process.exit(0); } catch (__) {} }
+    }
+  }, INTERNAL_WATCHDOG_INTERVAL_MS);
+}
 let activeTxGapMs = 100;               // gap mínimo entre TX serial (configurável remotamente)
 let liveAgentConfig = null;            // { serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at }
 let lastAgentConfigUpdatedAt = null;   // string ISO do último updated_at aplicado
@@ -518,6 +587,22 @@ function markStartupSyncDone(tsnn) {
 }
 function isStartupSyncDone(tsnn) {
   return !!tsnn && startupSyncDoneByTsnn.has(String(tsnn).toUpperCase());
+}
+
+// v3.25.39 HARDENING: notificação NÃO-bloqueante (balão no tray) + log em disco.
+// Substitui os dialog.showErrorBox SÍNCRONOS, que congelavam o processo até o
+// operador clicar — inaceitável em PC desatendido/Starlink. O único modal mantido
+// é o prompt de LOGIN da reconfiguração (ação voluntária do usuário).
+function trayNotify(title, content, level) {
+  const t = String(title || "RENOV Agent");
+  const c = String(content || "");
+  try { pushLog(level === "error" ? "error" : "warn", "system", `[NOTIFY] ${t}: ${c}`); } catch (_) {}
+  try { if (typeof _bootLog === "function") _bootLog(`[NOTIFY] ${t}: ${c}`); } catch (_) {}
+  try {
+    if (tray && typeof tray.displayBalloon === "function") {
+      tray.displayBalloon({ title: t.slice(0, 60), content: c.slice(0, 240) });
+    }
+  } catch (_) {}
 }
 
 function withCloudTimeout(promise, label, timeoutMs) {
@@ -4168,6 +4253,7 @@ function startBridge(portPath) {
             started = true;
             bridgeProcess = proc;
             bridgeReady = true;
+            bridgeWasEverReady = true; // habilita o watchdog interno a escalar p/ relaunch
             markBridgeAlive();
             startBridgeWatchdog();
             pushLog("info", "serial", `Bridge conectada em ${portPath}`);
@@ -5322,6 +5408,7 @@ async function processNextCommand() {
 // congelar o heartbeat pra sempre. Erro NÃO é engolido: loga. Nunca lança pra fora.
 async function upsertSiteHealth() {
   if (!supabase || !farmId) return;
+  const _t0 = Date.now();
   try {
     const { error } = await withCloudTimeout(
       supabase.from("site_health").upsert(
@@ -5337,14 +5424,16 @@ async function upsertSiteHealth() {
         { onConflict: "farm_id" }
       ),
       "site_health upsert",
-      15_000,
+      CLOUD_WRITE_TIMEOUT_MS,
     );
     if (error) {
       try { pushLog("warn", "system", `[HEARTBEAT] upsert site_health FALHOU: ${error.message || error} — retenta no próximo ciclo`); } catch (_) {}
     } else {
       lastSiteHealthOkAt = Date.now();
+      noteCloudRtt(Date.now() - _t0); // RTT baixo → modo normal
     }
   } catch (e) {
+    noteCloudRtt(Date.now() - _t0); // timeout/erro → RTT alto → modo degradado
     try { pushLog("warn", "system", `[HEARTBEAT] upsert site_health ERRO: ${formatError(e)} — retenta no próximo ciclo`); } catch (_) {}
   }
 }
@@ -6002,6 +6091,17 @@ function startCriticalPollingLoops() {
   void processNextCommand();
 }
 
+// v3.25.39: conta quedas seguidas de Realtime; após REALTIME_MAX_FAILS desliga o
+// Realtime e opera SÓ por polling HTTP (sempre-ativo). Retorna true = parar de reagendar.
+function noteRealtimeFail(which) {
+  realtimeConsecutiveFails++;
+  if (realtimeConsecutiveFails >= REALTIME_MAX_FAILS && !realtimeDisabled) {
+    realtimeDisabled = true;
+    try { pushLog("warn", "system", `[DEGRADED] Realtime instável (${realtimeConsecutiveFails} quedas em ${which}) — desligado; operando só por polling HTTP.`); } catch (_) {}
+  }
+  return realtimeDisabled;
+}
+
 function startRealtimeSubscriptionsBestEffort() {
   Promise.resolve()
     .then(() => startCommandsSubscription())
@@ -6092,8 +6192,8 @@ function showSetupWindow() {
   setupWindow.loadFile(path.join(__dirname, "setup.html")).catch((e) => {
     _bootLog(`setupWindow loadFile FAIL: ${e && e.stack || e}`);
     try {
-      dialog.showErrorBox("Renov Agent — Setup não encontrado",
-        `Não consegui abrir a tela de configuração.\n\nArquivo esperado:\n${path.join(__dirname, "setup.html")}\n\nReinstale usando o pacote v${AGENT_VERSION}.`);
+      trayNotify("Renov Agent — Setup não encontrado",
+        `Não abriu setup.html (${path.join(__dirname, "setup.html")}). Reinstale o pacote v${AGENT_VERSION}.`, "error");
     } catch (_) {}
   });
   setupWindow.on("closed", () => { setupWindow = null; });
@@ -6193,7 +6293,7 @@ async function reconfigureWithAuth() {
   if (!r) return; // cancelado
   const check = await validateReconfigLogin(r.email, r.password);
   if (!check.ok) {
-    try { dialog.showErrorBox("Reconfiguração negada", check.reason); } catch (_) {}
+    try { trayNotify("Reconfiguração negada", check.reason); } catch (_) {}
     try { pushLog("warn", "system", `[SECURITY] Reconfiguração NEGADA (${r.email || "?"}): ${check.reason}`); } catch (_) {}
     return;
   }
@@ -6207,6 +6307,7 @@ async function reconfigureWithAuth() {
     if (siteHealthTimer) clearInterval(siteHealthTimer);
     if (heartbeatWatchdogTimer) clearInterval(heartbeatWatchdogTimer);
     if (inemaTimer) clearInterval(inemaTimer);
+    stopInternalWatchdog();
   } catch (_) {}
   void stopBridge().finally(() => showSetupWindow());
 }
@@ -6220,7 +6321,7 @@ async function quitWithAuth() {
   if (!r) return; // cancelado
   const check = await validateReconfigLogin(r.email, r.password);
   if (!check.ok) {
-    try { dialog.showErrorBox("Saída negada", check.reason); } catch (_) {}
+    try { trayNotify("Saída negada", check.reason); } catch (_) {}
     try { pushLog("warn", "system", `[SECURITY] Saída pelo menu NEGADA (${r.email || "?"}): ${check.reason}`); } catch (_) {}
     return;
   }
@@ -6242,7 +6343,7 @@ async function showLogWindow() {
     const r = await promptAuth("password");
     if (!r) return; // cancelado
     if ((r.password || "") !== LOG_VIEW_PASSWORD) {
-      try { dialog.showErrorBox("Senha incorreta", "A senha para ver o log está incorreta."); } catch (_) {}
+      try { trayNotify("Senha incorreta", "A senha para ver o log está incorreta."); } catch (_) {}
       return;
     }
   } catch (_) { return; }
@@ -6656,16 +6757,17 @@ async function handleAgentCommand(cmd) {
         break;
       }
 
-      case "agent_restart": {
-        pushLog("warn", "remote", "Reinício do agente Electron solicitado remotamente");
+      case "agent_restart":
+      case "restart_agent": {
+        // v3.25.39: aceita os dois kinds (restart_agent = alias da plataforma web).
+        pushLog("warn", "system", "[REMOTE] Restart solicitado via plataforma web. Reiniciando...");
+        // marca done ANTES de reiniciar (garante o PATCH antes do relaunch)
         await resolveAgentCommand(cmd.id, "done", {
           duration_ms: Date.now() - startedAt,
           data: { restarting: true },
         });
-        // dá tempo do PATCH chegar antes de relaunch
         setTimeout(() => {
           try {
-            pushLog("warn", "system", "Relaunch do app.exe (agent_restart)");
             app.relaunch();
             app.exit(0);
           } catch (e) {
@@ -6806,6 +6908,7 @@ function scheduleAgentCmdRetry(reason) {
 
 async function startAgentCommandSubscription() {
   if (!supabase || !farmId) return;
+  if (realtimeDisabled) return; // modo degradado: só polling HTTP
 
   try {
     // Limpar subscription anterior
@@ -6849,8 +6952,10 @@ async function startAgentCommandSubscription() {
       .subscribe((status) => {
         if (status === "SUBSCRIBED") {
           agentCmdRetryAttempts = 0;
+          realtimeConsecutiveFails = 0;
           pushLog("info", "remote", `Subscription agent_commands: ${status}`);
         } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR" || status === "CLOSED") {
+          if (noteRealtimeFail("agent_commands")) return; // 3 quedas → só HTTP polling
           scheduleAgentCmdRetry(status);
         }
       });
@@ -6904,6 +7009,7 @@ function scheduleCommandsRetry(reason) {
 
 async function startCommandsSubscription() {
   if (!supabase || !farmId) return;
+  if (realtimeDisabled) return; // modo degradado: só polling HTTP
 
   try {
     if (commandsChannel) {
@@ -6955,8 +7061,10 @@ async function startCommandsSubscription() {
       .subscribe((status) => {
         if (status === "SUBSCRIBED") {
           commandsRetryAttempts = 0;
+          realtimeConsecutiveFails = 0;
           pushLog("info", "system", `Subscription commands: ${status}`);
         } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR" || status === "CLOSED") {
+          if (noteRealtimeFail("commands")) return; // 3 quedas → só HTTP polling
           scheduleCommandsRetry(status);
         }
       });
@@ -7152,6 +7260,7 @@ async function startAgent(cfg) {
     if (heartbeatWatchdogTimer) { clearInterval(heartbeatWatchdogTimer); heartbeatWatchdogTimer = null; }
     if (inemaTimer) { clearInterval(inemaTimer); inemaTimer = null; }
     if (agentConfigWatchTimer) { clearInterval(agentConfigWatchTimer); agentConfigWatchTimer = null; }
+    stopInternalWatchdog();
     processing = false;
     inflightCmd = null;
     inflightTsnn = null;
@@ -7170,8 +7279,22 @@ async function startAgent(cfg) {
     if (!portToTry) portToTry = cfg.comPort;
     comPort = portToTry || "COM12";
 
-    // v3.10.7 SECURITY: conecta nuvem PRIMEIRO e valida hardware ANTES do bridge.
-    startupStep = "conectar serviços da nuvem (pré-gate)";
+    // v3.25.39 COM-FIRST: abre a bridge serial ANTES de qualquer nuvem. Com 0% de
+    // internet as bombas operam imediatamente. A nuvem (login + anti-clone + agent_config)
+    // roda DEPOIS, best-effort. Se a porta remota (agent_config) diferir do cache, o
+    // applyAgentConfig(initial:false) mais abaixo reabre; e o hot-reload (60s) cobre o resto.
+    pushLog("info", "system", `[COM-FIRST] Abrindo bridge serial em ${comPort} ANTES da nuvem...`);
+    try {
+      startupStep = `abrir bridge serial (COM-first) em ${comPort}`;
+      await startBridge(comPort);
+    } catch (bridgeErr) {
+      pushLog("error", "system", `Bridge falhou (COM-first): ${bridgeErr.message}`);
+      if (tray) { try { tray.setToolTip("RENOV Agent - ERRO Python"); } catch (_) {} }
+      // NÃO retorna: segue p/ nuvem + retries; o watchdog de bridge tenta recuperar.
+    }
+
+    // Nuvem é BEST-EFFORT — conecta DEPOIS do COM. Anti-clone valida em background.
+    startupStep = "conectar serviços da nuvem (pós-COM)";
     try { await connectCloudServices(cfg); } catch (_) {}
 
     // v3.11.9: SEMPRE reporta versão atual ao banco logo após autenticação,
@@ -7262,28 +7385,19 @@ async function startAgent(cfg) {
 
 
 
-    // v3.12.2 — Carrega configuração remota (porta COM + intervalos) ANTES de abrir o bridge.
+    // v3.25.39 COM-FIRST: a bridge JÁ foi aberta acima (porta em cache). Agora aplica o
+    // agent_config remoto; se a porta remota diferir do cache, applyAgentConfig(initial:false)
+    // fecha e reabre na porta certa. Sem internet, mantém a porta em cache já aberta.
     startupStep = "carregar agent_config remoto";
     try {
       const remoteCfg = await fetchAgentConfig();
       if (remoteCfg) {
-        await applyAgentConfig(remoteCfg, { initial: true });
+        await applyAgentConfig(remoteCfg, { initial: false });
       } else {
         pushLog("warn", "system", "[CONFIG] agent_config indisponível — usando porta/intervalos locais");
       }
     } catch (e) {
       pushLog("warn", "system", `[CONFIG] falha ao carregar agent_config: ${formatError(e)}`);
-    }
-
-    pushLog("info", "system", `Iniciando bridge Serial em ${comPort}...`);
-
-    try {
-      startupStep = `abrir bridge serial em ${comPort}`;
-      await startBridge(comPort);
-    } catch (bridgeErr) {
-      pushLog("error", "system", `Bridge falhou: ${bridgeErr.message}`);
-      if (tray) tray.setToolTip("RENOV Agent - ERRO Python");
-      return;
     }
 
     try { verifyAgentObfuscation(cfg); } catch (_) {}
@@ -7301,9 +7415,13 @@ async function startAgent(cfg) {
     // decoplado do sendHeartbeat (que pode travar na validação de licença). Roda a cada
     // 30s independente de qualquer erro/hang das tarefas pesadas.
     lastSiteHealthOkAt = Date.now(); // baseline p/ o watchdog
+    writeLiveness();                 // v3.25.39: liveness imediato p/ o watchdog externo (.bat)
     void upsertSiteHealth();
     if (siteHealthTimer) clearInterval(siteHealthTimer);
-    siteHealthTimer = setInterval(() => { void upsertSiteHealth(); }, HEARTBEAT_INTERVAL_MS);
+    siteHealthTimer = setInterval(() => { writeLiveness(); void upsertSiteHealth(); }, HEARTBEAT_INTERVAL_MS);
+
+    // v3.25.39: WATCHDOG INTERNO — relaunch se a bridge ficar caída ~3min (deadlock/leak).
+    startInternalWatchdog();
 
     // Watchdog: se o site_health não teve upsert BEM-SUCEDIDO há > 5 min, algo travou
     // (timer morto, upsert em erro persistente) → recria o timer dedicado e força retry.
@@ -7314,7 +7432,7 @@ async function startAgent(cfg) {
       if (ageMs > 5 * 60_000) {
         try { pushLog("warn", "system", `[HEARTBEAT-WATCHDOG] site_health sem sucesso há ${Math.round(ageMs / 60000)}min — recriando timer + retry forçado`); } catch (_) {}
         try { if (siteHealthTimer) clearInterval(siteHealthTimer); } catch (_) {}
-        siteHealthTimer = setInterval(() => { void upsertSiteHealth(); }, HEARTBEAT_INTERVAL_MS);
+        siteHealthTimer = setInterval(() => { writeLiveness(); void upsertSiteHealth(); }, HEARTBEAT_INTERVAL_MS);
         void upsertSiteHealth();
       }
     }, 60_000);
@@ -7825,9 +7943,7 @@ function scheduleBackgroundAntiCloneCheck(cfg) {
       // 3) Aguarda 60s antes de encerrar (garante envio do alerta)
       setTimeout(() => {
         try { if (tray) tray.setToolTip("RENOV Agent - Erro de licença"); } catch (_) {}
-        try {
-          dialog.showErrorBox("Renov Agent", "Erro de licença. Contate o suporte.");
-        } catch (_) {}
+        try { trayNotify("Renov Agent", "Erro de licença. Contate o suporte.", "error"); } catch (_) {}
         try { app.exit(1); } catch (_) { process.exit(1); }
       }, 60_000);
     } catch (e) {
@@ -7972,8 +8088,8 @@ async function validateLicenseHeartbeat(cfg) {
   const baseUrl = cfg.supabaseUrl || SUPABASE_URL_DEFAULT;
   const anon = cfg.supabaseAnonKey || SUPABASE_ANON_DEFAULT;
   try {
-    // v3.25.36: timeout de 20s — SEM isto, um license-validate travado prende o
-    // sendHeartbeat indefinidamente (era a causa raiz do heartbeat congelado).
+    // v3.25.39: timeout de 10s (era 20s) — teto global de nuvem. license-validate
+    // travado nunca prende o sendHeartbeat; sem validação, grace offline de 72h cobre.
     const resp = await withCloudTimeout(fetch(`${baseUrl}/functions/v1/license-validate`, {
       method: "POST",
       headers: {
@@ -7981,7 +8097,7 @@ async function validateLicenseHeartbeat(cfg) {
         "apikey": anon,
         "Authorization": `Bearer ${cfg.licenseToken}`,
       },
-    }), "license-validate", 20_000);
+    }), "license-validate", 10_000);
     const body = await resp.json().catch(() => ({}));
 
     if (resp.ok && body?.valid) {
@@ -8116,8 +8232,8 @@ app.whenReady().then(async () => {
   } catch (e) {
     _bootLog(`app.whenReady TOP-LEVEL FAIL: ${e && e.stack || e}`);
     try {
-      dialog.showErrorBox("Renov Agent — Erro de inicialização",
-        `Falha ao iniciar o agente:\n\n${e && e.message || e}\n\nVerifique o boot.log em %APPDATA%\\GestorDeBombasKey\\`);
+      trayNotify("Renov Agent — Erro de inicialização",
+        `Falha ao iniciar: ${e && e.message || e}. Veja boot.log em %APPDATA%\\GestorDeBombasKey\\.`, "error");
     } catch (_) {}
   }
 }).catch((e) => {
@@ -8127,6 +8243,7 @@ app.on("window-all-closed", (e) => { e.preventDefault(); });
 app.on("before-quit", () => {
   appClosing = true;
   stopCloudReconnect();
+  stopInternalWatchdog();
   flushLogs();
   void stopBridge();
 });

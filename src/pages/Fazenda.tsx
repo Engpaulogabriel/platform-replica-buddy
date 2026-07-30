@@ -4,10 +4,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Building2, Copy, KeyRound, Check, FileText } from "lucide-react";
+import { Building2, Copy, KeyRound, Check, FileText, RotateCw, Loader2 } from "lucide-react";
 import { notify } from "@/lib/notify";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
+import { usePlatformAdmin } from "@/hooks/usePlatformAdmin";
 import { supabase } from "@/integrations/supabase/client";
+import { runAgentCommand } from "@/lib/agentCommands";
+import { confirmAction } from "@/lib/confirmDialog";
 import SedeCoordsCard from "@/components/SedeCoordsCard";
 
 export const FAZENDA_STORAGE_KEY = "fazenda_data";
@@ -101,6 +104,69 @@ function InemaToggleCard({ farmId }: { farmId: string | null }) {
   );
 }
 
+// Reiniciar Agente — SÓ super-admin (platform_admin). Enfileira agent_restart em
+// agent_commands; o agente Electron executa app.relaunch()+app.exit(0) e volta em
+// segundos. Elimina AnyDesk para reiniciar o .exe da fazenda remotamente.
+function AgentRestartCard({ farmId }: { farmId: string | null }) {
+  const { isPlatformAdmin, loading } = usePlatformAdmin();
+  const [busy, setBusy] = useState(false);
+
+  if (loading || !isPlatformAdmin) return null;
+
+  const restart = async () => {
+    if (!farmId || busy) return;
+    const ok = await confirmAction({
+      title: "Reiniciar o Agente desta fazenda?",
+      description:
+        "O Renov Agent (.exe) no PC da fazenda vai reiniciar. A comunicação com as " +
+        "bombas fica indisponível por alguns segundos enquanto o processo sobe de novo.",
+      confirmLabel: "Reiniciar Agente",
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      // expira em 5min: se o agente estiver offline agora, executa ao voltar (dentro da janela).
+      const { result } = await runAgentCommand({
+        farmId, kind: "agent_restart", payload: {}, expiresInSec: 300, timeoutMs: 20_000,
+      });
+      if (result.status === "done") {
+        notify.ok("Agente", "Reinício confirmado — o agente está subindo novamente.");
+      } else if (result.status === "expired") {
+        notify.warn("Agente",
+          "Comando enfileirado, mas o agente não respondeu (offline ou travado). " +
+          "Se estiver travado, o watchdog do PC reinicia automaticamente.");
+      } else {
+        notify.fail("Agente", `Falha ao reiniciar: ${result.error_message ?? "erro desconhecido"}`);
+      }
+    } catch (e: any) {
+      notify.fail("Agente", e?.message ?? "Falha ao enviar o comando de reinício.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="bg-card border-border">
+      <CardHeader>
+        <CardTitle className="text-base text-foreground flex items-center gap-2">
+          <RotateCw className="w-4 h-4 text-primary" /> Reiniciar Agente
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-xs text-muted-foreground">
+          Reinicia o Renov Agent instalado no PC da fazenda remotamente, sem AnyDesk.
+          Útil para destravar o agente ou aplicar mudanças de configuração.
+        </p>
+        <Button variant="destructive" onClick={restart} disabled={busy || !farmId}>
+          {busy ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <RotateCw className="w-4 h-4 mr-1.5" />}
+          {busy ? "Enviando…" : "Reiniciar Agente"}
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 const FazendaContent = () => {
   const [form, setForm] = useState<FazendaData>(loadFazendaData);
   const farmId = useDefaultFarmId();
@@ -123,6 +189,7 @@ const FazendaContent = () => {
   return (
     <div className="space-y-4">
       <SedeCoordsCard />
+      <AgentRestartCard farmId={farmId} />
       <InemaToggleCard farmId={farmId} />
       <Card className="bg-card border-border">
         <CardHeader>
