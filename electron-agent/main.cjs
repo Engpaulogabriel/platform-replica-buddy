@@ -35,12 +35,19 @@ function _bootLog(msg) {
 }
 _bootLog(`=== boot main.cjs pid=${process.pid} packaged=${app.isPackaged} platform=${process.platform} arch=${process.arch} node=${process.versions.node} electron=${process.versions.electron} ===`);
 
+// v3.25.40 (#8): qualquer crash inesperado termina em RESTART, nunca em morte
+// permanente. Os handlers NUNCA chamam process.exit() direto — delegam para
+// relaunchAgent(), que loga, avisa a nuvem (3s) e só então relaunch+exit.
+const _PROCESS_START_MS = Date.now();
 process.on("uncaughtException", (err) => {
   _bootLog(`uncaughtException: ${err && err.stack || err}`);
   try { console.error("[FATAL]", err); } catch (_) {}
+  try { handleFatalError("unhandled_exception", err); }
+  catch (_) { try { app.relaunch(); app.exit(1); } catch (__) {} }
 });
 process.on("unhandledRejection", (err) => {
   _bootLog(`unhandledRejection: ${err && err.stack || err}`);
+  try { noteUnhandledRejection(err); } catch (_) {}
 });
 
 // Auto-update DESATIVADO. O repositório público de releases não existe e o
@@ -550,10 +557,199 @@ function startInternalWatchdog() {
     try { pushLog("warn", "system", `[WATCHDOG-INT] bridge não-pronta há ${internalWatchdogStrikes} ciclo(s) de 60s`); } catch (_) {}
     if (internalWatchdogStrikes >= INTERNAL_WATCHDOG_MAX_STRIKES) {
       try { pushLog("error", "system", "[WATCHDOG-INT] bridge travada ~3min — relaunch do processo"); } catch (_) {}
-      try { writeLiveness(); } catch (_) {}
-      try { app.relaunch(); app.exit(0); } catch (_) { try { process.exit(0); } catch (__) {} }
+      void relaunchAgent("watchdog_relaunch", 0);
     }
   }, INTERNAL_WATCHDOG_INTERVAL_MS);
+}
+
+// ─── v3.25.40 HARDENING #6/#7/#8/#12: auto-recuperação sem intervenção ──────
+// Cenário-alvo: Starlink 200kbps, sem AnyDesk, sem acesso remoto ao desktop.
+// TODA saída do processo (restart preventivo, memory guard, exceção não tratada,
+// watchdog interno, OTA, restart remoto) passa por relaunchAgent(): ele loga,
+// avisa a nuvem ("estou morrendo"), descarrega o log e SÓ ENTÃO faz
+// relaunch+exit. Nenhum caminho pode terminar em morte permanente.
+const DYING_ALERT_TIMEOUT_MS = 3_000;
+const PREVENTIVE_RESTART_HOUR = 3;                    // 03:00 horário LOCAL da máquina
+const PREVENTIVE_CHECK_INTERVAL_MS = 60_000;
+const PREVENTIVE_MAX_DEFER_MS = 2 * 60 * 60 * 1000;   // adia no máx. 2h (até ~05:00)
+const MEMORY_GUARD_INTERVAL_MS = 5 * 60 * 1000;
+const MEMORY_GUARD_HEAP_MB = 500;
+const MEMORY_GUARD_RSS_RATIO = 0.70;                  // ou 70% da RAM física
+const UNHANDLED_REJECTION_WINDOW_MS = 5 * 60 * 1000;
+const UNHANDLED_REJECTION_MAX = 3;
+
+let relaunchInProgress = false;
+let dyingAlertSent = false;
+let preventiveRestartTimer = null;
+let preventiveRestartDoneDay = null;    // "YYYY-MM-DD" da janela 03:00 já tratada
+let preventiveRestartPendingSince = 0;  // >0 = esperando atuação ativa terminar
+let memoryGuardTimer = null;
+const unhandledRejectionTimes = [];
+
+function fmtBrTimestamp(d) {
+  try { return new Date(d).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }); }
+  catch (_) { try { return new Date(d).toISOString(); } catch (__) { return String(d); } }
+}
+
+// #12 "ESTOU MORRENDO" — POST best-effort (3s) para o backend de WhatsApp que já
+// existe (whatsapp-automation-notify, verify_jwt=false; destinatários saem de
+// whatsapp_operators da fazenda). Sem internet o timeout dispara, loga e o
+// restart segue — NUNCA trava a saída do processo.
+async function notifyAgentDying(reason) {
+  if (dyingAlertSent) return;
+  dyingAlertSent = true;
+  const nowIso = new Date().toISOString();
+  try { pushLog("warn", "system", `[DYING] Motivo: ${reason} — avisando a nuvem (timeout 3s)`); } catch (_) {}
+  try { _bootLog(`[DYING] ${reason}`); } catch (_) {}
+  if (!farmId || !activeSupabaseUrl || !activeSupabaseAnonKey) return;
+  const baseUrl = String(activeSupabaseUrl).replace(/\/+$/, "");
+  try {
+    await withCloudTimeout(fetch(`${baseUrl}/functions/v1/whatsapp-automation-notify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: activeSupabaseAnonKey,
+        Authorization: `Bearer ${activeAccessToken || activeSupabaseAnonKey}`,
+      },
+      body: JSON.stringify({
+        type: "alert",
+        immediate: true,
+        source: "agent_dying",
+        alert_type: "agent_dying",
+        farm_id: farmId,
+        equipment_name: "Sistema",
+        message: `⚠️ RENOV: Agente reiniciou. Motivo: ${reason}. Horário: ${fmtBrTimestamp(nowIso)} (v${AGENT_VERSION})`,
+        metadata: { reason, timestamp: nowIso, agent_version: AGENT_VERSION },
+      }),
+    }), "agent_dying", DYING_ALERT_TIMEOUT_MS);
+    try { pushLog("info", "system", "[DYING] Alerta enviado"); } catch (_) {}
+  } catch (e) {
+    try { pushLog("warn", "system", `[DYING] Alerta não enviado (${formatError(e)}) — reiniciando mesmo assim`); } catch (_) {}
+  }
+}
+
+// Saída ÚNICA do processo. `reason` é o que vai no alerta #12:
+// memory_guard | watchdog_relaunch | unhandled_exception | preventive_restart |
+// manual_restart | update_agent
+async function relaunchAgent(reason, exitCode) {
+  const code = Number.isFinite(exitCode) ? exitCode : 0;
+  // Guarda de reentrância. Em try/catch porque num crash MUITO precoce (antes da
+  // avaliação deste módulo) o acesso à variável lançaria TDZ — e um throw aqui
+  // viraria outro uncaughtException, criando loop infinito sem nunca sair.
+  try {
+    if (relaunchInProgress) return;
+    relaunchInProgress = true;
+  } catch (_) {}
+  try { pushLog("warn", "system", `[RESTART] Reiniciando agente — motivo: ${reason}`); } catch (_) {}
+  try { await notifyAgentDying(reason); } catch (_) {}
+  // flushLogs é best-effort e vai à nuvem: teto de 2s para não segurar a saída.
+  try { await withCloudTimeout(flushLogs(), "flush-logs-exit", 2_000); } catch (_) {}
+  try { writeLiveness(); } catch (_) {}
+  try { app.relaunch(); app.exit(code); }
+  catch (_) { try { process.exit(code); } catch (__) {} }
+}
+
+// #8 — exceção não tratada: log fatal + alerta + relaunch (NUNCA exit puro).
+function handleFatalError(reason, err) {
+  const msg = (err && (err.stack || err.message)) || String(err);
+  try { pushLog("error", "system", `[FATAL] Uncaught: ${msg}`); } catch (_) {}
+  // Crash muito cedo no boot = provável loop de inicialização. Espera 10s antes
+  // de relançar para não queimar CPU; o backoff do watchdog .bat cobre o resto.
+  const delay = (Date.now() - _PROCESS_START_MS) < 20_000 ? 10_000 : 0;
+  setTimeout(() => { void relaunchAgent(reason, 1); }, delay);
+}
+
+// unhandledRejection NÃO é um crash: o processo segue íntegro. Reiniciar a cada
+// `void promise()` rejeitada (fetch de nuvem em Starlink) derrubaria a operação
+// o tempo todo. Loga toda ocorrência como fatal e só escala para restart quando
+// vira padrão: 3 rejeições em 5 min.
+function noteUnhandledRejection(err) {
+  const msg = (err && (err.stack || err.message)) || String(err);
+  try { pushLog("error", "system", `[FATAL] Unhandled rejection: ${msg}`); } catch (_) {}
+  const now = Date.now();
+  unhandledRejectionTimes.push(now);
+  while (unhandledRejectionTimes.length && now - unhandledRejectionTimes[0] > UNHANDLED_REJECTION_WINDOW_MS) {
+    unhandledRejectionTimes.shift();
+  }
+  if (unhandledRejectionTimes.length >= UNHANDLED_REJECTION_MAX) {
+    try { pushLog("error", "system", `[FATAL] ${unhandledRejectionTimes.length} rejeições não tratadas em 5min — reiniciando`); } catch (_) {}
+    void relaunchAgent("unhandled_exception", 1);
+  }
+}
+
+// #6 — o restart preventivo NUNCA interrompe uma atuação em curso (bomba
+// ligando/desligando, reforço manual, safety armado, OTA). Espera terminar.
+function describeActiveActuation() {
+  try {
+    if (isInstallingUpdate) return "OTA em instalação";
+    if (forcedShutdownActive) return "desligamento forçado em curso";
+    if (manualReinforceByEquipment.size > 0) return `${manualReinforceByEquipment.size} reforço(s) manual(is) ativo(s)`;
+    if (safetyByEquipment.size > 0) return `${safetyByEquipment.size} safety timer(s) armado(s)`;
+    if (inflightManual) return "frame manual aguardando resposta";
+    if (inflightCmd && inflightCmd.type && inflightCmd.type !== "polling") return `comando ${inflightCmd.type} em voo`;
+    const naFila = txQueue.filter((i) => i && i.priority !== "polling").length;
+    if (naFila > 0) return `${naFila} TX não-polling na fila`;
+  } catch (_) {}
+  return null;
+}
+
+function startPreventiveRestart() {
+  if (preventiveRestartTimer) return;
+  preventiveRestartTimer = setInterval(() => {
+    try {
+      if (relaunchInProgress || appClosing) return;
+      const day = todayStr();
+      if (!preventiveRestartPendingSince) {
+        if (new Date().getHours() !== PREVENTIVE_RESTART_HOUR) return;
+        if (preventiveRestartDoneDay === day) return;
+        preventiveRestartDoneDay = day;
+        preventiveRestartPendingSince = Date.now();
+        try { pushLog("info", "system", "[PREVENTIVE] Restart diário agendado às 03:00"); } catch (_) {}
+      }
+      const busy = describeActiveActuation();
+      if (busy) {
+        const waited = Date.now() - preventiveRestartPendingSince;
+        if (waited > PREVENTIVE_MAX_DEFER_MS) {
+          preventiveRestartPendingSince = 0;
+          try { pushLog("warn", "system", `[PREVENTIVE] Adiado ${Math.round(waited / 60000)}min (${busy}) — cancelado até amanhã`); } catch (_) {}
+          return;
+        }
+        try { pushLog("info", "system", `[PREVENTIVE] Aguardando atuação terminar: ${busy}`); } catch (_) {}
+        return;
+      }
+      preventiveRestartPendingSince = 0;
+      void relaunchAgent("preventive_restart", 0);
+    } catch (_) {}
+  }, PREVENTIVE_CHECK_INTERVAL_MS);
+  try { preventiveRestartTimer.unref?.(); } catch (_) {}
+}
+
+// #7 MEMORY GUARD — a cada 5 min. Dois gatilhos: heap acima do teto absoluto
+// (500MB) OU RSS acima de 70% da RAM física. Previne o OOM que o Windows não
+// recupera. Complementa startAutoRebootWatchdog (que também cobre serial muda).
+function startMemoryGuard() {
+  if (memoryGuardTimer) return;
+  memoryGuardTimer = setInterval(() => {
+    try {
+      if (relaunchInProgress || appClosing) return;
+      const m = process.memoryUsage();
+      const heapMb = Math.round(m.heapUsed / 1024 / 1024);
+      const rssMb = Math.round(m.rss / 1024 / 1024);
+      const totalBytes = os.totalmem() || 0;
+      const ratio = totalBytes > 0 ? m.rss / totalBytes : 0;
+      if (heapMb > MEMORY_GUARD_HEAP_MB) {
+        try { pushLog("error", "system", `[MEMORY] Heap em ${heapMb}mb — excedeu limite. Reiniciando.`); } catch (_) {}
+        void relaunchAgent("memory_guard", 0);
+        return;
+      }
+      if (ratio > MEMORY_GUARD_RSS_RATIO) {
+        const totalMb = Math.round(totalBytes / 1024 / 1024);
+        try { pushLog("error", "system", `[MEMORY] RSS em ${rssMb}mb (${Math.round(ratio * 100)}% de ${totalMb}mb de RAM) — excedeu limite. Reiniciando.`); } catch (_) {}
+        void relaunchAgent("memory_guard", 0);
+      }
+    } catch (_) {}
+  }, MEMORY_GUARD_INTERVAL_MS);
+  try { memoryGuardTimer.unref?.(); } catch (_) {}
 }
 let activeTxGapMs = 100;               // gap mínimo entre TX serial (configurável remotamente)
 let liveAgentConfig = null;            // { serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at }
@@ -869,6 +1065,10 @@ const lastPollAtByTsnn = new Map();
 // online e o heartbeat NÃO precisa transmitir polling à toa. Atualizado em
 // processTelemFrame para todo RX válido.
 const lastRxAtByTsnn = new Map();
+// v3.25.40 (#10): ÚLTIMO ESTADO FÍSICO conhecido por PLC (payload do último RX
+// válido). Enquanto a nuvem está fora, este é o estado soberano; quando ela
+// volta, resyncKnownStateToCloud() reenvia isto para o Supabase imediatamente.
+const lastRxStateByTsnn = new Map(); // TSNN -> { payload, frame, at }
 let plcSilenceCheckTimer = null;
 function noteSuccessfulPoll(tsnn) {
   if (!tsnn) return;
@@ -1722,11 +1922,12 @@ const AUTO_REBOOT_HEAP_LIMIT_MB = 500;
 const AUTO_REBOOT_SERIAL_SILENCE_MS = 10 * 60 * 1000;
 let autoRebootTimer = null;
 let autoRebootStartTs = Date.now();
-function triggerAutoReboot(reason) {
+// v3.25.40: dyingReason alimenta o alerta #12 ("estou morrendo").
+function triggerAutoReboot(reason, dyingReason) {
   try { pushLog("warn", "system", `[AUTO-REBOOT] ${reason}`); } catch (_) {}
   try { console.log(`[AUTO-REBOOT] ${reason}`); } catch (_) {}
   setTimeout(() => {
-    try { app.relaunch(); app.exit(0); } catch (_) { try { process.exit(0); } catch (_) {} }
+    void relaunchAgent(dyingReason || "watchdog_relaunch", 0);
   }, 1500);
 }
 function startAutoRebootWatchdog() {
@@ -1736,7 +1937,7 @@ function startAutoRebootWatchdog() {
     try {
       const heapMb = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
       if (heapMb > AUTO_REBOOT_HEAP_LIMIT_MB) {
-        triggerAutoReboot(`Memória excedeu ${AUTO_REBOOT_HEAP_LIMIT_MB}MB (heap=${heapMb}MB)`);
+        triggerAutoReboot(`Memória excedeu ${AUTO_REBOOT_HEAP_LIMIT_MB}MB (heap=${heapMb}MB)`, "memory_guard");
         return;
       }
     } catch (_) {}
@@ -1746,7 +1947,7 @@ function startAutoRebootWatchdog() {
       if (uptime > AUTO_REBOOT_SERIAL_SILENCE_MS && lastRx > 0) {
         const silentMs = Date.now() - lastRx;
         if (silentMs > AUTO_REBOOT_SERIAL_SILENCE_MS) {
-          triggerAutoReboot(`Serial inativa por ${Math.round(silentMs/60000)} minutos`);
+          triggerAutoReboot(`Serial inativa por ${Math.round(silentMs/60000)} minutos`, "watchdog_relaunch");
         }
       }
     } catch (_) {}
@@ -1825,9 +2026,7 @@ async function checkForceRebootInsideHeartbeat() {
     ).catch(() => null);
     try { pushLog("warn", "system", "[FORCE-REBOOT] Comando detectado via HTTP polling no heartbeat"); } catch (_) {}
     try { console.log("[FORCE-REBOOT] Comando detectado via HTTP polling no heartbeat"); } catch (_) {}
-    setTimeout(() => {
-      try { app.relaunch(); app.exit(0); } catch (_) { try { process.exit(0); } catch (_) {} }
-    }, 250);
+    setTimeout(() => { void relaunchAgent("manual_restart", 0); }, 250);
   } catch (_) {}
 }
 
@@ -2937,6 +3136,28 @@ function broadcastEquipmentState(equipmentId, tsnn, rawPayload) {
 // --- Telemetria: gravacao IMEDIATA (PRIORIDADE MAXIMA) ---
 // Estado de bomba (last_outputs_state) NAO PODE esperar fila. Tenta IMEDIATO,
 // 1 retry rapido em 2s se falhar, e so entao cai na fila como ultimo recurso.
+// v3.25.40 (#10) — Quando a nuvem volta, o estado LOCAL é a fonte da verdade:
+// reenvia o último payload RX conhecido de cada PLC. Só grava o que a serial
+// realmente observou (nunca "desliga por falta de confirmação"); _origin fica
+// null, então a RPC preserva a origem anterior do acionamento.
+let resyncInFlight = false;
+async function resyncKnownStateToCloud(motivo) {
+  if (resyncInFlight) return;
+  if (!supabase || !farmId || lastRxStateByTsnn.size === 0) return;
+  resyncInFlight = true;
+  try {
+    const total = lastRxStateByTsnn.size;
+    try { pushLog("info", "cloud", `[RESYNC] Nuvem voltou (${motivo}) — reenviando estado real de ${total} PLC(s)`); } catch (_) {}
+    for (const [tsnn, st] of lastRxStateByTsnn.entries()) {
+      if (!st || !/^[01]{1,6}$/.test(String(st.payload || ""))) continue;
+      try { await queueTelemetry(tsnn, st.payload, st.frame, null); } catch (_) {}
+    }
+  } catch (_) {
+  } finally {
+    resyncInFlight = false;
+  }
+}
+
 async function queueTelemetry(tsnn, rawPayload, rxFrame, commandId) {
   if (!supabase || !farmId) return;
   // v3.8.6: passa _origin explicito.
@@ -3859,6 +4080,8 @@ function processTelemFrame(frame) {
   // v3.25.16: prova de vida — registra o instante deste RX (espontâneo ou resposta).
   // Usado pelo heartbeat do polling para não transmitir se a PLC já se manifestou.
   lastRxAtByTsnn.set(String(rxTsnn), Date.now());
+  // v3.25.40 (#10): guarda o estado físico real desta PLC para o resync pós-nuvem.
+  try { lastRxStateByTsnn.set(String(rxTsnn), { payload: rxPayload, frame, at: Date.now() }); } catch (_) {}
 
   // v3.25.7: sequência de desligamento forçado — resolve o waiter se este RX
   // confirma o bit alvo esperado.
@@ -5743,10 +5966,7 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
     } catch (_) {}
 
     pushLog("info", "update", `[OTA-asar] Atualização v${version} instalada com sucesso — reiniciando`);
-    setTimeout(() => {
-      try { app.relaunch(); } catch (_) {}
-      try { app.exit(0); } catch (_) { try { app.quit(); } catch (__) {} }
-    }, 1500);
+    setTimeout(() => { void relaunchAgent("update_agent", 0); }, 1500);
   } catch (e) {
     await recordFailure(`exceção: ${e.message}`);
   }
@@ -6162,6 +6382,9 @@ async function connectCloudServices(cfg, options = {}) {
     void sendHeartbeat();
     void flushLogs();
     void flushTelemetryQueue();
+    // v3.25.40 (#10): a nuvem voltou — reenvia o estado REAL das bombas agora,
+    // sem esperar o próximo ciclo de polling.
+    void resyncKnownStateToCloud(quiet ? "reconexão" : "startup");
     startRealtimeSubscriptionsBestEffort();
     // Marca início de sessão do agente no Relatório de Automação (origem
     // "Sistema"). Útil para correlacionar perda de estado de bombas após
@@ -6766,14 +6989,7 @@ async function handleAgentCommand(cmd) {
           duration_ms: Date.now() - startedAt,
           data: { restarting: true },
         });
-        setTimeout(() => {
-          try {
-            app.relaunch();
-            app.exit(0);
-          } catch (e) {
-            pushLog("error", "system", `Falha relaunch: ${e.message}`);
-          }
-        }, 800);
+        setTimeout(() => { void relaunchAgent("manual_restart", 0); }, 800);
         break;
       }
 
@@ -6827,10 +7043,7 @@ async function handleAgentCommand(cmd) {
             });
 
             pushLog("warn", "update", `[ROLLBACK] app.asar.bak restaurado — reiniciando`);
-            setTimeout(() => {
-              try { app.relaunch(); } catch (_) {}
-              try { app.exit(0); } catch (_) { try { app.quit(); } catch (__) {} }
-            }, 1500);
+            setTimeout(() => { void relaunchAgent("update_agent", 0); }, 1500);
           } catch (e) {
             await resolveAgentCommand(cmd.id, "error", { error: `swap falhou: ${e.message}` });
           }
@@ -6863,10 +7076,7 @@ async function handleAgentCommand(cmd) {
             });
 
             pushLog("warn", "update", `[ROLLBACK] pasta app_pre_ota.bak restaurada — reiniciando`);
-            setTimeout(() => {
-              try { app.relaunch(); } catch (_) {}
-              try { app.exit(0); } catch (_) { try { app.quit(); } catch (__) {} }
-            }, 1500);
+            setTimeout(() => { void relaunchAgent("update_agent", 0); }, 1500);
           } catch (e) {
             await resolveAgentCommand(cmd.id, "error", { error: `restore folder falhou: ${e.message}` });
           }
@@ -7459,6 +7669,9 @@ async function startAgent(cfg) {
     logRotationTimer = setInterval(rotateOldLogs, 6 * 60 * 60 * 1000);
     startMemoryCleanup();
     startAutoRebootWatchdog();
+    // v3.25.40: #7 memory guard (5min) + #6 restart preventivo diário às 03:00.
+    startMemoryGuard();
+    startPreventiveRestart();
     startRealtimeSubscriptionsBestEffort();
 
     // v3.14.0 — Anti-clone em BACKGROUND (30s após polling estar rodando).
@@ -8018,6 +8231,8 @@ const OFFLINE_LICENSE_GRACE_MS = 72 * 60 * 60 * 1000;
 const LICENSE_VALIDATE_INTERVAL_MS = 30_000;
 let lastLicenseValidationAt = 0;
 let lastLicenseOkAt = 0;
+// v3.25.40 (#10): throttle do aviso de grace offline — o gate deixou de encerrar.
+let lastOfflineGraceWarnAt = 0;
 let licenseKillSwitchTriggered = false;
 let obfuscationCheckDone = false;
 
@@ -8120,17 +8335,20 @@ async function validateLicenseHeartbeat(cfg) {
     }
   } catch (_) {}
 
+  // v3.25.40 (#10) FALLBACK ÚLTIMO ESTADO — o agente NUNCA para a operação por
+  // falta de nuvem. O kill-switch antigo de "grace offline expirado" (72h)
+  // desligava as bombas e encerrava o processo: em Starlink instável isso derruba
+  // a fazenda sozinho, porque sem o agente não há polling e o safety de 15min do
+  // firmware desliga as bombas. Agora só encerra por decisão EXPLÍCITA do
+  // servidor (403 / revoked / farm_suspended, tratado acima). Offline, o estado
+  // local é soberano — apenas registramos o aviso (no máx. 1x a cada 6h).
   if (lastLicenseOkAt > 0 && (Date.now() - lastLicenseOkAt) > OFFLINE_LICENSE_GRACE_MS) {
-    licenseKillSwitchTriggered = true;
-    pushLog("error", "system",
-      `[SECURITY] Licença não validada há > 72h (offline grace expirou) — encerrando`);
-    try {
-      await reportTampering(cfg, "config_replaced", "critical",
-        { reason: "offline_grace_expired", hours_offline: Math.round((Date.now() - lastLicenseOkAt) / 3600000) },
-        null, null);
-    } catch (_) {}
-    try { await stopAllPumpsBeforeExit("offline_grace_expired"); } catch (_) {}
-    setTimeout(() => { try { app.exit(1); } catch (_) { process.exit(1); } }, 1500);
+    if (Date.now() - lastOfflineGraceWarnAt > 6 * 60 * 60 * 1000) {
+      lastOfflineGraceWarnAt = Date.now();
+      const horas = Math.round((Date.now() - lastLicenseOkAt) / 3600000);
+      pushLog("warn", "system",
+        `[SECURITY] Licença não validada há ${horas}h (nuvem inacessível) — operação LOCAL mantida; nenhuma bomba é desligada por falta de nuvem`);
+    }
   }
 }
 
