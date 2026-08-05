@@ -1159,6 +1159,51 @@ let forcedShutdownActive = false;
 let forcedShutdownTsnn = null;        // v3.25.32: TSNN em desligamento forçado — suprime o fluxo normal de RX dessa PLC
 let forcedShutdownRxWaiter = null;    // { tsnn, targetIndex, wantBit, resolve }
 
+// v3.25.41: equipamentos cujo desligamento forçado JÁ foi CONFIRMADO (RX bit=0).
+// Enquanto a marca existe: (a) a sequência não é redisparada — a bomba já está
+// desligada; (b) um RX com bit=1 significa religamento LOCAL (botoeira), que
+// NÃO gera reenvio automático, só notificação por WhatsApp.
+// Em memória de propósito: após um restart do agente não há contexto de
+// desligamento forçado pendente, e o estado real volta pelo polling.
+const forcedShutdownDoneByEq = new Map(); // eqId -> { at, tsnn, saida, name }
+const FORCED_RELIT_GRACE_MS = 15_000;     // ignora eco atrasado do {1} da FASE 1
+
+// Notifica religamento local após desligamento forçado. Best-effort (3s):
+// reusa a edge function whatsapp-automation-notify (verify_jwt=false), a mesma
+// usada pelos alertas do agente. Nunca lança e nunca bloqueia o fluxo de RX.
+async function notifyForcedShutdownRelit(eqId, info) {
+  const nome = (info && info.name) || nameForHwId(`${info?.tsnn || ""}${String(info?.saida || 1).padStart(2, "0")}`) || "Bomba";
+  try {
+    pushLog("warn", "system",
+      `[FORCED OFF] ${nome} foi RELIGADO LOCALMENTE após desligamento forçado — sem reenvio automático, notificando`);
+  } catch (_) {}
+  if (!farmId || !activeSupabaseUrl || !activeSupabaseAnonKey) return;
+  const baseUrl = String(activeSupabaseUrl).replace(/\/+$/, "");
+  try {
+    await withCloudTimeout(fetch(`${baseUrl}/functions/v1/whatsapp-automation-notify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: activeSupabaseAnonKey,
+        Authorization: `Bearer ${activeAccessToken || activeSupabaseAnonKey}`,
+      },
+      body: JSON.stringify({
+        type: "alert",
+        immediate: true,
+        source: "agent_forced_shutdown",
+        alert_type: "forced_shutdown_relit",
+        farm_id: farmId,
+        equipment_id: eqId || null,
+        equipment_name: nome,
+        message: `${nome} foi religado localmente após desligamento forçado.`,
+        metadata: { tsnn: info?.tsnn || null, saida: info?.saida || null, agent_version: AGENT_VERSION },
+      }),
+    }), "forced-shutdown-relit", 3_000);
+  } catch (e) {
+    try { pushLog("warn", "cloud", `[FORCED OFF] notificação de religamento não enviada: ${formatError(e)}`); } catch (_) {}
+  }
+}
+
 // Aguarda um RX confirmando `wantBit` na saída `targetIndex` do `tsnn`, ou expira.
 // Resolve com "rx" (confirmado) ou "timeout".
 function forcedShutdownWaitRx(tsnn, targetIndex, wantBit, timeoutMs) {
@@ -2842,6 +2887,18 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       const _bitNow = extractStateBit(rawPayload);
       if (resolvedEqId && _bitNow === "1") {
         lastOnConfirmAtByEq.set(String(resolvedEqId), Date.now());
+        // v3.25.41: a bomba voltou a LIGAR depois de um desligamento forçado já
+        // confirmado → religamento pela chave local. NÃO reenvia a sequência
+        // (nada aqui atua); apenas notifica uma vez e limpa a marca.
+        // A janela de graça evita alarme falso: um eco atrasado do {1} da FASE 1
+        // pode chegar depois da sequência terminar (o RX é assíncrono e a
+        // supressão por TSNN já foi liberada). Só é religamento real se vier
+        // depois da graça — o {0} já havia sido confirmado por RX.
+        const _fsDone = forcedShutdownDoneByEq.get(String(resolvedEqId));
+        if (_fsDone && (Date.now() - _fsDone.at) > FORCED_RELIT_GRACE_MS) {
+          forcedShutdownDoneByEq.delete(String(resolvedEqId));
+          void notifyForcedShutdownRelit(String(resolvedEqId), _fsDone);
+        }
       }
     }
 
@@ -4932,6 +4989,47 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
       }
     }
 
+    // v3.25.41 CAUSA-RAIZ DO LOOP: a sequência desligava a bomba mas NUNCA gravava o
+    // resultado em `equipments`. Como todo RX da PLC é suprimido durante a sequência
+    // (processTelemFrame retorna cedo para o TSNN em desligamento forçado), o LOCAL
+    // OVERRIDE também não rodava — então `desired_running` continuava TRUE no banco.
+    // No polling seguinte, normalizePollingFrame lê (origin != 'local' && desired ===
+    // true) e emite bit=1: o POLLING RELIGA O RELÉ. Aí o próximo OFF forçava de novo →
+    // "liga relé → desliga relé" a cada ciclo. Persistir o estado aqui fecha o laço:
+    // desired_running=false → o polling passa a emitir bit=0 (keep-alive) e para.
+    // origin 'remote-desired' (não 'local') = ação do SISTEMA, mesmo critério do safety
+    // (v3.25.21): não pinta badge LOCAL indevido e mantém a PLC no fluxo normal.
+    if (success && cmd.equipment_id) {
+      try {
+        await withCloudTimeout(
+          supabase
+            .from("equipments")
+            .update({
+              desired_running: false,
+              pending_command_id: null,
+              last_actuation_origin: "remote-desired",
+            })
+            .eq("id", cmd.equipment_id),
+          "forced-shutdown persist state",
+          CLOUD_WRITE_TIMEOUT_MS,
+        );
+        pushLog("info", "system",
+          `[FORCED OFF] estado persistido: eq ${String(cmd.equipment_id).substring(0, 8)} desired_running=false — polling não religa mais`);
+      } catch (e) {
+        pushLog("warn", "cloud", `[FORCED OFF] persistência do estado falhou: ${e.message}`);
+      }
+      // CONCLUÍDO: marca o equipamento para não redisparar a sequência. Um RX
+      // com bit=1 daqui pra frente = religamento local → só notifica (ver
+      // processTelemFrame), nunca reenvia.
+      const fsMeta = equipmentById.get(String(cmd.equipment_id));
+      forcedShutdownDoneByEq.set(String(cmd.equipment_id), {
+        at: Date.now(),
+        tsnn: String(expectedTsnn),
+        saida: (fsMeta && fsMeta.saida) || (targetIndex + 1),
+        name: fsMeta && fsMeta.name,
+      });
+    }
+
     // Grava o resultado no banco. Falha após 3 ciclos → 'timeout' (o relatório atribui
     // ao usuário via log_manual_command). Sem safety/reforço extra.
     try {
@@ -5425,7 +5523,17 @@ async function processNextCommand() {
           const fsShouldFire = !!fsEqRow && fsEqRow.forced_shutdown_enabled === true && fsRealBit === "1";
           pushLog("info", "system",
             `[FORCED OFF] banco: forced_shutdown_enabled=${fsEqRow ? fsEqRow.forced_shutdown_enabled : "?"} origin=${fsEqRow ? fsEqRow.last_actuation_origin : "?"} estado_real=${fsLos || "?"} bit_saida${fsSaida}=${fsRealBit ?? "?"} → ${fsShouldFire ? "DISPARA sequência" : "NÃO dispara (segue reforço normal)"}`);
-          if (fsShouldFire) {
+          // v3.25.41: se o desligamento forçado deste equipamento JÁ foi confirmado e a
+          // bomba não foi vista ligada de novo, não repete a sequência — o pulso {1}→{0}
+          // religaria o relé à toa. Segue o caminho normal ({0} direto), que é inócuo
+          // numa bomba já desligada. A marca só é limpa por um RX com bit=1 (religamento
+          // local), que notifica por WhatsApp em vez de reenviar.
+          const fsDone = forcedShutdownDoneByEq.get(String(cmd.equipment_id));
+          if (fsShouldFire && fsDone) {
+            pushLog("warn", "system",
+              `[FORCED OFF] já CONCLUÍDO para eq ${String(cmd.equipment_id).substring(0, 8)} há ${Math.round((Date.now() - fsDone.at) / 1000)}s (bomba não foi vista ligada desde então) — NÃO redispara; segue {0} normal`);
+          }
+          if (fsShouldFire && !fsDone) {
             await runForcedShutdownSequence(cmd, frame, expectedTsnn, fsTargetIndex);
             return; // a sequência assume o controle; NÃO segue para o TX {0} direto nem agenda reforços
           }
