@@ -82,10 +82,13 @@ set "ASAR=%RES%\app.asar"
 set "BRIDGE=%RES%\serial_bridge.exe"
 REM  Pasta: quebra heranca, mantem SYSTEM+Admins, remove Users/Everyone.
 icacls "%DEST%" /inheritance:r >nul 2>&1
-icacls "%DEST%" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" >nul 2>&1
+REM  O usuario que roda o agente precisa de MODIFY para o OTA conseguir
+REM  substituir o app.asar (ENOENT/permissao se so SYSTEM+Admins tiverem acesso
+REM  e o agente rodar como usuario). SYSTEM+Admins seguem Full; Users/Everyone fora.
+icacls "%DEST%" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" "%USERDOMAIN%\%USERNAME%:(OI)(CI)M" >nul 2>&1
 icacls "%DEST%" /remove:g "Users" "Everyone" "Authenticated Users" >nul 2>&1
 REM  Arquivos sensiveis: heranca off + leitura SO para SYSTEM e Administrators.
-for %%P in ("%ASAR%" "%BRIDGE%") do if exist "%%~P" icacls "%%~P" /inheritance:r /grant:r "SYSTEM:F" "Administrators:F" /remove:g "Users" "Everyone" "Authenticated Users" >nul 2>&1
+for %%P in ("%ASAR%" "%BRIDGE%") do if exist "%%~P" icacls "%%~P" /inheritance:r /grant:r "SYSTEM:F" "Administrators:F" "%USERDOMAIN%\%USERNAME%:M" /remove:g "Users" "Everyone" "Authenticated Users" >nul 2>&1
 
 REM -- 6) Tarefa de BOOT: inicia o agente como SYSTEM, sem login -------------
 echo [6/9] Registrando tarefa de boot RENOV-Agent-Boot...

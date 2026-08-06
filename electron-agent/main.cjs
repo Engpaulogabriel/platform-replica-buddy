@@ -6224,14 +6224,26 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
       return recordFailure(`nenhum app.asar nem pasta app encontrados em ${process.resourcesPath}`);
     }
 
-    pushLog("info", "update", "[OTA-asar] Substituindo app.asar...");
+    // v3.25.47: loga a CONTA sob a qual o agente roda — responde "SYSTEM ou
+    // usuario?" e ajuda a diagnosticar OTA que falha por permissao NTFS.
+    let _otaAccount = "?";
+    try { _otaAccount = require("os").userInfo().username; } catch (_) {}
+    pushLog("info", "update", `[OTA-asar] Substituindo app.asar... (agente rodando como '${_otaAccount}', destino ${currentAsar})`);
     try {
       // tmpAsar é .new fora do asar — usa fs normal pra ler; destino é .asar — usa originalFs.
+      if (!originalFs.existsSync(tmpAsar)) return recordFailure(`arquivo temporario sumiu: ${tmpAsar}`);
       originalFs.copyFileSync(tmpAsar, currentAsar);
       try { fs.unlinkSync(tmpAsar); } catch (_) {}
     } catch (e) {
       try { originalFs.copyFileSync(bakAsar, currentAsar); } catch (_) {}
-      return recordFailure(`falha ao substituir app.asar: ${e.message} — backup restaurado`);
+      // Mensagem acionavel: EPERM/EACCES/ENOENT quase sempre = o agente roda como
+      // usuario SEM permissao NTFS de escrita no app.asar. O INSTALAR.bat (v3.25.47+)
+      // ja concede Modify a esse usuario; re-rode-o na fazenda, ou rode o agente como SYSTEM.
+      const code = (e && e.code) || "?";
+      const permHint = (code === "EPERM" || code === "EACCES" || code === "ENOENT")
+        ? ` — SEM PERMISSAO NTFS: o agente roda como '${_otaAccount}' e nao consegue escrever/acessar ${currentAsar}. Re-rode o INSTALAR.bat (concede Modify a esse usuario) ou rode o agente como SYSTEM.`
+        : "";
+      return recordFailure(`falha ao substituir app.asar: ${e.message} (conta='${_otaAccount}', code=${code})${permHint} — backup restaurado`);
     }
 
     await reportUpdateStatus({ update_status: "installing", completed_at: new Date().toISOString() });
