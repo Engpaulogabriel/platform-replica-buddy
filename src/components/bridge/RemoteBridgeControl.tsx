@@ -40,7 +40,9 @@ interface Props {
   comPort: string | null;
 }
 
-const KIND_LABEL: Record<AgentCmdKind, string> = {
+// Partial: serial_terminal/serial_sniff são tratados na aba Terminal Serial,
+// não neste componente de controle da bridge.
+const KIND_LABEL: Partial<Record<AgentCmdKind, string>> = {
   open_port: "Abrir porta",
   close_port: "Fechar porta",
   change_port: "Trocar porta",

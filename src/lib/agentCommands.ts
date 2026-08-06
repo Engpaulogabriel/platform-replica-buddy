@@ -23,7 +23,35 @@ export type AgentCmdKind =
   | "force_rollback"
   | "start_log_stream"
   | "renew_log_stream"
-  | "stop_log_stream";
+  | "stop_log_stream"
+  // v3.25.43 — Terminal Serial Remoto (substitui o Hércules)
+  | "serial_terminal"
+  | "serial_sniff";
+
+/** Frame capturado da serial (terminal/sniff): frame + timestamp epoch (ms). */
+export interface SerialCapturedFrame {
+  frame: string;
+  at: number;
+}
+
+/** result.data de um comando kind='serial_terminal'. */
+export interface SerialTerminalData {
+  sent: string;
+  mode: "raw" | "equipment";
+  responses: string[];
+  raw: string;
+  count: number;
+  elapsed_ms: number;
+  /** Só no modo equipamento: leitura legível do estado. */
+  parsed?: { status: "ligado" | "desligado"; raw: string } | null;
+}
+
+/** result.data de um comando kind='serial_sniff' (parcial ou final). */
+export interface SerialSniffData {
+  frames: SerialCapturedFrame[];
+  capturing: boolean;
+  count: number;
+}
 
 
 export type AgentCmdStatus = "pending" | "ack" | "executing" | "done" | "error" | "expired";
@@ -117,4 +145,40 @@ export async function runAgentCommand(
   const commandId = await enqueueAgentCommand(args);
   const result = await waitForAgentCommand(commandId, args.timeoutMs ?? 15_000);
   return { commandId, result };
+}
+
+/**
+ * Observa um comando lendo `result` também enquanto status='executing' — usado
+ * pelo modo SNIFF, em que o agente faz flush incremental dos frames capturados.
+ * Chama `onUpdate` a cada leitura com resultado parcial; resolve no status final.
+ */
+export async function watchAgentCommand(
+  commandId: string,
+  onUpdate: (partial: AgentCmdResult) => void,
+  { pollMs = 2_000, timeoutMs = 40_000 }: { pollMs?: number; timeoutMs?: number } = {},
+): Promise<AgentCmdResult> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { data, error } = await supabase
+      .from("agent_commands")
+      .select("status, result, error_message, duration_ms")
+      .eq("id", commandId)
+      .maybeSingle();
+
+    if (!error && data) {
+      const status = data.status as AgentCmdStatus;
+      const partial: AgentCmdResult = {
+        status,
+        result: (data.result as AgentCmdResult["result"]) ?? null,
+        error_message: data.error_message,
+        duration_ms: data.duration_ms,
+      };
+      onUpdate(partial);
+      if (status === "done" || status === "error" || status === "expired") {
+        return partial;
+      }
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return { status: "expired", error_message: `Sem resposta do Agent em ${(timeoutMs / 1000).toFixed(0)}s` };
 }

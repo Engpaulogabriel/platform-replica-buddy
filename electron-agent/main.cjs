@@ -1273,6 +1273,19 @@ let forcedShutdownActive = false;
 let forcedShutdownTsnn = null;        // v3.25.32: TSNN em desligamento forçado — suprime o fluxo normal de RX dessa PLC
 let forcedShutdownRxWaiter = null;    // { tsnn, targetIndex, wantBit, resolve }
 
+// v3.25.43: TERMINAL SERIAL REMOTO (substitui o Hércules). Comando da web
+// (agent_commands kind='serial_terminal') tem PRIORIDADE ABSOLUTA: pausa o
+// polling automático, descarta os frames de polling pendentes, escreve o frame
+// direto na serial e captura TUDO que chegar por timeout_ms. Diagnóstico PURO:
+// NÃO toca desired_running / safety / reforço (igual ao Hércules).
+let serialTerminalActive = false;
+// Buffer de captura do terminal: quando != null, handleRxFrame empilha cada RX.
+// { frames: [{ frame, at }], startedAt }
+let serialCaptureBuf = null;
+// Buffer do sniff PASSIVO (kind='serial_sniff'): captura sem pausar o polling.
+// { frames: [{ frame, at }], startedAt }
+let serialSniffBuf = null;
+
 // v3.25.41: equipamentos cujo desligamento forçado JÁ foi CONFIRMADO (RX bit=0).
 // Enquanto a marca existe: (a) a sequência não é redisparada — a bomba já está
 // desligada; (b) um RX com bit=1 significa religamento LOCAL (botoeira), que
@@ -4137,6 +4150,14 @@ function handleRxFrame(frame) {
   // aparece aqui, ha perda no pipe stdout (improvavel).
   pushLog("debug", "raw_rx", `RX raw: ${frame}`, frame);
 
+  // v3.25.43: tap ÚNICO de captura. Terminal serial e sniff empilham TODO frame
+  // que passa aqui, sem interferir no fluxo normal abaixo (telemetria/CFG seguem).
+  try {
+    const now = Date.now();
+    if (serialCaptureBuf) serialCaptureBuf.frames.push({ frame, at: now });
+    if (serialSniffBuf) serialSniffBuf.frames.push({ frame, at: now });
+  } catch (_) {}
+
   // 1) Telemetria — processa IMEDIATAMENTE, sem debounce/filtro
   //    (vem antes de tudo: precisamos enxergar TODA mudanca de estado da bomba)
   const telemMatch = extractTelemetryParts(frame);
@@ -5323,6 +5344,9 @@ async function processNextCommand() {
   // o PROCESSING_STUCK_RESET_MS (15s) ou o pollTimer reentrem durante os ~23-36s
   // da sequência (que roda com processing=true e inflightCmd=null).
   if (forcedShutdownActive) return;
+  // v3.25.43: terminal serial tem prioridade absoluta — segura a fila enquanto
+  // o comando do operador roda (até 30s). Retomado no finally do handler.
+  if (serialTerminalActive) return;
   if (processing) {
     if (processingSince && Date.now() - processingSince > PROCESSING_STUCK_RESET_MS && !inflightCmd && !inflightManual) {
       pushLog("warn", "system", `Processamento preso ha ${Math.round((Date.now() - processingSince) / 1000)}s sem comando inflight; liberando fila`);
@@ -6407,6 +6431,7 @@ async function downloadAndInstallUpdate(url, version, expectedHash) {
 async function tickEnqueuePolling() {
   if (!supabase || !farmId) return;
   if (!bridgeReady) return; // sem porta serial nao adianta enfileirar
+  if (serialTerminalActive) return; // v3.25.43: terminal serial em curso — não enfileira polling
   // FIX lentidão: manuais têm prioridade — não enfileira polling novo enquanto
   // houver comandos manuais pendentes na fila da fazenda.
   try {
@@ -6897,6 +6922,175 @@ async function openComPort(newPort) {
 // REMOTE CONTROL — agent_commands (web → agent via Supabase Realtime)
 // ============================================================================
 
+// v3.25.43 — TERMINAL SERIAL REMOTO (substitui o Hércules) ───────────────────
+// Monta o frame para o MODO POR EQUIPAMENTO. Diagnóstico PURO: não grava
+// desired_running nem arma safety — só constrói o frame no mesmo formato do
+// polling e devolve o TSNN/saída para o parse da resposta.
+//   action: 'status' | 'ping' → leitura ({0…}); 'on' → bit da saída = 1;
+//           'off' → bit da saída = 0 (preservando as demais saídas do PLC).
+async function buildEquipmentTerminalFrame(equipmentId, action) {
+  const meta = equipmentById.get(String(equipmentId));
+  if (!meta || !meta.hw_id) throw new Error("equipamento sem hw_id no cache");
+  const hw = String(meta.hw_id).toUpperCase();
+  const tsnn = hw.substring(0, 4);
+  const saida = Number(meta.saida) || 1;
+  const bit = action === "on" ? "1" : "0"; // status/ping/off → 0
+  const payload = await buildSafetyOffPayloadPreserving(tsnn, saida, bit);
+  const frame = `[${tsnn}_1_]{${payload}}[${tsnn}_ETX_]\r`;
+  return { frame, tsnn, saida, name: meta.name };
+}
+
+// Lê o bit da saída no primeiro RX de telemetria capturado (parse legível).
+function parseEquipmentStatusFromFrames(frames, tsnn, saida) {
+  for (const f of frames || []) {
+    const parts = extractTelemetryParts(f.frame);
+    if (!parts || parts.tsnn !== String(tsnn).toUpperCase()) continue;
+    const p = String(parts.payload || "");
+    const idx = Math.max(0, (Number(saida) || 1) - 1);
+    const bit = p.length === 1 ? p[0] : (idx < p.length ? p[idx] : null);
+    if (bit === "0" || bit === "1") {
+      return { status: bit === "1" ? "ligado" : "desligado", raw: f.frame };
+    }
+  }
+  return null;
+}
+
+async function handleSerialTerminal(cmd, startedAt) {
+  if (!bridgeReady || !bridgeProcess) {
+    await resolveAgentCommand(cmd.id, "error", { error: "Bridge nao conectado" });
+    return;
+  }
+  if (serialTerminalActive) {
+    await resolveAgentCommand(cmd.id, "error", { error: "Outro comando de terminal em curso" });
+    return;
+  }
+  const p = cmd.payload || {};
+  const mode = p.mode === "equipment" ? "equipment" : "raw";
+  // Teto de 30s (item 5): a serial nunca fica presa; o safety do firmware é 15min.
+  const timeoutMs = Math.max(500, Math.min(30_000, Number(p.timeout_ms) || 5_000));
+
+  // Exceção (pedido do usuário): se há desligamento forçado em curso, ESPERA ele
+  // terminar (cap ~10s) e só então executa — nunca corta uma sequência de failsafe.
+  if (forcedShutdownActive) {
+    pushLog("info", "remote", "[SERIAL-TERM] aguardando desligamento forçado terminar antes de executar");
+    const waitUntil = Date.now() + 10_000;
+    while (forcedShutdownActive && Date.now() < waitUntil) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (forcedShutdownActive) {
+      await resolveAgentCommand(cmd.id, "error", { error: "Desligamento forçado em curso — tente novamente em instantes" });
+      return;
+    }
+  }
+
+  let frame = null;
+  let parsedMeta = null; // { tsnn, saida } quando mode=equipment
+  try {
+    if (mode === "equipment") {
+      if (!p.equipment_id) throw new Error("equipment_id ausente");
+      const built = await buildEquipmentTerminalFrame(p.equipment_id, String(p.action || "status"));
+      frame = built.frame;
+      parsedMeta = { tsnn: built.tsnn, saida: built.saida };
+    } else {
+      const raw = String(p.command || "").replace(/[\r\n]+$/g, "");
+      if (!raw.trim()) throw new Error("comando vazio");
+      frame = raw; // \r é anexado abaixo, sempre
+    }
+  } catch (e) {
+    await resolveAgentCommand(cmd.id, "error", { error: `Falha ao montar frame: ${e.message}` });
+    return;
+  }
+
+  // Garante exatamente um CR no fim (item 1: o sistema SEMPRE adiciona \r).
+  const frameCR = frame.endsWith("\r") ? frame : `${frame}\r`;
+
+  serialTerminalActive = true;
+  serialCaptureBuf = { frames: [], startedAt: Date.now() };
+  const txAt = Date.now();
+  try {
+    // Corta a fila: descarta APENAS os frames de polling pendentes (mantém
+    // manual/reset/safety em voo — decisão do usuário: pausa só o automático).
+    let dropped = 0;
+    for (let i = txQueue.length - 1; i >= 0; i--) {
+      if (txQueue[i] && txQueue[i].priority === "polling") { txQueue.splice(i, 1); dropped++; }
+    }
+    pushLog("warn", "remote",
+      `[SERIAL-TERM] prioridade absoluta: polling pausado, ${dropped} frame(s) de polling descartado(s). TX-> ${frameCR.replace(/\r/g, "")}`,
+      frameCR);
+
+    // Escreve DIRETO na serial (bypass dos gaps de TX). Prova de vida + anti-colisão.
+    const ok = _txWriteNow(frameCR);
+    if (!ok) throw new Error("bridge indisponível na escrita");
+
+    // Captura tudo que chegar durante a janela.
+    await new Promise((r) => setTimeout(r, timeoutMs));
+
+    const frames = (serialCaptureBuf && serialCaptureBuf.frames) || [];
+    const responses = frames.map((f) => f.frame);
+    const data = {
+      sent: frameCR,
+      mode,
+      responses,
+      raw: responses.join("\n"),
+      count: responses.length,
+      elapsed_ms: Date.now() - txAt,
+    };
+    if (parsedMeta) {
+      data.parsed = parseEquipmentStatusFromFrames(frames, parsedMeta.tsnn, parsedMeta.saida);
+    }
+    pushLog("info", "remote", `[SERIAL-TERM] ${responses.length} resposta(s) em ${data.elapsed_ms}ms`);
+    await resolveAgentCommand(cmd.id, "done", { duration_ms: Date.now() - startedAt, data });
+  } catch (e) {
+    await resolveAgentCommand(cmd.id, "error", {
+      duration_ms: Date.now() - startedAt,
+      error: `Terminal serial: ${e.message}`,
+      data: { sent: frameCR, mode },
+    });
+  } finally {
+    serialCaptureBuf = null;
+    serialTerminalActive = false;
+    // Retoma o polling imediatamente (zero tempo morto).
+    setImmediate(() => { void processNextCommand(); void tickEnqueuePolling(); });
+  }
+}
+
+// SNIFF PASSIVO — captura o tráfego por duration_ms SEM pausar o polling.
+// Flush incremental para a web ver os frames chegando ao vivo (poll a cada 2s).
+async function handleSerialSniff(cmd, startedAt) {
+  if (serialSniffBuf) {
+    await resolveAgentCommand(cmd.id, "error", { error: "Outra captura (sniff) em curso" });
+    return;
+  }
+  const p = cmd.payload || {};
+  const durationMs = Math.max(1_000, Math.min(30_000, Number(p.duration_ms) || 10_000));
+  serialSniffBuf = { frames: [], startedAt: Date.now() };
+  pushLog("info", "remote", `[SERIAL-SNIFF] captura passiva por ${durationMs}ms (polling segue normal)`);
+  const endAt = Date.now() + durationMs;
+  try {
+    // Flush parcial a cada ~1.5s: status 'executing' + result.data.frames crescendo.
+    while (Date.now() < endAt) {
+      await new Promise((r) => setTimeout(r, 1_500));
+      const partial = (serialSniffBuf.frames || []).slice();
+      try {
+        await supabase.from("agent_commands").update({
+          status: "executing",
+          result: { data: { frames: partial, capturing: true, count: partial.length } },
+        }).eq("id", cmd.id);
+      } catch (_) {}
+    }
+    const frames = (serialSniffBuf.frames || []).slice();
+    await resolveAgentCommand(cmd.id, "done", {
+      duration_ms: Date.now() - startedAt,
+      data: { frames, capturing: false, count: frames.length },
+    });
+    pushLog("info", "remote", `[SERIAL-SNIFF] fim — ${frames.length} frame(s) capturado(s)`);
+  } catch (e) {
+    await resolveAgentCommand(cmd.id, "error", { error: `Sniff: ${e.message}` });
+  } finally {
+    serialSniffBuf = null;
+  }
+}
+
 async function resolveAgentCommand(cmdId, status, extra = {}) {
   if (!supabase || !cmdId) return;
   try {
@@ -7101,6 +7295,14 @@ async function handleAgentCommand(cmd) {
           duration_ms: Date.now() - startedAt,
           data: { ports },
         });
+        break;
+      }
+      case "serial_terminal": {
+        await handleSerialTerminal(cmd, startedAt);
+        break;
+      }
+      case "serial_sniff": {
+        await handleSerialSniff(cmd, startedAt);
         break;
       }
       case "send_manual_frame": {
