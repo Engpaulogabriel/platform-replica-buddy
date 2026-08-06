@@ -6057,6 +6057,24 @@ async function reportUpdateStatus(patch) {
 // ─────────────────────────────────────────────────────────────────────────────
 // v3.10.6 — OTA via app.asar + bucket privado.
 // ─────────────────────────────────────────────────────────────────────────────
+// v3.25.47: SELF-HEAL do OTA vs NTFS. Concede ao usuário atual permissão de
+// escrita (Modify) no app.asar + pasta resources via icacls, para o copy do OTA
+// funcionar mesmo se o INSTALAR.bat trancou o arquivo. Só tem efeito se o agente
+// tiver WRITE_DAC (SYSTEM/admin/dono) — senão o icacls falha e o OTA cai no erro
+// acionável. Best-effort: nunca lança.
+function _otaGrantSelfWrite(resourcesPath, asarPath, account) {
+  try {
+    const { execSync } = require("child_process");
+    let user = account && account !== "?" ? account : null;
+    if (!user) { try { user = require("os").userInfo().username; } catch (_) { user = null; } }
+    if (!user) return false;
+    const opts = { windowsHide: true, timeout: 8000, stdio: "ignore" };
+    if (resourcesPath) execSync(`icacls "${resourcesPath}" /grant "${user}:(OI)(CI)M"`, opts);
+    if (asarPath) execSync(`icacls "${asarPath}" /grant "${user}:M"`, opts);
+    return true;
+  } catch (_) { return false; }
+}
+
 async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize) {
   if (isInstallingUpdate) return;
   isInstallingUpdate = true;
@@ -6235,15 +6253,30 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
       originalFs.copyFileSync(tmpAsar, currentAsar);
       try { fs.unlinkSync(tmpAsar); } catch (_) {}
     } catch (e) {
-      try { originalFs.copyFileSync(bakAsar, currentAsar); } catch (_) {}
-      // Mensagem acionavel: EPERM/EACCES/ENOENT quase sempre = o agente roda como
-      // usuario SEM permissao NTFS de escrita no app.asar. O INSTALAR.bat (v3.25.47+)
-      // ja concede Modify a esse usuario; re-rode-o na fazenda, ou rode o agente como SYSTEM.
       const code = (e && e.code) || "?";
-      const permHint = (code === "EPERM" || code === "EACCES" || code === "ENOENT")
-        ? ` — SEM PERMISSAO NTFS: o agente roda como '${_otaAccount}' e nao consegue escrever/acessar ${currentAsar}. Re-rode o INSTALAR.bat (concede Modify a esse usuario) ou rode o agente como SYSTEM.`
-        : "";
-      return recordFailure(`falha ao substituir app.asar: ${e.message} (conta='${_otaAccount}', code=${code})${permHint} — backup restaurado`);
+      // v3.25.47 SELF-HEAL: se falhou por permissão NTFS, tenta liberar via icacls
+      // e repetir o copy (funciona quando o agente tem WRITE_DAC — SYSTEM/admin/dono).
+      let healed = false;
+      if ((code === "EACCES" || code === "EPERM" || code === "ENOENT") && process.platform === "win32") {
+        pushLog("warn", "update", `[OTA-asar] copy falhou (${code}) — tentando liberar permissao via icacls e repetir...`);
+        if (_otaGrantSelfWrite(process.resourcesPath, currentAsar, _otaAccount)) {
+          try {
+            originalFs.copyFileSync(tmpAsar, currentAsar);
+            try { fs.unlinkSync(tmpAsar); } catch (_) {}
+            healed = true;
+            pushLog("info", "update", "[OTA-asar] copy OK apos icacls (self-heal)");
+          } catch (e2) {
+            pushLog("error", "update", `[OTA-asar] copy ainda falhou apos icacls: ${e2.message}`);
+          }
+        }
+      }
+      if (!healed) {
+        try { originalFs.copyFileSync(bakAsar, currentAsar); } catch (_) {}
+        const permHint = (code === "EPERM" || code === "EACCES" || code === "ENOENT")
+          ? ` — SEM PERMISSAO NTFS: o agente roda como '${_otaAccount}' e nao conseguiu escrever ${currentAsar} nem via icacls (sem WRITE_DAC). Re-rode o INSTALAR.bat (concede Modify a esse usuario) ou rode o agente como SYSTEM.`
+          : "";
+        return recordFailure(`falha ao substituir app.asar: ${e.message} (conta='${_otaAccount}', code=${code})${permHint} — backup restaurado`);
+      }
     }
 
     await reportUpdateStatus({ update_status: "installing", completed_at: new Date().toISOString() });
@@ -6973,8 +7006,18 @@ function parseEquipmentStatusFromFrames(frames, tsnn, saida) {
 }
 
 async function handleSerialTerminal(cmd, startedAt) {
+  // v3.25.47: NÃO erra no instante. A bridge pode estar num reopen transitório do
+  // PL2303 (ou subindo logo após o boot) com bridgeReady=false por alguns segundos.
+  // Aguarda até 8s a bridge ficar pronta; só erra se realmente não conectar.
   if (!bridgeReady || !bridgeProcess) {
-    await resolveAgentCommand(cmd.id, "error", { error: "Bridge nao conectado" });
+    pushLog("info", "remote", "[SERIAL-TERM] bridge não-pronta — aguardando até 8s...");
+    const readyDeadline = Date.now() + 8_000;
+    while ((!bridgeReady || !bridgeProcess) && Date.now() < readyDeadline) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  if (!bridgeReady || !bridgeProcess) {
+    await resolveAgentCommand(cmd.id, "error", { error: "Bridge serial nao conectada (aguardou 8s)" });
     return;
   }
   if (serialTerminalActive) {
