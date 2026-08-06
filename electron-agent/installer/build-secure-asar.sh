@@ -41,7 +41,10 @@ AGENT_DIR="$(cd "$HERE/.." && pwd)"
 APP_DIR="$AGENT_DIR/app"
 MAIN_SRC="$AGENT_DIR/main.cjs"
 MAIN_APP="$APP_DIR/main.cjs"
-MAIN_BAK="$APP_DIR/main.original.cjs"
+# CRITICO: o backup do fonte limpo fica FORA de app/. Se ficar dentro (como era
+# ate v3.25.44), o `asar pack app` o empacota e VAZA o main.cjs nao-ofuscado
+# dentro do asar de distribuicao — anulando a ofuscacao.
+MAIN_BAK="$AGENT_DIR/.main.original.cjs.bak"
 OUT="${1:-$AGENT_DIR/release/app.asar}"
 
 echo "[build-secure] agente:  $AGENT_DIR"
@@ -78,15 +81,19 @@ else
   cp "$MAIN_APP" "$MAIN_BAK"
 fi
 
-# O .py e a bridge de FALLBACK, rastreada no git. NAO pode entrar no asar de
-# distribuicao, mas tambem NAO pode ser deletada do repo. Movemos para fora da
-# raiz do asar durante o pack e devolvemos no trap (junto com o main.cjs limpo).
+# O .py (bridge fallback) e o .exe (bridge compilada, se algum packager a deixou
+# em app/) NAO podem entrar no asar: Python/exe nao rodam de dentro do asar e o
+# .exe so incha o bundle (vai em resources/, ao lado do app.asar). Movemos ambos
+# para fora da raiz do asar durante o pack e devolvemos no trap.
 PY_APP="$APP_DIR/serial_bridge_persistent.py"
 PY_STASH="$AGENT_DIR/.serial_bridge_persistent.py.stash"
+EXE_APP="$APP_DIR/serial_bridge.exe"
+EXE_STASH="$AGENT_DIR/.serial_bridge.exe.stash"
 
 restore() {
   [ -f "$MAIN_BAK" ] && cp "$MAIN_BAK" "$MAIN_APP" && rm -f "$MAIN_BAK"
   [ -f "$PY_STASH" ] && mv "$PY_STASH" "$PY_APP"
+  [ -f "$EXE_STASH" ] && mv "$EXE_STASH" "$EXE_APP"
   return 0
 }
 trap restore EXIT
@@ -110,13 +117,25 @@ echo "[build-secure] ofuscando main.cjs ..."
 node --check "$MAIN_APP"
 echo "[build-secure] node --check OK (ofuscado)"
 
-# --- 5) o .py NUNCA entra no asar de distribuicao (movido, nao deletado) ---
+# --- 5) .py e .exe NUNCA entram no asar (movidos, nao deletados) ----------
 [ -f "$PY_APP" ] && mv "$PY_APP" "$PY_STASH"
+[ -f "$EXE_APP" ] && mv "$EXE_APP" "$EXE_STASH"
 
 # --- 6) empacota ----------------------------------------------------------
 mkdir -p "$(dirname "$OUT")"
 (cd "$AGENT_DIR" && $ASAR pack app "$OUT")
 echo "[build-secure] asar empacotado"
+
+# --- 6a) VERIFICACAO ANTI-VAZAMENTO: nada de fonte limpa / binarios no asar -
+LEAKS=$(cd "$AGENT_DIR" && $ASAR list "$OUT" 2>/dev/null | grep -iE 'main\.original|\.py$|\.exe$|\.bak$' || true)
+if [ -n "$LEAKS" ]; then
+  echo "[build-secure] ERRO CRITICO: arquivos proibidos dentro do asar:"
+  echo "$LEAKS"
+  echo "               (fonte limpa / binario). Build ABORTADO."
+  rm -f "$OUT"
+  exit 4
+fi
+echo "[build-secure] asar sem vazamentos (sem main.original / .py / .exe / .bak)"
 
 # --- 6b) VERIFICACAO OBRIGATORIA: o asar empacotado TEM que estar ofuscado --
 # A ofuscacao ja falhou silenciosamente em teste (asar saiu legivel). O agente

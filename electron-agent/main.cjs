@@ -8790,8 +8790,24 @@ async function stopAllPumpsBeforeExit(reason) {
   } catch (_) {}
 }
 
+// v3.25.45: fingerprint da máquina, computado UMA vez (wmic é caro) e reusado no
+// license-validate para a amarração SERVER-SIDE anti-clone. O servidor compara com
+// o device registrado (tolerância ≥2-de-4 componentes) e responde 403
+// machine_mismatch se for outro PC. É a única camada que o atacante NÃO patcheia.
+let _cachedFingerprint = null;
+function getCachedFingerprint() {
+  if (!_cachedFingerprint) {
+    try { _cachedFingerprint = getMachineFingerprint(); } catch (_) { _cachedFingerprint = { machine_id_hash: "", fingerprint: {} }; }
+  }
+  return _cachedFingerprint;
+}
+// Anti-falso-positivo: só bloqueia após N respostas machine_mismatch CONSECUTIVAS
+// (uma troca legítima de 1 componente nunca bate ≥2; 3 strikes cobrem transientes).
+let machineMismatchStrikes = 0;
+const MACHINE_MISMATCH_STRIKES_TO_BLOCK = 3;
+
 async function validateLicenseHeartbeat(cfg) {
-  if (licenseKillSwitchTriggered) return;
+  if (licenseKillSwitchTriggered || agentBlocked) return;
   if (!cfg?.licenseToken) return;
   if (Date.now() - lastLicenseValidationAt < LICENSE_VALIDATE_INTERVAL_MS - 1000) return;
   lastLicenseValidationAt = Date.now();
@@ -8799,8 +8815,10 @@ async function validateLicenseHeartbeat(cfg) {
   const baseUrl = cfg.supabaseUrl || SUPABASE_URL_DEFAULT;
   const anon = cfg.supabaseAnonKey || SUPABASE_ANON_DEFAULT;
   try {
+    const fp = getCachedFingerprint();
     // v3.25.39: timeout de 10s (era 20s) — teto global de nuvem. license-validate
     // travado nunca prende o sendHeartbeat; sem validação, grace offline de 72h cobre.
+    // v3.25.45: envia machine_id_hash + fingerprint p/ o servidor amarrar ao hardware.
     const resp = await withCloudTimeout(fetch(`${baseUrl}/functions/v1/license-validate`, {
       method: "POST",
       headers: {
@@ -8808,12 +8826,39 @@ async function validateLicenseHeartbeat(cfg) {
         "apikey": anon,
         "Authorization": `Bearer ${cfg.licenseToken}`,
       },
+      body: JSON.stringify({
+        machine_id_hash: fp.machine_id_hash,
+        fingerprint: fp.fingerprint,
+        agent_version: AGENT_VERSION,
+      }),
     }), "license-validate", 10_000);
     const body = await resp.json().catch(() => ({}));
 
     if (resp.ok && body?.valid) {
       lastLicenseOkAt = Date.now();
+      machineMismatchStrikes = 0; // hardware confere — zera strikes
       _saveLicenseGrace();
+      return;
+    }
+
+    // v3.25.45: CLONE detectado pelo SERVIDOR (fingerprint diverge do device
+    // registrado). Bloqueio PERMANENTE (kill-file) após strikes consecutivos —
+    // decisão server-side, o atacante não consegue patchear. Não desliga bombas
+    // ativamente (o clone em outro PC não tem rádio; na máquina real, um falso-
+    // positivo é recuperável re-provisionando).
+    if (body?.error === "machine_mismatch") {
+      machineMismatchStrikes++;
+      pushLog("error", "system",
+        `[SECURITY] Servidor reportou machine_mismatch (clone?) — strike ${machineMismatchStrikes}/${MACHINE_MISMATCH_STRIKES_TO_BLOCK}`);
+      if (machineMismatchStrikes >= MACHINE_MISMATCH_STRIKES_TO_BLOCK) {
+        try {
+          await blockAgentPermanently("clone_detected",
+            `hardware nao corresponde ao device registrado da fazenda ${cfg?.farmName || cfg?.farmId || "?"}.`,
+            { source: "license-validate", machine_id_hash: fp.machine_id_hash });
+        } catch (_) {}
+        try { await reportTampering(cfg, "hardware_changed", "critical",
+          { reason: "clone_detected_server", machine_id_hash: fp.machine_id_hash, blocking: true }, null, null); } catch (_) {}
+      }
       return;
     }
 
