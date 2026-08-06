@@ -9,7 +9,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import {
   Droplets, Bot, AlertTriangle, Signal, XCircle, RotateCcw, RefreshCw,
   CheckCircle2, MapPin, Layers, Tractor, Zap, ZapOff, MessageCircle, Lock,
-  Hand, Info,
+  Hand, Info, Wrench,
 } from "lucide-react";
 
 import { formatLastSeen } from "@/hooks/useDashboardEquipment";
@@ -85,6 +85,9 @@ function PumpCardImpl(props: PumpCardProps) {
   // Só em estado ESTÁVEL: NUNCA durante uma transição (Ligando/Desligando). Um pump
   // "error" ou já estabilizado (origin local) ainda mostra LOCAL.
   const showLocal = !isOffline && pump.actuationOrigin === "local" && !isTransitioning;
+  // v3.25.43: último acionamento veio do Terminal Serial (suporte técnico), NÃO
+  // da botoeira. Badge diferenciado para o cliente não confundir com modo local.
+  const showTech = !isOffline && pump.actuationOrigin === "tech_terminal" && !isTransitioning;
 
   // ── Botão/badge RESET (forçar desligamento) ───────────────────────────────
   // Regra absoluta: SÓ durante uma transição travada (Ligando/Desligando que já
@@ -486,6 +489,16 @@ function PumpCardImpl(props: PumpCardProps) {
               >
                 <Hand className="w-2.5 h-2.5" />
                 LOCAL
+              </span>
+            )}
+            {showTech && (
+              <span
+                className="flex items-center gap-0.5 px-1 py-0 rounded bg-sky-500/20 text-sky-600 dark:text-sky-400 font-bold text-[9px] uppercase tracking-wide border border-sky-500/40 shrink-0"
+                title="Acionado pelo Suporte Técnico (Terminal Serial) — não é a botoeira local"
+                aria-label="Acionado pelo suporte técnico"
+              >
+                <Wrench className="w-2.5 h-2.5" />
+                TÉCNICO
               </span>
             )}
             {/* WhatsApp icon (origin) e AUTO badge são INDEPENDENTES — podem aparecer juntos. */}

@@ -228,6 +228,7 @@ export default function HorimetroReportTab({ farmId, fromDate, toDate, selectedP
           const getLastReadingStatus = () => {
             if (!pump.lastCommunication) return { text: "Sem comunicação", color: "text-muted-foreground" };
             if (pump.actuationOrigin === "local") return { text: "Local", color: "text-warning" };
+            if (pump.actuationOrigin === "tech_terminal") return { text: "Técnico", color: "text-sky-600" };
             return { text: pump.isRunning ? "Ligado" : "Desligado", color: pump.isRunning ? "text-primary" : "text-destructive" };
           };
           const lastReadingStatus = getLastReadingStatus();

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { ExternalLink, Hand, MapPin } from "lucide-react";
+import { ExternalLink, Hand, MapPin, Wrench } from "lucide-react";
 import type { Pump } from "./PumpTable";
 
 interface PumpMapProps {
@@ -337,6 +337,15 @@ export default function PumpMap({ pumps, sede }: PumpMapProps) {
                         LOCAL
                       </span>
                     )}
+                    {!isOffline && pump.actuationOrigin === "tech_terminal" && !isTransitioning && (
+                      <span
+                        className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-600 dark:text-sky-400 font-bold text-[9px] uppercase tracking-wide border border-sky-500/40 shrink-0"
+                        title="Acionado pelo Suporte Técnico (Terminal Serial) — não é a botoeira local"
+                      >
+                        <Wrench className="w-2.5 h-2.5" />
+                        TÉCNICO
+                      </span>
+                    )}
                   </div>
                   <a
                     href={`https://www.google.com/maps?q=${pump.lat},${pump.lng}&t=k`}
@@ -362,7 +371,9 @@ export default function PumpMap({ pumps, sede }: PumpMapProps) {
                         ? "Automático"
                         : pump.actuationOrigin === "local"
                           ? "Local"
-                          : "Remoto"}
+                          : pump.actuationOrigin === "tech_terminal"
+                            ? "Técnico"
+                            : "Remoto"}
                     </p>
                   </div>
                   <div>

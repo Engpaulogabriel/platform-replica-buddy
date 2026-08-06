@@ -213,7 +213,7 @@ const buildPumpFromCloud = (
     lastCommunication: e.last_communication,
     commandHistory: cmdHist,
     statusHistory: stHist,
-    actuationOrigin: (e as { last_actuation_origin?: "remote" | "local" | "whatsapp" | null }).last_actuation_origin ?? null,
+    actuationOrigin: (e as { last_actuation_origin?: "remote" | "local" | "whatsapp" | "tech_terminal" | null }).last_actuation_origin ?? null,
     localAckAt: (e as { local_ack_at?: string | null }).local_ack_at ?? null,
   };
 };
@@ -445,7 +445,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
               new Date(e.last_communication).getTime() > old.lastUserConfirmedAt
                 ? undefined
                 : old.lastUserConfirmedAt,
-            actuationOrigin: (e.last_actuation_origin as "remote" | "local" | "whatsapp" | null) ?? null,
+            actuationOrigin: (e.last_actuation_origin as "remote" | "local" | "whatsapp" | "tech_terminal" | null) ?? null,
             localAckAt: (e as { local_ack_at?: string | null }).local_ack_at ?? null,
             commandBlockedUntil: e.command_blocked_until ?? null,
             lastCommunication: e.last_communication,
@@ -567,7 +567,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
               : p.lastUserConfirmedAt;
 
           const newActuationOrigin =
-            (cloudEq.last_actuation_origin as "remote" | "local" | "whatsapp" | null) ?? null;
+            (cloudEq.last_actuation_origin as "remote" | "local" | "whatsapp" | "tech_terminal" | null) ?? null;
 
           // Detecta acionamento Local recém-confirmado pela nuvem (sem timeout local
           // ter disparado). Caso típico: a RPC apply_pump_telemetry marcou origin=local

@@ -1,6 +1,6 @@
 import { Switch } from "@/components/ui/switch";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Bot, Clock, Droplets, Gauge, Hand, MapPin, Power, Zap, Activity, FileText, Signal, ZapOff, AlertTriangle } from "lucide-react";
+import { Bot, Clock, Droplets, Gauge, Hand, MapPin, Power, Zap, Activity, FileText, Signal, ZapOff, AlertTriangle, Wrench } from "lucide-react";
 import { useUserOnline } from "@/contexts/UserOnlineContext";
 import { useCurrentFarmMaintenance } from "@/hooks/useCurrentFarmMaintenance";
 import type { Pump } from "./PumpTable";
@@ -79,6 +79,15 @@ export function PumpDetails({ pumps, onToggle, flowEnabled, consumptionEnabled, 
                     >
                       <AlertTriangle className="w-3 h-3" />
                       LOCAL
+                    </span>
+                  )}
+                  {pump.actuationOrigin === "tech_terminal" && !isOffline && !isTransitioning && (
+                    <span
+                      className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-500/20 text-sky-600 dark:text-sky-400 font-bold text-[10px] uppercase tracking-wide border border-sky-500/40"
+                      title="Acionado pelo Suporte Técnico (Terminal Serial) — não é a botoeira local"
+                    >
+                      <Wrench className="w-3 h-3" />
+                      TÉCNICO
                     </span>
                   )}
                 </div>

@@ -1279,6 +1279,16 @@ let forcedShutdownRxWaiter = null;    // { tsnn, targetIndex, wantBit, resolve }
 // direto na serial e captura TUDO que chegar por timeout_ms. Diagnóstico PURO:
 // NÃO toca desired_running / safety / reforço (igual ao Hércules).
 let serialTerminalActive = false;
+// v3.25.43: janela em que um RX de telemetria deve ser atribuído ao TERMINAL
+// (origem 'tech_terminal') em vez de 'local'. Cobre a janela de captura + 3s de
+// graça para o RX atrasado da bomba (a serial é assíncrona). Distinta de
+// serialTerminalActive (que é exata e controla a pausa do polling): a graça
+// evita que a telemetria de confirmação, chegando logo após a janela fechar,
+// seja classificada como acionamento local (botoeira) e gere alarme falso.
+let serialTerminalGraceUntil = 0;
+function isTechTerminalWindow() {
+  return serialTerminalActive || Date.now() < serialTerminalGraceUntil;
+}
 // Buffer de captura do terminal: quando != null, handleRxFrame empilha cada RX.
 // { frames: [{ frame, at }], startedAt }
 let serialCaptureBuf = null;
@@ -3024,7 +3034,14 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
         const _fsDone = forcedShutdownDoneByEq.get(String(resolvedEqId));
         if (_fsDone && (Date.now() - _fsDone.at) > FORCED_RELIT_GRACE_MS) {
           forcedShutdownDoneByEq.delete(String(resolvedEqId));
-          void notifyForcedShutdownRelit(String(resolvedEqId), _fsDone);
+          // v3.25.43 (item 4): se fui EU religando pelo terminal serial, NÃO é
+          // religamento local pela botoeira — limpa a marca sem alarme WhatsApp.
+          if (isTechTerminalWindow()) {
+            pushLog("info", "system",
+              `[TECH TERMINAL] religamento via terminal (suporte) para eq ${String(resolvedEqId).substring(0, 8)} — sem alerta de religamento local`);
+          } else {
+            void notifyForcedShutdownRelit(String(resolvedEqId), _fsDone);
+          }
         }
       }
     }
@@ -3086,7 +3103,13 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       // infinito. Agora, QUALQUER atuação local divergente atualiza
       // desired_running=estado real no banco e cancela comandos/pollings stale,
       // parando o loop. (Cobre também o caso antigo com safety/comando/expiry.)
-      originForRpc = "local";
+      // v3.25.43: se a mudança de estado veio de um comando do TERMINAL SERIAL
+      // (eu testando pelo suporte), a origem é 'tech_terminal', NÃO 'local'. Evita
+      // que o card mostre "acionamento local" (botoeira) e o alarme falso. Todo o
+      // resto do LOCAL OVERRIDE (atualizar desired, cancelar stale) continua igual:
+      // é uma atuação deliberada, só que atribuída ao técnico.
+      const _isTech = isTechTerminalWindow();
+      originForRpc = _isTech ? "tech_terminal" : "local";
       const _stateBit = extractStateBit(rawPayload);
       const realRunning = _stateBit === "1";
       const reason = safetyArmedForFrame
@@ -3095,11 +3118,13 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
           ? "comando pendente cancelado"
           : recentSafetyExpiry
             ? "safety-expiry ignorado"
-            : "acionamento local";
+            : _isTech
+              ? "terminal serial (suporte técnico)"
+              : "acionamento local";
       pushLog(
         "warn",
         "system",
-        `[LOCAL OVERRIDE] RX ${rawPayload} acionamento local aceito (${reason}) para eq ${String(resolvedEqId || "").substring(0, 8)} — desired_running → ${realRunning}`,
+        `[${_isTech ? "TECH TERMINAL" : "LOCAL OVERRIDE"}] RX ${rawPayload} aceito (${reason}) para eq ${String(resolvedEqId || "").substring(0, 8)} — desired_running → ${realRunning}`,
       );
 
       // 1) Cancelar safety timer + reforço TX (clearSafetyTimer já chama clearManualReinforcements)
@@ -7005,6 +7030,8 @@ async function handleSerialTerminal(cmd, startedAt) {
   const frameCR = frame.endsWith("\r") ? frame : `${frame}\r`;
 
   serialTerminalActive = true;
+  // Classificação tech_terminal vale pela janela inteira + 3s de graça (RX atrasado).
+  serialTerminalGraceUntil = Date.now() + timeoutMs + 3_000;
   serialCaptureBuf = { frames: [], startedAt: Date.now() };
   const txAt = Date.now();
   try {

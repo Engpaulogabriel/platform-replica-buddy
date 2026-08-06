@@ -60,7 +60,7 @@ export interface Pump {
    */
   lastUserConfirmedAt?: number;
   /** Origem da última mudança de estado da bomba: 'remote' (plataforma) ou 'local' (chave física). */
-  actuationOrigin?: "remote" | "local" | "whatsapp" | null;
+  actuationOrigin?: "remote" | "local" | "whatsapp" | "tech_terminal" | null;
   /** Timestamp ISO em que o operador reconheceu o aviso LOCAL (dismiss via double-click no badge). */
   localAckAt?: string | null;
   /** Bomba bloqueada para novos comandos até este timestamp (acionamento local detectado). */

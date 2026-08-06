@@ -29,7 +29,7 @@ export interface HorimetroByPump {
   /** Estado atual da bomba: true = ligada, false = desligada */
   isRunning: boolean;
   /** Origem da última atuação: 'remote' ou 'local' */
-  actuationOrigin: "remote" | "local" | null;
+  actuationOrigin: "remote" | "local" | "tech_terminal" | null;
   /** Timestamp da última comunicação */
   lastCommunication: string | null;
 }
@@ -202,7 +202,7 @@ export function useHorimetro(args: { from: Date; to: Date; enabled?: boolean }) 
         currentMonthTotal: periodTotals.get(eq.id) ?? 0,
         yearTotal: periodTotals.get(eq.id) ?? 0,
         isRunning,
-        actuationOrigin: (eq.last_actuation_origin as "remote" | "local" | null) ?? null,
+        actuationOrigin: (eq.last_actuation_origin as "remote" | "local" | "tech_terminal" | null) ?? null,
         lastCommunication: eq.last_communication ?? null,
       });
     }
