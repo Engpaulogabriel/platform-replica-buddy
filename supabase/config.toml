@@ -12,6 +12,12 @@ verify_jwt = false
 [functions.whatsapp-automation-notify]
 verify_jwt = false
 
+# license-validate: o Bearer e o LICENSE TOKEN do device (nao um JWT Supabase),
+# entao o gateway NAO pode exigir JWT valido — a propria funcao valida a
+# assinatura HMAC. verify_jwt=false + apikey anon (enviado pelo agente).
+[functions.license-validate]
+verify_jwt = false
+
 [functions.whatsapp-webhook]
 verify_jwt = false
 
