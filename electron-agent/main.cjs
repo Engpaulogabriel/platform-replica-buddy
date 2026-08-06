@@ -25,53 +25,30 @@ const crypto = require("crypto");
 // ─── BOOT LOG (escrito ANTES de qualquer coisa que possa falhar) ───────────
 // Sempre grava em %APPDATA%\GestorDeBombasKey\boot.log para diagnosticar
 // crashes silenciosos no startup. Não depende de pushLog/Supabase/janelas.
-function _bootLog(msg) {
-  try {
-    const dir = (app && app.getPath) ? app.getPath("userData") : path.join(os.homedir(), "AppData", "Roaming", "GestorDeBombasKey");
-    try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
-    const line = `[${new Date().toISOString()}] ${msg}\n`;
-    fs.appendFileSync(path.join(dir, "boot.log"), line);
-  } catch (_) {}
-}
+// v3.25.47: NO-OP. boot.log continha diagnóstico de boot/crash/segurança e era um
+// arquivo LOCAL legível — removido por decisão de segurança (nenhum arquivo no PC).
+// Mantido como função para não quebrar as ~50 chamadas. Trade-off assumido: sem
+// boot.log, um crash silencioso no startup (antes da nuvem subir) não deixa rastro
+// em disco. `void msg` evita "unused".
+function _bootLog(msg) { void msg; }
 _bootLog(`=== boot main.cjs pid=${process.pid} packaged=${app.isPackaged} platform=${process.platform} arch=${process.arch} node=${process.versions.node} electron=${process.versions.electron} ===`);
 
-// ─── v3.25.47 SEGURANÇA: SILÊNCIO TOTAL NO CONSOLE ──────────────────────────
-// Quando alguém roda o exe pelo CMD (start "" "exe"), o console.log/warn/error
-// do agente — inclusive o pushLog que imprime TX/RX — aparecia no terminal,
-// vazando frames e o protocolo serial. Aqui: (1) redireciona TODO console.* para
-// um arquivo (console.log em %APPDATA%, cap de 5MB), NUNCA para stdout/stderr;
-// (2) ZERA process.stdout/stderr.write como blindagem final. NÃO afeta a serial:
-// a bridge usa pipes do processo FILHO (bridgeProcess.stdin / proc.stdout), que
-// são independentes do process.stdout deste agente.
-const _CONSOLE_LOG_FILE = (() => {
-  try {
-    const dir = (app && app.getPath) ? app.getPath("userData") : path.join(os.homedir(), "AppData", "Roaming", "GestorDeBombasKey");
-    try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
-    return path.join(dir, "console.log");
-  } catch (_) { return null; }
-})();
-function _consoleToFile(tag, args) {
-  if (!_CONSOLE_LOG_FILE) return;
-  try {
-    try {
-      const st = fs.statSync(_CONSOLE_LOG_FILE);
-      if (st.size > 5 * 1024 * 1024) fs.writeFileSync(_CONSOLE_LOG_FILE, ""); // cap: nunca enche o disco
-    } catch (_) {}
-    const parts = args.map((a) => {
-      if (typeof a === "string") return a;
-      try { return require("util").inspect(a, { depth: 2 }); } catch (_) { return String(a); }
-    });
-    fs.appendFileSync(_CONSOLE_LOG_FILE, `[${new Date().toISOString()}]${tag} ${parts.join(" ")}\n`);
-  } catch (_) {}
-}
-console.log   = (...a) => _consoleToFile("",       a);
-console.info  = (...a) => _consoleToFile("[INFO]", a);
-console.warn  = (...a) => _consoleToFile("[WARN]", a);
-console.error = (...a) => _consoleToFile("[ERR]",  a);
-console.debug = (...a) => _consoleToFile("[DBG]",  a);
-console.trace = (...a) => _consoleToFile("[TRC]",  a);
-// Blindagem final: qualquer escrita direta no stdout/stderr do agente é descartada
-// (honra callback opcional para não travar quem espera o flush).
+// ─── v3.25.47 SEGURANÇA: ZERO LOG EM DISCO E ZERO CONSOLE ───────────────────
+// Nenhum arquivo no PC da fazenda pode conter frames TX/RX, endereços de PLC ou
+// protocolo — nem admin/SYSTEM pode ler porque NÃO EXISTE. Portanto:
+//  (1) console.* = NO-OP (descarta tudo — nada para stdout/stderr nem arquivo).
+//  (2) process.stdout/stderr.write = NO-OP (nada aparece no CMD ao rodar o exe).
+//  (3) _bootLog e appendLogFile também viram no-op (ver definições abaixo) — sem
+//      boot.log, sem console.log, sem agent-*.log em disco.
+//  (4) Só liveness.txt sobrevive (apenas timestamp, sem dado sensível).
+// NÃO afeta a serial: a bridge usa pipes do processo FILHO (bridgeProcess.stdin /
+// proc.stdout), independentes do process.stdout deste agente.
+console.log   = () => {};
+console.info  = () => {};
+console.warn  = () => {};
+console.error = () => {};
+console.debug = () => {};
+console.trace = () => {};
 const _noopWrite = (_chunk, enc, cb) => {
   const done = typeof enc === "function" ? enc : cb;
   if (typeof done === "function") { try { done(); } catch (_) {} }
@@ -79,6 +56,24 @@ const _noopWrite = (_chunk, enc, cb) => {
 };
 try { process.stdout.write = _noopWrite; } catch (_) {}
 try { process.stderr.write = _noopWrite; } catch (_) {}
+
+// Purga arquivos de log SENSÍVEIS deixados por versões anteriores (contêm frames).
+// liveness.txt é preservado (só timestamp). Best-effort, nunca lança.
+(function _purgeSensitiveLogFiles() {
+  try {
+    const dir = (app && app.getPath) ? app.getPath("userData") : null;
+    if (!dir) return;
+    for (const f of ["boot.log", "console.log", "debug.log"]) {
+      try { fs.unlinkSync(path.join(dir, f)); } catch (_) {}
+    }
+    try {
+      const logDir = path.join(dir, "logs");
+      for (const f of fs.readdirSync(logDir)) {
+        if (f.startsWith("agent-") && f.endsWith(".log")) { try { fs.unlinkSync(path.join(logDir, f)); } catch (_) {} }
+      }
+    } catch (_) {}
+  } catch (_) {}
+})();
 
 // v3.25.40 (#8): qualquer crash inesperado termina em RESTART, nunca em morte
 // permanente. Os handlers NUNCA chamam process.exit() direto — delegam para
@@ -2055,6 +2050,12 @@ function currentLogFile() {
 }
 
 function appendLogFile(entry) {
+  // v3.25.47: NO-OP. O agent-*.log em disco (mesmo cifrado por DPAPI) era um
+  // arquivo local com informação do agente e um admin-como-SYSTEM podia decifrá-lo.
+  // Removido: nenhum log vai para disco. Diagnóstico deve ir só para a nuvem.
+  void entry;
+  return;
+  /* eslint-disable no-unreachable */
   try {
     ensureLogDir();
     const file = currentLogFile();
