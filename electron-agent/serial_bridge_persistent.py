@@ -22,6 +22,8 @@ import time
 import threading
 import queue
 import platform
+import atexit
+import signal
 
 if platform.system() != "Windows":
     print("ERROR:Este bridge so funciona no Windows", flush=True)
@@ -96,8 +98,69 @@ def log(msg):
 
 
 def out(msg):
-    sys.stdout.write(f"{msg}\n")
-    sys.stdout.flush()
+    # STDOUT (para o processo Electron), NAO a serial. No Windows, um flush do
+    # pipe stdout pode lancar OSError [Errno 22] Invalid argument transitoriamente
+    # (pai ocupado/reciclando o pipe). Antes isso derrubava o bridge inteiro na
+    # linha do flush. Agora: 1 retry curto; se persistir, loga e segue (nao morre).
+    for attempt in range(2):
+        try:
+            sys.stdout.write(f"{msg}\n")
+            sys.stdout.flush()
+            return
+        except OSError as e:
+            if attempt == 0:
+                time.sleep(0.05)
+                continue
+            log(f"[PY] out() OSError (stdout pipe): {e} — descartando '{msg[:40]}'")
+            return
+
+
+# --- Cleanup de shutdown (item #3) ------------------------------------------
+# Referencia global da porta aberta para o cleanup poder fecha-la.
+# IMPORTANTE: taskkill /F (TerminateProcess, usado pelo INSTALAR.bat) NAO e
+# capturavel — nenhum handler roda nesse caso. O que salva o "COM travada apos
+# kill" e o RETRY na abertura (open_serial). Estes handlers cobrem o encerramento
+# CAPTURAVEL (Ctrl+C = SIGINT, Ctrl+Break = SIGBREAK, terminate gracioso, QUIT).
+_current_ser = None
+
+
+def _set_current_ser(ser):
+    """Atualiza a referencia global usada pelo cleanup de shutdown."""
+    global _current_ser
+    _current_ser = ser
+
+
+def _cleanup_serial():
+    global _current_ser
+    try:
+        if _current_ser is not None and getattr(_current_ser, "is_open", False):
+            try:
+                _current_ser.reset_output_buffer()
+            except Exception:
+                pass
+            _current_ser.close()
+            log("[PY] Porta fechada (cleanup)")
+    except Exception:
+        pass
+
+
+atexit.register(_cleanup_serial)
+
+
+def _signal_handler(signum, frame):
+    log(f"[PY] Sinal {signum} recebido — fechando porta e saindo")
+    _cleanup_serial()
+    # sys.exit dispara o atexit (idempotente) e encerra limpo.
+    sys.exit(0)
+
+
+for _sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+    _sig = getattr(signal, _sig_name, None)
+    if _sig is not None:
+        try:
+            signal.signal(_sig, _signal_handler)
+        except Exception:
+            pass
 
 
 def get_win32_handle(ser):
@@ -195,17 +258,24 @@ def safe_write(ser, port_path, tx_bytes, max_retries=2):
             last_err = str(e)
             log(f"[PY TX] tentativa {attempt + 1} falhou: {last_err}")
 
-            # Se for PermissionError(13) ou similar, reabrir porta
-            if "PermissionError" in last_err or "13" in last_err or "WriteFile" in last_err:
+            # Reabrir a porta em erros de porta travada/invalida (item #2):
+            #  - PermissionError(13): bug PL2303 conhecido
+            #  - OSError [Errno 22] / Invalid argument: COM em estado invalido apos
+            #    kill abrupto — o mesmo sintoma que o tecnico resolvia trocando de COM
+            reopen_triggers = ("PermissionError", "Errno 13", "WriteFile",
+                               "Errno 22", "Invalid argument", "OSError", "ClearCommError")
+            if any(tok in last_err for tok in reopen_triggers):
                 if attempt < max_retries:
-                    log("[PY TX] Reabrindo porta apos PermissionError...")
+                    log("[PY TX] Porta invalida/travada — fechando, aguardando 1s e reabrindo...")
                     try:
                         ser.close()
                     except Exception:
                         pass
-                    time.sleep(0.15)
+                    # Item #2: espera 1s antes de reabrir (o Windows precisa liberar a COM).
+                    time.sleep(1.0)
                     try:
                         ser = open_serial(port_path)
+                        _set_current_ser(ser)
                         log("[PY TX] Porta reaberta para retry")
                     except Exception as reopen_err:
                         log(f"[PY TX] Falha ao reabrir: {reopen_err}")
@@ -216,8 +286,8 @@ def safe_write(ser, port_path, tx_bytes, max_retries=2):
     return False, ser, last_err
 
 
-def open_serial(port_path):
-    """Abre a porta COM com pyserial e aplica fix PL2303."""
+def _configure_serial(port_path):
+    """Cria e configura o objeto pyserial (sem abrir)."""
     ser = serial.Serial()
     ser.port = port_path
     ser.baudrate = 9600
@@ -231,23 +301,64 @@ def open_serial(port_path):
     ser.dsrdtr = False
     ser.dtr = False
     ser.rts = False
-    ser.open()
-
-    log(f"[PY] Porta {port_path} aberta: 9600 8N1 dtr=False rts=False")
-
-    # Aplicar fix PL2303 via Win32 API
-    try:
-        handle = get_win32_handle(ser)
-        log(f"[PY] Win32 handle = {handle}")
-        fix_pl2303_dcb(handle)
-    except Exception as e:
-        log(f"[PY] AVISO: fix PL2303 falhou: {e}")
-
-    # Limpar buffers
-    ser.reset_input_buffer()
-    ser.reset_output_buffer()
-
     return ser
+
+
+def open_serial(port_path, max_attempts=5, retry_delay=2.0):
+    """Abre a porta COM com pyserial e aplica fix PL2303.
+
+    RETRY (item #1): apos um encerramento abrupto (taskkill /F, crash), o Windows
+    pode demorar a liberar a COM e ela fica em estado invalido — a abertura lanca
+    OSError [Errno 22] Invalid argument / PermissionError(13). Em vez de falhar de
+    cara (o tecnico tinha que trocar COM2->COM1 na mao), tentamos ate max_attempts
+    fechando qualquer handle semi-aberto e esperando retry_delay entre tentativas.
+    """
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        ser = _configure_serial(port_path)
+        try:
+            ser.open()
+        except (OSError, serial.SerialException) as e:
+            last_err = e
+            log(f"[PY] Abertura de {port_path} FALHOU (tentativa {attempt}/{max_attempts}): {e}")
+            # Fecha handle semi-aberto antes do proximo retry (item #1).
+            try:
+                if getattr(ser, "is_open", False):
+                    ser.close()
+            except Exception:
+                pass
+            if attempt < max_attempts:
+                time.sleep(retry_delay)
+                continue
+            raise  # esgotou as tentativas — propaga o ultimo erro
+
+        # --- Aberto com sucesso ---
+        log(f"[PY] Porta {port_path} aberta: 9600 8N1 dtr=False rts=False (tentativa {attempt})")
+
+        # Aplicar fix PL2303 via Win32 API
+        try:
+            handle = get_win32_handle(ser)
+            log(f"[PY] Win32 handle = {handle}")
+            fix_pl2303_dcb(handle)
+        except Exception as e:
+            log(f"[PY] AVISO: fix PL2303 falhou: {e}")
+
+        # Limpar buffers (item #4): remove lixo deixado pelo processo anterior.
+        try:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+        except Exception as e:
+            log(f"[PY] AVISO: reset de buffers falhou: {e}")
+        # Reforco via driver: PurgeComm TX+RX (limpa filas do driver, nao so do OS).
+        try:
+            purge_comm(get_win32_handle(ser), PURGE_TXCLEAR | PURGE_RXCLEAR)
+        except Exception:
+            pass
+
+        return ser
+
+    # Nao deveria chegar aqui (o raise acima cobre), mas por seguranca:
+    raise last_err if last_err else RuntimeError(f"open_serial({port_path}) falhou")
 
 
 def main():
@@ -265,6 +376,7 @@ def main():
 
     try:
         ser = open_serial(port_path)
+        _set_current_ser(ser)  # cleanup de shutdown fecha esta porta
     except Exception as e:
         out(f"ERROR:Nao conseguiu abrir {port_path}: {e}")
         sys.exit(1)
@@ -383,6 +495,7 @@ def main():
                 ser.close()
                 time.sleep(0.1)
                 ser = open_serial(port_path)
+                _set_current_ser(ser)
                 reopen_count += 1
                 consecutive_empty_reads = 0
                 last_tx_time = 0
