@@ -8994,8 +8994,31 @@ function verifyAgentObfuscation(cfg) {
 }
 
 // --- App lifecycle ---
+// v3.25.47: LOCK DE INSTÂNCIA ÚNICA. Dois processos disputando a COM travam a
+// porta (um segura, o outro toma "Acesso negado"). Se já há uma instância viva,
+// a segunda encerra IMEDIATAMENTE, antes de tocar na serial. Cobre duplo-clique
+// no exe e o watchdog tentando subir enquanto o agente já roda.
+// NB: no Windows o lock é POR SESSÃO — duplicatas entre sessões (ex.: tarefa de
+// boot como SYSTEM + launch interativo do usuário) são cobertas pelo taskkill do
+// INSTALAR.bat e do watchdog (que agora reconhece o nome real do processo).
+let _singleInstanceOK = true;
+try { _singleInstanceOK = app.requestSingleInstanceLock(); }
+catch (_) { _singleInstanceOK = true; } // se a API falhar, não bloqueia o boot
+if (!_singleInstanceOK) {
+  try { _bootLog("[SINGLE-INSTANCE] outra instância já está rodando — encerrando esta"); } catch (_) {}
+  try { app.quit(); } catch (_) {}
+  try { app.exit(0); } catch (_) { try { process.exit(0); } catch (__) {} }
+} else {
+  // Headless: não há janela para focar; só registra a tentativa bloqueada.
+  app.on("second-instance", () => {
+    try { _bootLog("[SINGLE-INSTANCE] segunda instância bloqueada (agente headless)"); } catch (_) {}
+  });
+}
+
 _bootLog("registering app.whenReady handler");
 app.whenReady().then(async () => {
+  // Se não obtivemos o lock, o app já está encerrando — não inicia nada.
+  if (!_singleInstanceOK) { _bootLog("app.whenReady abortado — sem single-instance lock"); return; }
   _bootLog("app.whenReady fired");
   try {
     try { createTray(); _bootLog("createTray ok"); }

@@ -31,8 +31,8 @@ echo ============================================================
 
 REM -- 1) FECHAR o agente se estiver rodando ----------------------------------
 echo [1/9] Fechando o agente...
-for %%N in ("Gestor de Bombas Key.exe" "GestorDeBombasKey.exe" "Agente-Renov.exe" "renov-agent.exe" "electron.exe" "serial_bridge.exe") do taskkill /F /IM %%~N >nul 2>&1
-timeout /t 2 /nobreak >nul
+for %%N in ("Gestor de Bombas.exe" "Gestor de Bombas Key.exe" "GestorDeBombasKey.exe" "Agente-Renov.exe" "renov-agent.exe" "electron.exe" "serial_bridge.exe") do taskkill /F /IM %%~N >nul 2>&1
+timeout /t 3 /nobreak >nul
 
 REM -- 2) COPIAR o pacote para o destino (merge; exclui .py, logs, o instalador)
 echo [2/9] Copiando arquivos...

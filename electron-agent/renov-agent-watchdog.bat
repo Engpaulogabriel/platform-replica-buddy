@@ -32,7 +32,7 @@ REM  v3.25.42: a instalacao pode estar em C:\Renov, C:\Gestor de Bombas ou na
 REM  pasta deste proprio .bat. Vence a primeira que tiver o executavel.
 set "AGENT_DIR="
 for %%D in ("%~dp0." "C:\Renov" "C:\Gestor de Bombas" "C:\Program Files\Gestor de Bombas Key") do (
-  for %%N in ("renov-agent.exe" "GestorDeBombasKey.exe" "Gestor de Bombas Key.exe" "Agente-Renov.exe") do (
+  for %%N in ("Gestor de Bombas.exe" "Gestor de Bombas Key.exe" "GestorDeBombasKey.exe" "renov-agent.exe" "Agente-Renov.exe") do (
     if not defined AGENT_DIR if exist "%%~D\%%~N" (
       set "AGENT_DIR=%%~D"
       set "AGENT_NAME=%%~N"
