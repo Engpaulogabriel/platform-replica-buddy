@@ -1,189 +1,117 @@
 @echo off
 REM ===========================================================================
-REM  INSTALAR.bat - RENOV Agent (pacote seguro)
+REM  INSTALAR.bat - RENOV Agent (instalacao segura, zero interacao)
 REM ---------------------------------------------------------------------------
-REM  Faz TUDO em uma execucao, sem interacao alem de "Executar como
-REM  administrador":
-REM    1. Auto-eleva via UAC se nao estiver como admin
-REM    2. Copia a pasta para o destino (default C:\Gestor de Bombas)
-REM    3. Remove locales desnecessarios (mantem so pt-BR e en-US)
-REM    4. Remove lixo (.py, debug.log, INSTALAR-PYSERIAL.bat)
-REM    5. Aplica permissoes NTFS (so o usuario do agente e o SYSTEM acessam)
-REM    6. Registra Tarefas Agendadas: RenovAgent (boot) + RenovAgentWatchdog (1min)
-REM    7. Cria atalho no Desktop
-REM    8. Inicia o agente e mostra o resumo
-REM
-REM  ASCII puro + CRLF de proposito (o interpretador de .bat quebra com acentos
-REM  fora da code page e com blocos ( ... ) terminados so em LF).
+REM  100% ASCII + CRLF de proposito. Rode como Administrador (auto-eleva).
+REM  Faz tudo sozinho: fecha o agente, copia, limpa, tranca NTFS, cria as
+REM  tarefas de boot e watchdog, e inicia o agente. Sem pause/choice/confirmacao.
+REM  Destino padrao: C:\Gestor de Bombas   (sobrescreva: INSTALAR.bat "D:\Path")
 REM ===========================================================================
 setlocal EnableExtensions EnableDelayedExpansion
 
-REM -- 1) Auto-elevacao UAC ---------------------------------------------------
+REM -- Auto-elevacao UAC (sem pause) ------------------------------------------
 net session >nul 2>&1
 if errorlevel 1 (
-  echo Solicitando privilegios de administrador...
   powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
   exit /b 0
 )
 
 title Instalador RENOV Agent
-echo ============================================================
-echo  RENOV Agent - Instalacao segura
-echo ============================================================
-
+set "DEST=C:\Gestor de Bombas"
 set "SRC=%~dp0"
 if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
-set "DEST=C:\Gestor de Bombas"
-
-REM Permite sobrescrever o destino:  INSTALAR.bat "D:\Outro\Caminho"
 if not "%~1"=="" set "DEST=%~1"
+set "RES=%DEST%\resources"
 
-echo.
+echo ============================================================
+echo  RENOV Agent - Instalacao segura
 echo  Origem:  %SRC%
 echo  Destino: %DEST%
-echo.
+echo ============================================================
 
-REM -- Nao instala em cima de um bloqueio de seguranca sem avisar -------------
-if exist "%DEST%\agent-blocked.flag" (
-  echo [AVISO] Existe um bloqueio de seguranca 'agent-blocked.flag' no destino.
-  echo         Ele sera REMOVIDO por esta reinstalacao - equivale a autorizar o PC.
-  del /Q "%DEST%\agent-blocked.flag" >nul 2>&1
-)
-
-REM -- Fecha instancia em execucao para poder sobrescrever --------------------
-for %%N in ("renov-agent.exe" "GestorDeBombasKey.exe" "Gestor de Bombas Key.exe" "Agente-Renov.exe") do (
-  taskkill /F /IM %%~N >nul 2>&1
-)
+REM -- 1) FECHAR o agente se estiver rodando ----------------------------------
+echo [1/9] Fechando o agente...
+for %%N in ("Gestor de Bombas Key.exe" "GestorDeBombasKey.exe" "Agente-Renov.exe" "renov-agent.exe" "electron.exe" "serial_bridge.exe") do taskkill /F /IM %%~N >nul 2>&1
 timeout /t 2 /nobreak >nul
 
-REM -- 2) Copia arquivos ------------------------------------------------------
-echo [1/8] Copiando arquivos...
-if not exist "%DEST%" mkdir "%DEST%"
-REM  /E subpastas, /PURGE remove no destino o que nao existe na origem,
-REM  /XF exclui arquivos que nunca devem ir para producao.
-robocopy "%SRC%" "%DEST%" /E /PURGE /NFL /NDL /NJH /NJS /NP ^
-  /XF serial_bridge_persistent.py *.py debug.log INSTALAR-PYSERIAL.bat main.original.cjs INSTALAR.bat >nul
-REM  robocopy retorna 0-7 em sucesso; >=8 e erro real.
-if errorlevel 8 (
-  echo [ERRO] Falha ao copiar arquivos para %DEST%.
-  goto FAIL
-)
+REM -- 2) COPIAR o pacote para o destino (merge; exclui .py, logs, o instalador)
+echo [2/9] Copiando arquivos...
+if not exist "%RES%" mkdir "%RES%" >nul 2>&1
+robocopy "%SRC%" "%DEST%" /E /NFL /NDL /NJH /NJS /NP /XF *.py debug.log INSTALAR.bat INSTALAR-PYSERIAL.bat main.original.cjs >nul
+REM  robocopy: 0-7 sucesso, >=8 erro real.
+if errorlevel 8 goto FAIL
 
-REM -- 3) Remove locales desnecessarios (mantem pt-BR e en-US) ----------------
-echo [2/8] Removendo idiomas nao usados...
+REM -- 3) DELETAR o .py da bridge (protocolo exposto) -------------------------
+echo [3/9] Removendo bridge .py exposta...
+del /Q "%RES%\serial_bridge_persistent.py" >nul 2>&1
+del /Q "%RES%\app\serial_bridge_persistent.py" >nul 2>&1
+del /Q "%DEST%\serial_bridge_persistent.py" >nul 2>&1
+
+REM -- 4) DELETAR lixos: app.asar.bak, debug.log, locales extras -------------
+echo [4/9] Limpando lixos...
+del /Q "%RES%\app.asar.bak" >nul 2>&1
+del /Q "%DEST%\debug.log" >nul 2>&1
+del /Q "%RES%\app\main.original.cjs" >nul 2>&1
+del /Q "%DEST%\INSTALAR-PYSERIAL.bat" >nul 2>&1
+REM  locales: mantem SO en-US.pak e pt-BR.pak. Apagar TODOS quebra o Electron
+REM  (ele exige pelo menos o .pak do locale ativo / en-US para iniciar).
 if exist "%DEST%\locales" (
   for %%F in ("%DEST%\locales\*.pak") do (
     if /I not "%%~nxF"=="pt-BR.pak" if /I not "%%~nxF"=="en-US.pak" del /Q "%%F" >nul 2>&1
   )
 )
 
-REM -- 4) Remove lixo residual (caso ja existisse no destino) -----------------
-echo [3/8] Limpando arquivos sensiveis...
-del /Q "%DEST%\serial_bridge_persistent.py" >nul 2>&1
-del /Q "%DEST%\resources\serial_bridge_persistent.py" >nul 2>&1
-del /Q "%DEST%\resources\app\serial_bridge_persistent.py" >nul 2>&1
-del /Q "%DEST%\debug.log" >nul 2>&1
-del /Q "%DEST%\INSTALAR-PYSERIAL.bat" >nul 2>&1
-del /Q "%DEST%\resources\app\main.original.cjs" >nul 2>&1
-
-REM -- Provisioning headless: se houver provisioning.json no pacote, coloca em
-REM    C:\ProgramData\Renov para o agente auto-ativar a fazenda sem tela de Setup.
+REM -- 8) Garante o watchdog e o provisioning no destino ---------------------
+if not exist "%DEST%\renov-agent-watchdog.bat" if exist "%SRC%\renov-agent-watchdog.bat" copy /Y "%SRC%\renov-agent-watchdog.bat" "%DEST%\renov-agent-watchdog.bat" >nul 2>&1
 if exist "%SRC%\provisioning.json" (
-  echo       provisioning.json detectado - ativacao headless
   if not exist "C:\ProgramData\Renov" mkdir "C:\ProgramData\Renov" >nul 2>&1
   copy /Y "%SRC%\provisioning.json" "C:\ProgramData\Renov\provisioning.json" >nul 2>&1
-  set "HAVE_PROV=1"
-) else (
-  set "HAVE_PROV="
 )
 
-REM -- Descobre o executavel do agente no destino -----------------------------
+REM -- Descobre o executavel do agente no destino ----------------------------
 set "AGENT_EXE="
-set "AGENT_NAME="
-for %%N in ("renov-agent.exe" "GestorDeBombasKey.exe" "Gestor de Bombas Key.exe" "Agente-Renov.exe") do (
-  if not defined AGENT_EXE if exist "%DEST%\%%~N" (
-    set "AGENT_EXE=%DEST%\%%~N"
-    set "AGENT_NAME=%%~N"
-  )
+for %%N in ("Agente-Renov.exe" "Gestor de Bombas Key.exe" "GestorDeBombasKey.exe" "renov-agent.exe") do (
+  if not defined AGENT_EXE if exist "%DEST%\%%~N" set "AGENT_EXE=%DEST%\%%~N"
 )
-if not defined AGENT_EXE (
-  echo [ERRO] Executavel do agente nao encontrado em %DEST%.
-  goto FAIL
-)
-echo       Agente: %AGENT_EXE%
+if not defined AGENT_EXE goto FAIL
+echo       Agente: !AGENT_EXE!
 
-REM -- 5) Permissoes NTFS -----------------------------------------------------
-echo [4/8] Aplicando permissoes NTFS...
+REM -- 5) NTFS: so SYSTEM e Administrators leem app.asar e serial_bridge.exe --
+echo [5/9] Aplicando permissoes NTFS...
+set "ASAR=%RES%\app.asar"
+set "BRIDGE=%RES%\serial_bridge.exe"
+REM  Pasta: quebra heranca, mantem SYSTEM+Admins, remove Users/Everyone.
 icacls "%DEST%" /inheritance:r >nul 2>&1
-icacls "%DEST%" /grant:r "%USERNAME%:(OI)(CI)F" >nul 2>&1
-icacls "%DEST%" /grant:r "SYSTEM:(OI)(CI)F" >nul 2>&1
-icacls "%DEST%" /grant:r "Administrators:(OI)(CI)F" >nul 2>&1
-icacls "%DEST%" /remove:g "Users" >nul 2>&1
-icacls "%DEST%" /deny "Users:(OI)(CI)(RX)" >nul 2>&1
+icacls "%DEST%" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" >nul 2>&1
+icacls "%DEST%" /remove:g "Users" "Everyone" "Authenticated Users" >nul 2>&1
+REM  Arquivos sensiveis: heranca off + leitura SO para SYSTEM e Administrators.
+for %%P in ("%ASAR%" "%BRIDGE%") do if exist "%%~P" icacls "%%~P" /inheritance:r /grant:r "SYSTEM:F" "Administrators:F" /remove:g "Users" "Everyone" "Authenticated Users" >nul 2>&1
 
-REM -- 6) Tarefas Agendadas ---------------------------------------------------
-echo [5/8] Registrando tarefa de boot (RenovAgent)...
-REM  Escolha automatica do modo (decidido com o Paulo):
-REM   - provisioning.json presente OU senha passada como 2o argumento -> caminho
-REM     definido; senao SYSTEM (zero interacao, o default do pendrive).
-REM   - SYSTEM ONSTART: roda no boot sem login. Combina com provisioning headless.
-REM   - Conta do usuario + /RP <senha>: preserva a config DPAPI do usuario e a
-REM     tela de Setup; use quando o PC ja foi configurado manualmente.
-set "WINPWD=%~2"
-if defined WINPWD (
-  echo       modo: conta de usuario %USERDOMAIN%\%USERNAME% - DPAPI preservado
-  schtasks /Create /TN "RenovAgent" /TR "\"%AGENT_EXE%\"" /SC ONSTART /RU "%USERDOMAIN%\%USERNAME%" /RP "%WINPWD%" /RL HIGHEST /F >nul 2>&1
-  set "WINPWD="
-) else (
-  echo       modo: SYSTEM - boot sem login, zero interacao
-  schtasks /Create /TN "RenovAgent" /TR "\"%AGENT_EXE%\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul 2>&1
-)
-if errorlevel 1 (echo       [AVISO] falha ao criar RenovAgent) else (echo       OK)
+REM -- 6) Tarefa de BOOT: inicia o agente como SYSTEM, sem login -------------
+echo [6/9] Registrando tarefa de boot RENOV-Agent-Boot...
+schtasks /Create /TN "RENOV-Agent-Boot" /TR "\"%AGENT_EXE%\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul 2>&1
 
-echo [6/8] Registrando watchdog (RenovAgentWatchdog, 1 min)...
-set "WATCHDOG=%DEST%\renov-agent-watchdog.bat"
-if exist "%WATCHDOG%" (
-  schtasks /Create /SC MINUTE /MO 1 /TN "RenovAgentWatchdog" /TR "\"%WATCHDOG%\"" /RU SYSTEM /RL HIGHEST /F >nul 2>&1
-  if errorlevel 1 (echo       [AVISO] falha ao criar watchdog) else (echo       OK)
-) else (
-  echo       [AVISO] renov-agent-watchdog.bat ausente em %DEST%
-)
+REM -- 7) Tarefa de WATCHDOG: a cada 1 minuto -------------------------------
+echo [7/9] Registrando watchdog RENOV-Agent-Watchdog...
+if exist "%DEST%\renov-agent-watchdog.bat" schtasks /Create /TN "RENOV-Agent-Watchdog" /TR "\"%DEST%\renov-agent-watchdog.bat\"" /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /F >nul 2>&1
 
-REM -- 7) Atalho no Desktop ---------------------------------------------------
-echo [7/8] Criando atalho no Desktop...
-set "ICON=%DEST%\%AGENT_NAME%"
-powershell -NoProfile -Command ^
-  "$ws=New-Object -ComObject WScript.Shell;" ^
-  "$s=$ws.CreateShortcut([IO.Path]::Combine($env:PUBLIC,'Desktop','Gestor de Bombas.lnk'));" ^
-  "$s.TargetPath='%AGENT_EXE%';" ^
-  "$s.WorkingDirectory='%DEST%';" ^
-  "$s.IconLocation='%ICON%';" ^
-  "$s.Description='Gestor de Bombas Key - RENOV';" ^
-  "$s.Save()" >nul 2>&1
+REM -- Atalho no Desktop publico (uma linha, sem interacao) ------------------
+echo [8/9] Criando atalho...
+powershell -NoProfile -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut([IO.Path]::Combine($env:PUBLIC,'Desktop','Gestor de Bombas.lnk')); $s.TargetPath='%AGENT_EXE%'; $s.WorkingDirectory='%DEST%'; $s.Save()" >nul 2>&1
 
-REM -- 8) Inicia o agente -----------------------------------------------------
-echo [8/8] Iniciando o agente...
+REM -- 9) INICIAR o agente agora --------------------------------------------
+echo [9/9] Iniciando o agente...
 start "" "%AGENT_EXE%"
 
-echo.
 echo ============================================================
-echo  Instalacao concluida.
-echo.
-echo  - Bridge serial: serial_bridge.exe (NAO precisa de Python)
-echo  - Boot automatico: tarefa RenovAgent (ao ligar o PC)
-echo  - Watchdog: RenovAgentWatchdog (a cada 1 minuto)
-echo  - Pasta protegida por permissoes NTFS
-echo.
-echo  Abra o "Gestor de Bombas" (atalho no Desktop) para configurar
-echo  login e porta COM, caso ainda nao tenha provisioning.json.
+echo  Instalacao concluida. Agente iniciado.
+echo  - Bridge: serial_bridge.exe sem Python
+echo  - Boot: tarefa RENOV-Agent-Boot como SYSTEM sem login
+echo  - Watchdog: RENOV-Agent-Watchdog a cada 1 min
+echo  - app.asar e serial_bridge.exe travados por NTFS
 echo ============================================================
-echo.
-pause
 exit /b 0
 
 :FAIL
-echo.
-echo  A instalacao FALHOU. Veja as mensagens acima.
-echo.
-pause
+echo [ERRO] Instalacao falhou. Verifique o pacote e as permissoes de admin.
 exit /b 1
