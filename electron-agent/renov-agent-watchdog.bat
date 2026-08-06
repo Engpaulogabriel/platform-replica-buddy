@@ -27,10 +27,22 @@ REM ===========================================================================
 
 setlocal EnableDelayedExpansion
 
-set "AGENT_DIR=C:\Renov"
-set "AGENT_EXE=%AGENT_DIR%\renov-agent.exe"
-set "AGENT_BAK=%AGENT_DIR%\renov-agent.exe.bak"
-set "AGENT_NAME=renov-agent.exe"
+REM -- Descobre a pasta de instalacao (multiplos caminhos) --------------------
+REM  v3.25.42: a instalacao pode estar em C:\Renov, C:\Gestor de Bombas ou na
+REM  pasta deste proprio .bat. Vence a primeira que tiver o executavel.
+set "AGENT_DIR="
+for %%D in ("%~dp0." "C:\Renov" "C:\Gestor de Bombas" "C:\Program Files\Gestor de Bombas Key") do (
+  for %%N in ("renov-agent.exe" "GestorDeBombasKey.exe" "Gestor de Bombas Key.exe" "Agente-Renov.exe") do (
+    if not defined AGENT_DIR if exist "%%~D\%%~N" (
+      set "AGENT_DIR=%%~D"
+      set "AGENT_NAME=%%~N"
+    )
+  )
+)
+if not defined AGENT_DIR set "AGENT_DIR=C:\Renov"
+if not defined AGENT_NAME set "AGENT_NAME=renov-agent.exe"
+set "AGENT_EXE=%AGENT_DIR%\%AGENT_NAME%"
+set "AGENT_BAK=%AGENT_DIR%\%AGENT_NAME%.bak"
 set "ASAR=%AGENT_DIR%\resources\app.asar"
 set "ASAR_BAK=%AGENT_DIR%\resources\app.asar.bak"
 set "FAIL_FLAG=%AGENT_DIR%\update-in-progress.flag"
@@ -38,11 +50,22 @@ set "LIVENESS=%AGENT_DIR%\liveness.txt"
 set "WDLOG=%AGENT_DIR%\watchdog.log"
 set "STATE=%AGENT_DIR%\watchdog-relaunches.txt"
 set "BACKOFF=%AGENT_DIR%\watchdog-backoff.txt"
+set "BLOCKFLAG=%AGENT_DIR%\agent-blocked.flag"
 
 REM Rotaciona o log do watchdog acima de 1MB (mantem 1 geracao).
 if exist "%WDLOG%" for %%F in ("%WDLOG%") do if %%~zF GTR 1048576 (
   if exist "%WDLOG%.1" del /Q "%WDLOG%.1" >NUL 2>&1
   ren "%WDLOG%" "watchdog.log.1" >NUL 2>&1
+)
+
+REM -- BLOQUEIO DE SEGURANCA: clone detectado ou app.asar adulterado ---------
+REM  O agente grava agent-blocked.flag e encerra de proposito. Relancar aqui
+REM  ressuscitaria um agente comprometido a cada minuto. Fica MORTO ate alguem
+REM  apagar o arquivo (reconfiguracao autorizada pelo suporte RENOV).
+if exist "%BLOCKFLAG%" (
+  call :LOG "BLOQUEIO DE SEGURANCA ativo (agent-blocked.flag) - NAO relancando"
+  endlocal
+  exit /b 0
 )
 
 REM Esta rodando?

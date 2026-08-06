@@ -465,7 +465,29 @@ function resolvePythonBridgePath() {
   return resourcePath || devPath;
 }
 
+// v3.25.42: bridge COMPILADA (PyInstaller --onefile --noconsole --name serial_bridge).
+// O .py em texto puro expunha o protocolo inteiro na pasta de instalação; o pacote
+// de distribuição passa a levar só o binário. Fala o MESMO protocolo stdio
+// (READY / RX: / SEND:), então a única diferença é o spawn: `serial_bridge.exe <porta>`
+// em vez de `python serial_bridge_persistent.py <porta>` — e não precisa de Python
+// nem de pyserial na máquina. Se o .exe não estiver presente (dev/macOS, ou pacote
+// antigo), cai no caminho Python de sempre: nunca deixa a fazenda sem bridge.
+function resolveCompiledBridgePath() {
+  try {
+    const names = process.platform === "win32" ? ["serial_bridge.exe"] : ["serial_bridge"];
+    const dirs = [process.resourcesPath, __dirname].filter(Boolean);
+    for (const d of dirs) {
+      for (const n of names) {
+        const p = path.join(d, n);
+        if (fs.existsSync(p)) return p;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 const PYTHON_BRIDGE = resolvePythonBridgePath();
+const COMPILED_BRIDGE = resolveCompiledBridgePath();
 const AGENT_VERSION = require("./package.json").version;
 const LOG_RETENTION_DAYS = 7;
 const LOG_FILE_MAX_BYTES = 50 * 1024 * 1024; // 50MB por arquivo
@@ -520,6 +542,98 @@ const LIVENESS_FILE = process.resourcesPath
   : path.join(app.getPath("userData"), "liveness.txt");
 function writeLiveness() {
   try { fs.writeFileSync(LIVENESS_FILE, new Date().toISOString()); } catch (_) {}
+}
+
+// ─── v3.25.42 BLOQUEIO PERMANENTE (kill-file) ───────────────────────────────
+// Clone detectado ou app.asar adulterado NÃO podem terminar em "encerra e o
+// watchdog ressuscita" — o watchdog .bat relança todo processo ausente, então
+// sem isto o agente comprometido voltaria a cada minuto num laço. O flag em
+// disco (ao lado do liveness.txt, mesma pasta de instalação) é a trava:
+//   • o watchdog .bat vê o arquivo e NÃO relança;
+//   • o próprio agente checa no boot e recusa iniciar a operação.
+// Some apenas por ação humana: apagar o arquivo = reconfiguração autorizada.
+let agentBlocked = false;
+const BLOCK_FLAG_FILE = process.resourcesPath
+  ? path.join(process.resourcesPath, "..", "agent-blocked.flag")
+  : path.join(app.getPath("userData"), "agent-blocked.flag");
+
+function readBlockFlag() {
+  try {
+    if (!fs.existsSync(BLOCK_FLAG_FILE)) return null;
+    return JSON.parse(fs.readFileSync(BLOCK_FLAG_FILE, "utf8"));
+  } catch (_) {
+    return { reason: "unknown", at: null }; // arquivo corrompido ainda bloqueia
+  }
+}
+
+function writeBlockFlag(reason, details) {
+  try {
+    fs.writeFileSync(BLOCK_FLAG_FILE, JSON.stringify({
+      reason,
+      details: details || null,
+      agent_version: AGENT_VERSION,
+      hostname: os.hostname(),
+      at: new Date().toISOString(),
+    }, null, 2));
+  } catch (e) {
+    try { _bootLog(`[SECURITY] não consegui gravar o kill-file: ${e.message}`); } catch (_) {}
+  }
+}
+
+// Encerra a operação de forma DEFINITIVA: sem relaunch, sem watchdog, sem OTA.
+// Diferente de relaunchAgent() — aqui a intenção é justamente NÃO voltar.
+async function blockAgentPermanently(reason, humanMsg, details) {
+  if (agentBlocked) return;
+  agentBlocked = true;
+  writeBlockFlag(reason, details);
+  try { pushLog("error", "system", `[SECURITY] BLOQUEIO PERMANENTE (${reason}): ${humanMsg}`); } catch (_) {}
+  try { _bootLog(`[SECURITY] BLOQUEIO PERMANENTE (${reason})`); } catch (_) {}
+
+  // Nenhuma bomba pode ser comandada a partir daqui: derruba a fila e a bridge.
+  try { txQueue.length = 0; } catch (_) {}
+  try { pollingPaused = true; } catch (_) {}
+  try { void stopBridge(); } catch (_) {}
+
+  // Alerta WhatsApp (best-effort, 3s) — reusa o backend já existente.
+  try {
+    if (farmId && activeSupabaseUrl && activeSupabaseAnonKey) {
+      const baseUrl = String(activeSupabaseUrl).replace(/\/+$/, "");
+      await withCloudTimeout(fetch(`${baseUrl}/functions/v1/whatsapp-automation-notify`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: activeSupabaseAnonKey,
+          Authorization: `Bearer ${activeAccessToken || activeSupabaseAnonKey}`,
+        },
+        body: JSON.stringify({
+          type: "alert",
+          immediate: true,
+          source: "agent_security",
+          alert_type: "agent_security_block",
+          farm_id: farmId,
+          equipment_name: "Sistema",
+          message: `ALERTA SEGURANCA: ${humanMsg} A operacao foi BLOQUEADA nesta fazenda.`,
+          metadata: { reason, details: details || null, agent_version: AGENT_VERSION },
+        }),
+      }), "security-block-alert", 3_000);
+    }
+  } catch (_) {}
+
+  // Popup NÃO-bloqueante (showMessageBox é assíncrono; showErrorBox congelaria
+  // o processo até alguém clicar — inaceitável em PC desatendido).
+  try {
+    if (tray) tray.setToolTip("RENOV Agent - BLOQUEADO");
+    trayNotify("RENOV Agent - BLOQUEADO",
+      "Arquivo do sistema foi modificado. Contate o suporte RENOV.", "error");
+    void dialog.showMessageBox({
+      type: "error",
+      title: "RENOV - Sistema bloqueado",
+      message: "Arquivo do sistema foi modificado. Contate o suporte RENOV.",
+      detail: `Motivo: ${reason}\nA operacao das bombas foi bloqueada por seguranca.`,
+      buttons: ["OK"],
+      noLink: true,
+    });
+  } catch (_) {}
 }
 
 // MODO DEGRADADO: polling HTTP mais lento quando o RTT da nuvem está alto (Starlink standby).
@@ -4486,6 +4600,9 @@ function stopBridge() {
 function startBridge(portPath) {
   return new Promise((resolve, reject) => {
     const pythonCandidates = getPythonCandidates();
+    // v3.25.42: bridge compilada tem PRIORIDADE — entra como primeiro candidato.
+    // Se falhar por qualquer motivo, o loop segue para os interpretadores Python.
+    if (COMPILED_BRIDGE) pythonCandidates.unshift(COMPILED_BRIDGE);
     const pythonEnv = buildPythonEnv();
     const failures = [];
     let candidateIndex = 0;
@@ -4500,11 +4617,15 @@ function startBridge(portPath) {
       const pythonCmd = pythonCandidates[candidateIndex];
       candidateIndex++;
 
-      pushLog("info", "system", `Tentando bridge com: ${pythonCmd}`);
+      // v3.25.42: o binário compilado recebe só a porta; o Python recebe o .py + porta.
+      const isCompiled = !!COMPILED_BRIDGE && pythonCmd === COMPILED_BRIDGE;
+      pushLog("info", "system", isCompiled
+        ? `Tentando bridge COMPILADA: ${pythonCmd}`
+        : `Tentando bridge com: ${pythonCmd}`);
 
       let proc;
       try {
-        proc = spawn(pythonCmd, [PYTHON_BRIDGE, portPath], {
+        proc = spawn(pythonCmd, isCompiled ? [portPath] : [PYTHON_BRIDGE, portPath], {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
           env: pythonEnv,
@@ -4617,7 +4738,9 @@ function startBridge(portPath) {
           const stderrInfo = stderrTail ? ` stderr=[${stderrTail}]` : "";
           failures.push(`${pythonCmd}: saiu antes de READY (code ${code}, bridge=${PYTHON_BRIDGE})${stderrInfo}`);
           // Auto-install pyserial se faltar
-          const needsPyserial = /No module named ['"]?serial['"]?|ModuleNotFoundError.*serial|ImportError.*serial/i.test(stderrBuffer);
+          // v3.25.42: a bridge compilada embute o pyserial — nunca tentar pip nela.
+          const needsPyserial = !isCompiled
+            && /No module named ['"]?serial['"]?|ModuleNotFoundError.*serial|ImportError.*serial/i.test(stderrBuffer);
           if (needsPyserial && !pythonCmd.startsWith("__retry_after_install__")) {
             pushLog("warn", "system", `pyserial faltando em ${pythonCmd} — tentando instalar...`);
             try {
@@ -7568,6 +7691,26 @@ async function startAgent(cfg) {
   startingAgent = true;
   let startupStep = "preparação";
 
+  // v3.25.42: kill-file presente = bloqueio de segurança anterior (clone ou asar
+  // adulterado). NÃO inicia a operação — nem bridge, nem nuvem, nem polling.
+  // Só sai deste estado quando alguém apagar o arquivo manualmente.
+  try {
+    const blocked = readBlockFlag();
+    if (blocked) {
+      agentBlocked = true;
+      pushLog("error", "system",
+        `[SECURITY] Agente BLOQUEADO desde ${blocked.at || "?"} (motivo: ${blocked.reason || "?"}). ` +
+        `Operação não será iniciada. Remova ${BLOCK_FLAG_FILE} após autorização do suporte RENOV.`);
+      try { if (tray) tray.setToolTip("RENOV Agent - BLOQUEADO"); } catch (_) {}
+      try {
+        trayNotify("RENOV Agent - BLOQUEADO",
+          "Arquivo do sistema foi modificado. Contate o suporte RENOV.", "error");
+      } catch (_) {}
+      startingAgent = false;
+      return;
+    }
+  } catch (_) {}
+
   try {
     startupStep = "limpar timers anteriores";
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
@@ -7993,10 +8136,17 @@ async function verifyAsarAgainstServer(cfg) {
       pushLog("info", "system", `[SECURITY] asar confere com o release oficial ${AGENT_VERSION} no banco.`);
       return { level: "ok", actual };
     }
+    // v3.25.42: deixou de ser warn-only — asar divergente BLOQUEIA a operação.
+    // Fail-open é preservado nos caminhos acima (sem cliente, sem asar, sem hash
+    // registrado ou erro de rede → 'skip'): só bloqueia quando o servidor tem um
+    // hash para ESTA versão e ele difere de fato do binário em execução.
     pushLog("error", "system",
-      `[SECURITY] asar DIVERGE do release oficial ${AGENT_VERSION} (banco ${String(rel.file_hash).slice(0, 12)}…, rodando ${actual.slice(0, 12)}…) — possível ASAR substituído. Continuando (warn-only).`);
+      `[SECURITY] app.asar adulterado — hash local ${actual} != hash registrado ${String(rel.file_hash).trim()}`);
     await reportTampering(cfg, "asar_server_mismatch", "critical",
       { version: AGENT_VERSION, source: "agent_releases" }, rel.file_hash, actual);
+    await blockAgentPermanently("asar_tampered",
+      `arquivo do agente foi adulterado na fazenda ${cfg?.farmName || cfg?.farmId || "?"}.`,
+      { version: AGENT_VERSION, expected: String(rel.file_hash).trim(), actual });
     return { level: "mismatch", expected: rel.file_hash, actual };
   } catch (e) {
     return { level: "skip", reason: "error", error: e && e.message };
@@ -8261,7 +8411,16 @@ function scheduleBackgroundAntiCloneCheck(cfg) {
           null, null);
       } catch (_) {}
 
-      // 3) Aguarda 60s antes de encerrar (garante envio do alerta)
+      // 3) v3.25.42: grava o kill-file ANTES de encerrar. Sem ele o watchdog .bat
+      // relançaria o clone a cada minuto — o agente tem que ficar MORTO até uma
+      // reconfiguração manual (apagar o agent-blocked.flag).
+      try {
+        await blockAgentPermanently("clone_detected",
+          `clone detectado na fazenda ${cfg?.farmName || cfg?.farmId || "?"} — hardware nao autorizado.`,
+          { changed: res.changed || [] });
+      } catch (_) {}
+
+      // 4) Aguarda 60s antes de encerrar (garante envio do alerta)
       setTimeout(() => {
         try { if (tray) tray.setToolTip("RENOV Agent - Erro de licença"); } catch (_) {}
         try { trayNotify("Renov Agent", "Erro de licença. Contate o suporte.", "error"); } catch (_) {}

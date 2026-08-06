@@ -1,7 +1,7 @@
 {
   "name": "gestor-de-bombas-key",
   "productName": "Gestor de Bombas Key",
-  "version": "3.25.41",
+  "version": "3.25.42",
   "description": "Gestor de Bombas Key — Bridge Serial RS-232 (Renov Tecnologia Agrícola®)",
   "main": "main.cjs",
   "author": {
@@ -28,6 +28,6 @@
     "bytenode": "^1.5.7",
     "electron": "^42.0.1",
     "electron-builder": "^25.1.8",
-    "javascript-obfuscator": "^4.1.1"
+    "javascript-obfuscator": "^4.2.2"
   }
 }
