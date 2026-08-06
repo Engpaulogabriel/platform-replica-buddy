@@ -45,8 +45,8 @@ echo.
 
 REM -- Nao instala em cima de um bloqueio de seguranca sem avisar -------------
 if exist "%DEST%\agent-blocked.flag" (
-  echo [AVISO] Existe um bloqueio de seguranca (agent-blocked.flag) no destino.
-  echo         Ele sera REMOVIDO por esta reinstalacao (equivale a autorizar o PC).
+  echo [AVISO] Existe um bloqueio de seguranca 'agent-blocked.flag' no destino.
+  echo         Ele sera REMOVIDO por esta reinstalacao - equivale a autorizar o PC.
   del /Q "%DEST%\agent-blocked.flag" >nul 2>&1
 )
 
@@ -131,11 +131,11 @@ REM   - Conta do usuario + /RP <senha>: preserva a config DPAPI do usuario e a
 REM     tela de Setup; use quando o PC ja foi configurado manualmente.
 set "WINPWD=%~2"
 if defined WINPWD (
-  echo       modo: conta de usuario %USERDOMAIN%\%USERNAME% (DPAPI preservado)
+  echo       modo: conta de usuario %USERDOMAIN%\%USERNAME% - DPAPI preservado
   schtasks /Create /TN "RenovAgent" /TR "\"%AGENT_EXE%\"" /SC ONSTART /RU "%USERDOMAIN%\%USERNAME%" /RP "%WINPWD%" /RL HIGHEST /F >nul 2>&1
   set "WINPWD="
 ) else (
-  echo       modo: SYSTEM (boot sem login, zero interacao)
+  echo       modo: SYSTEM - boot sem login, zero interacao
   schtasks /Create /TN "RenovAgent" /TR "\"%AGENT_EXE%\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul 2>&1
 )
 if errorlevel 1 (echo       [AVISO] falha ao criar RenovAgent) else (echo       OK)
