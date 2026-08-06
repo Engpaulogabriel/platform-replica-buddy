@@ -1,6 +1,6 @@
 @echo off
 REM ===========================================================================
-REM  RENOV Agent — Watchdog (v3.25.40)
+REM  RENOV Agent - Watchdog (v3.25.40)
 REM ---------------------------------------------------------------------------
 REM  Cenario-alvo: Starlink 200kbps, sem AnyDesk, sem acesso remoto ao desktop.
 REM  O agente TEM que voltar sozinho de qualquer situacao.

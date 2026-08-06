@@ -1,0 +1,7 @@
+# Scripts .bat/.cmd sao executados pelo interpretador do Windows: precisam de
+# CRLF. Sem esta regra o git normaliza as quebras de linha e o arquivo chega
+# ao PC da fazenda com LF — o cmd.exe engasga com blocos ( ... ) e rotulos
+# (:LABEL) terminados so em LF. `-text` desliga qualquer conversao: os bytes
+# commitados sao exatamente os bytes entregues, em qualquer OS.
+*.bat -text
+*.cmd -text
