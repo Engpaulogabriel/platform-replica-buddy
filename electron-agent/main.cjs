@@ -622,7 +622,7 @@ async function blockAgentPermanently(reason, humanMsg, details) {
   // Popup NÃO-bloqueante (showMessageBox é assíncrono; showErrorBox congelaria
   // o processo até alguém clicar — inaceitável em PC desatendido).
   try {
-    if (tray) tray.setToolTip("RENOV Agent - BLOQUEADO");
+    if (tray) setTrayStatus("BLOQUEADO");
     trayNotify("RENOV Agent - BLOQUEADO",
       "Arquivo do sistema foi modificado. Contate o suporte RENOV.", "error");
     void dialog.showMessageBox({
@@ -943,6 +943,8 @@ let tray = null;
 let setupWindow = null;
 let logWindow = null;
 let configWindow = null;
+// v3.25.46: rótulo de status exibido no menu do tray (o log NUNCA aparece em janela).
+let trayStatusLabel = "Iniciando...";
 let supabase = null;
 let comPort = null;
 let farmId = null;
@@ -4704,7 +4706,7 @@ function startBridge(portPath) {
             markBridgeAlive();
             startBridgeWatchdog();
             pushLog("info", "serial", `Bridge conectada em ${portPath}`);
-            if (tray) tray.setToolTip(`RENOV Agent - Online (${portPath})`);
+            if (tray) setTrayStatus(`Online (${portPath})`);
             resolve();
             continue;
           }
@@ -6836,40 +6838,18 @@ async function quitWithAuth() {
 }
 
 // --- Log window ---
-// item 2: exige senha ("Renov@Log2026") antes de abrir a janela de log.
+// v3.25.46 SEGURANÇA: a janela de log foi REMOVIDA por completo. O log expunha
+// frames TX/RX, endereços de PLC e o protocolo serial a qualquer pessoa que
+// abrisse o agente na fazenda. Não existe mais NENHUMA interface visual de log
+// (nem com senha — a senha só denunciava que o log existia). O log continua
+// sendo gravado APENAS em arquivo (%APPDATA%/logs cifrado por DPAPI, boot.log,
+// liveness.txt), protegido por NTFS (INSTALAR.bat: só SYSTEM/Administrators leem).
+// Estas funções viraram no-op para blindar qualquer caminho remanescente.
 async function showLogWindow() {
-  if (logWindow && !logWindow.isDestroyed()) {
-    logWindow.show();
-    logWindow.focus();
-    return;
-  }
-  try {
-    const r = await promptAuth("password");
-    if (!r) return; // cancelado
-    if ((r.password || "") !== LOG_VIEW_PASSWORD) {
-      try { trayNotify("Senha incorreta", "A senha para ver o log está incorreta."); } catch (_) {}
-      return;
-    }
-  } catch (_) { return; }
-  openLogWindow();
+  try { _bootLog("[SECURITY] showLogWindow() ignorado — janela de log removida (v3.25.46)"); } catch (_) {}
 }
-
 function openLogWindow() {
-  if (logWindow && !logWindow.isDestroyed()) { logWindow.show(); logWindow.focus(); return; }
-  logWindow = new BrowserWindow({
-    width: 720, height: 480,
-    title: "RENOV Agent - Log",
-    icon: path.join(__dirname, "icon.png"),
-    webPreferences: {
-      preload: path.join(__dirname, "log-preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  logWindow.loadFile(path.join(__dirname, "log.html")).catch((e) => {
-    _bootLog(`logWindow loadFile FAIL: ${e && e.stack || e}`);
-  });
-  logWindow.on("closed", () => { logWindow = null; });
+  try { _bootLog("[SECURITY] openLogWindow() ignorado — janela de log removida (v3.25.46)"); } catch (_) {}
 }
 
 // --- Config window ---
@@ -6908,7 +6888,7 @@ async function closeComPort() {
   processing = false;
   await stopBridge();
   pushLog("warn", "system", "Porta COM fechada manualmente pelo usuário");
-  if (tray) tray.setToolTip("RENOV Agent - Porta COM fechada");
+  if (tray) setTrayStatus("Porta COM fechada");
   return { success: true };
 }
 
@@ -6935,7 +6915,7 @@ async function openComPort(newPort) {
       void tickMarkTimeouts();
       pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, activeSweepTimeoutMs);
     }
-    if (tray) tray.setToolTip(`RENOV Agent - Online (${comPort})`);
+    if (tray) setTrayStatus(`Online (${comPort})`);
     return { success: true };
   } catch (e) {
     pushLog("error", "system", `Falha ao reabrir: ${e.message}`);
@@ -7930,7 +7910,7 @@ async function startAgent(cfg) {
       pushLog("error", "system",
         `[SECURITY] Agente BLOQUEADO desde ${blocked.at || "?"} (motivo: ${blocked.reason || "?"}). ` +
         `Operação não será iniciada. Remova ${BLOCK_FLAG_FILE} após autorização do suporte RENOV.`);
-      try { if (tray) tray.setToolTip("RENOV Agent - BLOQUEADO"); } catch (_) {}
+      try { if (tray) setTrayStatus("BLOQUEADO"); } catch (_) {}
       try {
         trayNotify("RENOV Agent - BLOQUEADO",
           "Arquivo do sistema foi modificado. Contate o suporte RENOV.", "error");
@@ -7979,7 +7959,7 @@ async function startAgent(cfg) {
       await startBridge(comPort);
     } catch (bridgeErr) {
       pushLog("error", "system", `Bridge falhou (COM-first): ${bridgeErr.message}`);
-      if (tray) { try { tray.setToolTip("RENOV Agent - ERRO Python"); } catch (_) {} }
+      if (tray) { try { setTrayStatus("ERRO Python"); } catch (_) {} }
       // NÃO retorna: segue p/ nuvem + retries; o watchdog de bridge tenta recuperar.
     }
 
@@ -8036,7 +8016,7 @@ async function startAgent(cfg) {
         "[SECURITY] Sem credenciais locais nem licença — reconfigure pelo Tray → 'Reconfigurar (login)'.");
       if (tray) {
         try {
-          tray.setToolTip("RENOV Agent - NÃO VINCULADO");
+          setTrayStatus("NÃO VINCULADO");
           if (typeof tray.displayBalloon === "function") {
             tray.displayBalloon({ title: "RENOV Agent",
               content: "Não vinculado a uma fazenda. Tray → 'Reconfigurar (login)'." });
@@ -8047,7 +8027,7 @@ async function startAgent(cfg) {
     }
     if (!supabase) {
       // Boot offline COM cache local: segue para o bridge. NÃO bloqueia.
-      if (tray) { try { tray.setToolTip("RENOV Agent - MODO LOCAL (sem nuvem)"); } catch (_) {} }
+      if (tray) { try { setTrayStatus("MODO LOCAL (sem nuvem)"); } catch (_) {} }
       pushLog("warn", "system",
         "[SECURITY] Nuvem indisponível no boot — iniciando em MODO LOCAL (COM/serial opera normalmente). " +
         "Reconexão + validação de licença rodam em background (reconnect 15s, grace offline 72h).");
@@ -8060,7 +8040,7 @@ async function startAgent(cfg) {
       if (licenseKillSwitchTriggered) {
         pushLog("error", "system",
           "[SECURITY] Licença revogada pelo servidor — agente NÃO iniciará bridge.");
-        if (tray) tray.setToolTip("RENOV Agent - LICENÇA REVOGADA");
+        if (tray) setTrayStatus("LICENÇA REVOGADA");
         return;
       }
     } else {
@@ -8159,7 +8139,7 @@ async function startAgent(cfg) {
     try { scheduleBackgroundAntiCloneCheck(cfg); } catch (_) {}
   } catch (e) {
     pushLog("error", "system", `Falha ao iniciar (${startupStep}): ${formatError(e)}`);
-    if (tray) tray.setToolTip("RENOV Agent - ERRO");
+    if (tray) setTrayStatus("ERRO");
   } finally {
     startingAgent = false;
   }
@@ -8182,18 +8162,45 @@ function createTray() {
   }
 
   tray = new Tray(icon);
-  const contextMenu = Menu.buildFromTemplate([
-    { label: `RENOV Agent v${AGENT_VERSION}`, enabled: false },
-    { type: "separator" },
-    { label: "Ver Log", click: () => showLogWindow() },
-    { label: "Configurações", click: () => showConfigWindow() },
-    { label: "Reconfigurar (login)", click: () => { void reconfigureWithAuth(); } },
-    { type: "separator" },
-    { label: "Sair (login)", click: () => { void quitWithAuth(); } },
-  ]);
-  tray.setToolTip("RENOV Agent - Iniciando...");
-  tray.setContextMenu(contextMenu);
-  tray.on("double-click", () => showLogWindow());
+  buildTrayMenu();
+  tray.setToolTip(`RENOV Agent - ${trayStatusLabel}`);
+  // v3.25.46: NENHUM gatilho de log. O duplo-clique (que abria a janela de log)
+  // foi removido — vira no-op silencioso para não haver caminho para o log.
+  tray.on("double-click", () => {});
+  // Item 5: ao iniciar (inclusive manualmente), só um balão informativo que some.
+  try {
+    if (typeof tray.displayBalloon === "function") {
+      tray.displayBalloon({ title: "RENOV Agent", content: "Agente RENOV iniciado." });
+    }
+  } catch (_) {}
+}
+
+// v3.25.46: menu MÍNIMO do tray — sem "Ver Log", sem "Abrir Console", sem
+// "Configurações". Só versão, status atual e ações protegidas por login.
+function buildTrayMenu() {
+  if (!tray) return;
+  try {
+    const menu = Menu.buildFromTemplate([
+      { label: `RENOV Agent — v${AGENT_VERSION}`, enabled: false },
+      { label: `Status: ${trayStatusLabel}`, enabled: false },
+      { type: "separator" },
+      { label: "Reconfigurar (login)", click: () => { void reconfigureWithAuth(); } },
+      { label: "Sair (login)", click: () => { void quitWithAuth(); } },
+    ]);
+    tray.setContextMenu(menu);
+  } catch (_) {}
+}
+
+// Atualiza o status mostrado no tray (tooltip no hover + linha do menu). Usado no
+// lugar dos antigos tray.setToolTip para que o menu reflita o estado atual.
+function setTrayStatus(label) {
+  trayStatusLabel = String(label || "").trim() || "—";
+  try {
+    if (tray) {
+      tray.setToolTip(`RENOV Agent - ${trayStatusLabel}`);
+      buildTrayMenu();
+    }
+  } catch (_) {}
 }
 
 // =====================================================================
@@ -8651,7 +8658,7 @@ function scheduleBackgroundAntiCloneCheck(cfg) {
 
       // 4) Aguarda 60s antes de encerrar (garante envio do alerta)
       setTimeout(() => {
-        try { if (tray) tray.setToolTip("RENOV Agent - Erro de licença"); } catch (_) {}
+        try { if (tray) setTrayStatus("Erro de licença"); } catch (_) {}
         try { trayNotify("Renov Agent", "Erro de licença. Contate o suporte.", "error"); } catch (_) {}
         try { app.exit(1); } catch (_) { process.exit(1); }
       }, 60_000);
