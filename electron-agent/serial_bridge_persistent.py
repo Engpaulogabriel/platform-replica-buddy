@@ -473,6 +473,34 @@ def main():
                 log(f"[PY FRAME] {frame_str} (montado em {chunk_count_this_frame} chunk(s))")
                 chunk_count_this_frame = 0  # reset para próximo frame
 
+            # v3.25.47: respostas NAO-frame (PING/STATUS do ESP: "OK:...", "PONG",
+            # "ESP...") NAO terminam em _ETX_] e eram descartadas pelo timeout de 8s,
+            # entao PING/STATUS davam timeout no Terminal Serial. Emite qualquer LINHA
+            # COMPLETA (terminada em \r ou \n) que NAO contenha '[' (nao e frame nem
+            # frame parcial) como RXRAW: — o agente entrega isso SO ao Terminal/sniff,
+            # sem passar pelo pipeline de telemetria. Roda DEPOIS da extracao de frames.
+            while True:
+                nl = -1
+                for _i in range(len(rx_buf)):
+                    if rx_buf[_i] == "\r" or rx_buf[_i] == "\n":
+                        nl = _i
+                        break
+                if nl == -1:
+                    break
+                _line = rx_buf[:nl].strip()
+                if "[" in _line:
+                    # a linha contem inicio de frame — NAO consome (poderia corromper
+                    # um frame parcial com ruido). Para; o _ETX_]/timeout cuidam.
+                    break
+                # linha nao-frame completa: consome o terminador (\r/\n seguidos)
+                _consume = nl + 1
+                while _consume < len(rx_buf) and rx_buf[_consume] in ("\r", "\n"):
+                    _consume += 1
+                rx_buf = rx_buf[_consume:]
+                if _line:
+                    out(f"RXRAW:{_line}")
+                    log(f"[PY RESP] linha nao-frame -> RXRAW: {_line}")
+
         # Timeout de buffer parcial: se ficou dado preso > 8s sem completar, descarta
         # (segurança — o timeout de polling de 13s no main.cjs cuida do retry)
         if rx_buf and rx_last_data_time > 0 and (time.time() - rx_last_data_time) > RX_BUFFER_TIMEOUT:

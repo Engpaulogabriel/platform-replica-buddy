@@ -4776,6 +4776,20 @@ function startBridge(portPath) {
             } catch (_) {}
             // Frame recebido da Serial -> processar
             handleRxFrame(trimmed.substring(3));
+          } else if (trimmed.startsWith("RXRAW:")) {
+            // v3.25.47: resposta NÃO-frame do ESP (PING/STATUS: "OK:...", "PONG",
+            // "ESP..." — não terminam em _ETX_]). Entregue SÓ ao Terminal Serial /
+            // sniff; NÃO entra no pipeline de telemetria (evita casar falso com
+            // inflightManual ou virar "frame desconhecido").
+            markBridgeAlive();
+            lastRxTimestamp = Date.now();
+            const _rawResp = trimmed.substring(6);
+            try {
+              const _now = Date.now();
+              if (serialCaptureBuf) serialCaptureBuf.frames.push({ frame: _rawResp, at: _now });
+              if (serialSniffBuf) serialSniffBuf.frames.push({ frame: _rawResp, at: _now });
+            } catch (_) {}
+            pushLog("info", "rx", `[RXRAW] ${_rawResp}`, _rawResp);
           } else if (trimmed === "TX_OK") {
             markBridgeAlive();
             pushLog("debug", "serial", "TX_OK");
