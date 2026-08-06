@@ -20,9 +20,11 @@ import {
 import { notify } from "@/lib/notify";
 import { TerminalSquare, Send, Radio, Loader2, Trash2, Power, PowerOff, Search, Radar } from "lucide-react";
 import {
-  enqueueAgentCommand, runAgentCommand, watchAgentCommand,
+  enqueueAgentCommand, watchAgentCommand,
   type SerialTerminalData, type SerialSniffData,
 } from "@/lib/agentCommands";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Farm { farm_id: string; name: string; }
 interface Equip {
@@ -63,12 +65,23 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
     setLog((prev) => [{ kind, text, at: Date.now() }, ...prev].slice(0, MAX_LOG));
 
   const loadFarms = async () => {
+    // Fonte 1: RPC de overview (mesma do Controle Remoto). Fallback: tabela farms.
+    let list: Farm[] = [];
     const { data, error } = await supabase.rpc("platform_farms_overview" as never);
-    if (error) { notify.fail("Terminal Serial", error.message); return; }
-    const list = (((data as unknown) as { farm_id: string; name: string }[]) ?? [])
-      .map((f) => ({ farm_id: f.farm_id, name: f.name }));
+    if (!error && Array.isArray(data)) {
+      list = (data as unknown as { farm_id?: string; id?: string; name: string }[])
+        .map((f) => ({ farm_id: (f.farm_id ?? f.id) as string, name: f.name }))
+        .filter((f) => f.farm_id);
+    }
+    if (list.length === 0) {
+      const { data: fdata, error: ferr } = await supabase
+        .from("farms").select("id,name").order("name");
+      if (ferr) { push("err", `Nao consegui carregar fazendas: ${ferr.message}`); notify.fail("Terminal Serial", ferr.message); return; }
+      list = ((fdata as { id: string; name: string }[]) ?? []).map((f) => ({ farm_id: f.id, name: f.name }));
+    }
     setFarms(list);
     if (!farmId && list.length) setFarmId(list[0].farm_id);
+    if (list.length === 0) push("err", "Nenhuma fazenda disponivel para o seu usuario.");
   };
 
   const loadEquips = async (id: string) => {
@@ -98,29 +111,59 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
   const clampTimeout = (n: number) => Math.max(500, Math.min(MAX_TIMEOUT_MS, n || 5_000));
 
   // Envia um comando de terminal (raw ou equipment) e desenha o resultado.
+  // Insere DIRETO em agent_commands (kind='serial_terminal') e faz polling do
+  // campo `result` a cada 2s por ate 30s. Todo erro vira uma linha VERMELHA no
+  // log — nunca falha em silencio. (agent_commands NAO tem coluna `response`; o
+  // agente grava a saida da serial em `result.data.responses`.)
   const sendTerminal = async (payload: Record<string, unknown>, label: string) => {
-    if (!farmId) return;
+    if (!farmId) { push("err", "Selecione uma fazenda antes de enviar."); return; }
     setBusy(true);
-    push("tx", `${label}  ⏎`); // ⏎ = CR anexado pelo sistema
+    push("tx", `${label}  ⏎`); // ⏎ = CR anexado pelo agente
     try {
-      const { result } = await runAgentCommand({
-        farmId, kind: "serial_terminal", payload,
-        timeoutMs: clampTimeout(Number(payload.timeout_ms)) + 8_000, // margem p/ ida-e-volta
-        expiresInSec: 60,
-      });
-      if (result.status === "done") {
-        const d = (result.result?.data as SerialTerminalData) ?? null;
-        if (d && d.responses.length) {
-          d.responses.forEach((r) => push("rx", r));
-        } else {
-          push("info", `(sem resposta em ${d?.elapsed_ms ?? "?"}ms)`);
-        }
-        if (d?.parsed) push("info", `Estado: ${d.parsed.status.toUpperCase()}`);
-      } else if (result.status === "expired") {
-        push("err", "Agente não respondeu (offline?)");
-      } else {
-        push("err", result.error_message ?? "erro desconhecido");
+      const { data: userRes } = await supabase.auth.getUser();
+      const { data: ins, error: insErr } = await supabase
+        .from("agent_commands")
+        .insert({
+          farm_id: farmId,
+          kind: "serial_terminal",
+          payload: payload as never,
+          created_by: userRes?.user?.id ?? null,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        })
+        .select("id")
+        .single();
+      if (insErr || !ins) {
+        push("err", `Falha ao enviar: ${insErr?.message ?? "sem id retornado"}`);
+        return;
       }
+
+      // Polling do resultado: 2s de intervalo, ate 30s.
+      const deadline = Date.now() + MAX_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        await sleep(2_000);
+        const { data: row } = await supabase
+          .from("agent_commands")
+          .select("status,result,error_message")
+          .eq("id", ins.id)
+          .maybeSingle();
+        if (!row) continue;
+        if (row.status === "done") {
+          const d = ((row.result as { data?: SerialTerminalData } | null)?.data) ?? null;
+          if (d && d.responses && d.responses.length) {
+            d.responses.forEach((r) => push("rx", r));
+          } else {
+            push("info", `(sem resposta da serial em ${d?.elapsed_ms ?? "?"}ms)`);
+          }
+          if (d?.parsed) push("info", `Estado: ${d.parsed.status.toUpperCase()}`);
+          return;
+        }
+        if (row.status === "error" || row.status === "expired") {
+          push("err", row.error_message ?? "agente retornou erro");
+          return;
+        }
+        // pending/ack/executing -> continua aguardando
+      }
+      push("err", "TIMEOUT — sem resposta em 30s (agente offline ou serial ocupada?)");
     } catch (e) {
       push("err", (e as Error).message);
     } finally {
@@ -318,9 +361,9 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
             {log.map((l, i) => (
               <div key={i} className={
                 l.kind === "tx" ? "text-emerald-400"
-                  : l.kind === "rx" ? "text-neutral-100"
+                  : l.kind === "rx" ? "text-sky-400"
                     : l.kind === "err" ? "text-red-400"
-                      : "text-sky-400"
+                      : "text-neutral-400"
               }>
                 <span className="text-neutral-500">[{ts(l.at)}]</span>{" "}
                 <span className="text-neutral-500">{l.kind === "tx" ? "TX" : l.kind === "rx" ? "RX" : l.kind === "err" ? "!!" : "··"}</span>{" "}
