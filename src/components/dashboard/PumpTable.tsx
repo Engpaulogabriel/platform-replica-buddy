@@ -59,6 +59,10 @@ export interface Pump {
    * Evita o bug "liga e desliga sozinho" causado por leituras de polling antigas.
    */
   lastUserConfirmedAt?: number;
+  /** PROBLEMA 2 — latch anti-oscilação: epoch (ms) em que o card confirmou DESLIGADO.
+   *  Enquanto <30s e a intenção continuar desligar (desired_running=false), um RX
+   *  transitório de "ligado" (pulso {1}→{0} do desligamento forçado) NÃO reabre o card. */
+  confirmedOffAt?: number;
   /** Origem da última mudança de estado da bomba: 'remote' (plataforma) ou 'local' (chave física). */
   actuationOrigin?: "remote" | "local" | "whatsapp" | "tech_terminal" | null;
   /** Timestamp ISO em que o operador reconheceu o aviso LOCAL (dismiss via double-click no badge). */

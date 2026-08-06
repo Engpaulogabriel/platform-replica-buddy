@@ -46,6 +46,36 @@ const STATUS_REFRESH_MS = 30_000;
 // segurança: se o comando ficou pending/sent além de 5min (agente pode ter
 // crashado), o card passa a exibir ERRO em vez de ficar preso em "Ligando".
 const PENDING_MAX_MS = 300_000;
+// PROBLEMA 2 — latch anti-oscilação do desligamento forçado. Assim que o card
+// confirma DESLIGADO (last_outputs_state=0), se um RX transitório voltar a mostrar
+// 1 mas a INTENÇÃO ainda é desligar (desired_running=false — ex.: o pulso {1}→{0}
+// da sequência de desligamento forçado), o card NÃO volta para "Ligado"/"Desligando"
+// dentro desta janela. Um religamento LOCAL real muda desired_running=true (LOCAL
+// OVERRIDE no agente) e libera o latch imediatamente — então não escondemos
+// acionamento genuíno.
+const CONFIRMED_OFF_LATCH_MS = 30_000;
+
+// Aplica o latch: recebe o estado calculado + snapshots e devolve running/pending/
+// confirmedOffAt já latcheados. `oldRunning` = running visual anterior.
+type PumpPending = "turning_on" | "turning_off" | "resetting" | "error" | "comm_fail" | undefined;
+function applyConfirmedOffLatch(
+  running: boolean,
+  pending: PumpPending,
+  oldRunning: boolean | undefined,
+  oldConfirmedOffAt: number | undefined,
+  desiredRunning: boolean | null | undefined,
+): { running: boolean; pending: PumpPending; confirmedOffAt: number | undefined } {
+  let confirmedOffAt = oldConfirmedOffAt;
+  // Acabou de confirmar desligado (true → false): marca o instante.
+  if (!running && oldRunning === true) confirmedOffAt = Date.now();
+  // Intenção voltou a LIGAR (religamento real) → libera o latch.
+  if (desiredRunning === true) confirmedOffAt = undefined;
+  // Dentro da janela + intenção ainda desligar + RX transitório mostra ligado → segura Desligado.
+  if (running && confirmedOffAt && (Date.now() - confirmedOffAt < CONFIRMED_OFF_LATCH_MS) && desiredRunning === false) {
+    return { running: false, pending: undefined, confirmedOffAt };
+  }
+  return { running, pending, confirmedOffAt };
+}
 
 export type EquipmentCommunicationStatus = "online" | "unstable" | "offline";
 
@@ -417,7 +447,14 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
         }
         // Sem pending → realidade física é a verdade absoluta (running = cloudRunning).
 
-
+        // PROBLEMA 2 — latch anti-oscilação (ver applyConfirmedOffLatch).
+        const _latch = applyConfirmedOffLatch(
+          running, pending, old?.running, old?.confirmedOffAt,
+          typeof e.desired_running === "boolean" ? e.desired_running : null,
+        );
+        running = _latch.running;
+        pending = _latch.pending;
+        const confirmedOffAt = _latch.confirmedOffAt;
 
         const horimetroHoras = horimetroMap[e.id];
         const horimetroLabel = horimetroHoras != null ? `${horimetroHoras.toFixed(1)}h` : "—";
@@ -435,6 +472,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
             communicationStatus,
             running,
             pending,
+            confirmedOffAt,
             pendingStartedAt: pending
               ? (old?.pendingStartedAt ?? Date.now())
               : undefined,
@@ -557,6 +595,15 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
           }
 
 
+          // PROBLEMA 2 — latch anti-oscilação (mesma regra do bloco Realtime).
+          const _latch2 = applyConfirmedOffLatch(
+            running, pending, p.running, p.confirmedOffAt,
+            typeof cloudEq.desired_running === "boolean" ? cloudEq.desired_running : null,
+          );
+          running = _latch2.running;
+          pending = _latch2.pending;
+          const confirmedOffAt = _latch2.confirmedOffAt;
+
           // limpa lastUserConfirmedAt quando a nuvem confirmar
           const lastCommMs = cloudEq.last_communication
             ? new Date(cloudEq.last_communication).getTime()
@@ -626,6 +673,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
             communicationStatus,
             running,
             pending,
+            confirmedOffAt,
             pendingStartedAt: pending
               ? (p.pendingStartedAt ?? Date.now())
               : undefined,
