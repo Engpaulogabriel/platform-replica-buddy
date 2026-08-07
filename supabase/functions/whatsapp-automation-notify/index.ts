@@ -130,10 +130,25 @@ function templateParamsFor(name: string, params: string[]): string[] {
 // 132000 ("number of params (1) != expected (4)") e NADA é entregue fora da
 // janela de 24h. Este helper monta os 4 slots a partir da mensagem + metadata.
 function buildAlertaEquipamentoParams(message: string, md: Record<string, unknown>): string[] {
-  const titulo = String((md?.farm_name as string) || "Notificação");
-  const equip = String((md?.equipment_name as string) || "Sistema");
-  const tipo = String((md?.change_type as string) || (md?.alert_type as string) || "Notificação");
-  const detalhes = message;
+  // A mensagem já vem composta: "{título}\n{fazenda}\n...\n{horário}". Extraímos os
+  // 4 slots do template (⚠️ Alerta RENOV — {{1}} / Equipamento: {{2}} / Tipo: {{3}} /
+  // Detalhes: {{4}}) para preencher com DADO REAL (evita "-"):
+  //   {{1}} = 1ª linha (ação/título)   {{4}} = demais linhas (fazenda+por+horário)
+  //   {{2}} = equipamento (metadata)   {{3}} = tipo humanizado (metadata)
+  // OBS: params de template NÃO aceitam \n (regra Meta) — sanitizeTplParam achata;
+  // por isso o layout multilinha do formato antigo só é possível no TEXTO (<24h).
+  const lines = String(message).split("\n").map((l) => l.trim()).filter(Boolean);
+  const titulo = lines[0] || String((md?.farm_name as string) || "Notificação");
+  const detalhes = lines.slice(1).join(" · ") || String((md?.farm_name as string) || message);
+  const equip = String((md?.equipment_name as string) || "Bombas");
+  const tipoRaw = String((md?.change_type as string) || (md?.alert_type as string) || "Notificação");
+  const tipoMap: Record<string, string> = {
+    equipment_state: "Acionamento", equipment_state_batch: "Acionamento",
+    schedule_change: "Programação", mode_change: "Modo automático",
+    maintenance_block: "Manutenção", maintenance_release: "Manutenção",
+    local: "Acionamento local", local_change: "Acionamento local",
+  };
+  const tipo = tipoMap[tipoRaw] || tipoRaw;
   return [titulo, equip, tipo, detalhes].map((p) => sanitizeTplParam(p).slice(0, 1000));
 }
 
