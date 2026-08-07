@@ -2066,6 +2066,29 @@ async function resolveEquipmentsForBase(
   });
 }
 
+// v3.25.x — sugere equipamentos parecidos DA MESMA fazenda quando o match falha.
+// Prioriza equipamentos que contêm o(s) número(s) pedido(s); senão os que casam a base.
+async function suggestEquipments(farmId: string, base: string, nums: number[]): Promise<string> {
+  try {
+    const { data } = await supabase.from("equipments").select("name").eq("farm_id", farmId).limit(80);
+    const names = ((data ?? []) as any[]).map((r) => String(r.name ?? "")).filter(Boolean);
+    if (!names.length) return "";
+    let cand = names;
+    if (nums.length) {
+      const byNum = names.filter((n) => nums.some((x) => extractNumbers(n).includes(x)));
+      if (byNum.length) cand = byNum;
+    } else if (base) {
+      const b = stripAccents(String(base).toLowerCase());
+      const byBase = names.filter((n) => stripAccents(n.toLowerCase()).includes(b));
+      if (byBase.length) cand = byBase;
+    }
+    const top = cand.slice(0, 5);
+    return `\n\n🔎 Parecidos nesta fazenda: ${top.join(", ")}.\nEnvie *status* para ver todos.`;
+  } catch (_) {
+    return "";
+  }
+}
+
 
 function computeEqState(eq: any): { estado: string; isOffline: boolean; inMaintenance: boolean } {
   const inMaintenance = eq?.maintenance_mode === true;
@@ -9270,6 +9293,27 @@ async function processMessage(from: string, text: string, location: WaLocation =
     return;
   }
 
+  // v3.25.x — FAZENDA MENCIONADA NO TEXTO tem prioridade sobre a padrão do operador.
+  // Ex.: "ligar poço lt 07 fazenda pérola" → busca os equipamentos da PÉROLA, não da
+  // fazenda padrão. findFarmMentionInText é fuzzy (case/acento-insensível). Só troca
+  // se o operador tiver acesso (super_admin ou é a fazenda dele).
+  try {
+    const { data: allFarms } = await supabase.from("farms").select("id, name");
+    const farmsList = ((allFarms ?? []) as any[]).filter((f) => f?.id && f?.name) as Array<{ id: string; name: string }>;
+    const mentioned = findFarmMentionInText(text, farmsList);
+    if (mentioned && mentioned.id !== farmId) {
+      const hasAccess = isSuperAdmin(op) || op.farm_id === mentioned.id || op.default_farm_id === mentioned.id;
+      if (hasAccess) {
+        console.log(`[WA] fazenda mencionada no texto: "${mentioned.name}" → sobrepõe padrão (${farmId})`);
+        farmId = mentioned.id;
+      } else {
+        console.log(`[WA] "${mentioned.name}" mencionada mas ${op.name ?? phone} sem acesso — mantém padrão`);
+      }
+    }
+  } catch (e) {
+    console.warn("[WA] detecção de fazenda no texto falhou (ignorado):", (e as Error).message);
+  }
+
   // ===== AUTOMAÇÕES INDEPENDENTES (Fase 3 - WhatsApp commands) =====
   if (await handleAutomacoesCommand(text, farmId, op, phone, from)) return;
 
@@ -9803,7 +9847,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
   if (cmd.kind === "set_auto") {
     const eqs = await resolveEquipmentsForBase(farmId, cmd.base, cmd.nums);
     if (!eqs.length) {
-      await sendWhatsAppText(from, `❓ Equipamento "${cmd.base}${cmd.nums.length ? " " + cmd.nums.join(",") : ""}" não encontrado.`, farmId);
+      await sendWhatsAppText(from, `❓ Equipamento "${cmd.base}${cmd.nums.length ? " " + cmd.nums.join(",") : ""}" não encontrado.` + (await suggestEquipments(farmId, cmd.base, cmd.nums)), farmId);
       return;
     }
     if (cmd.enable) {
@@ -9947,7 +9991,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
     const { base, nums } = cmd.target;
     const eqs = await resolveEquipmentsForBase(farmId, base, nums);
     if (!eqs.length) {
-      await sendWhatsAppText(from, `❓ Equipamento "${base}${nums.length ? " " + nums.join(",") : ""}" não encontrado.`, farmId);
+      await sendWhatsAppText(from, `❓ Equipamento "${base}${nums.length ? " " + nums.join(",") : ""}" não encontrado.` + (await suggestEquipments(farmId, base, nums)), farmId);
       return;
     }
     const lines: string[] = [];
@@ -10089,7 +10133,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
     const eqs = await resolveEquipmentsForBase(farmId, cmd.base, cmd.nums);
     if (!eqs.length) {
       const nLabel = cmd.nums.length ? ` ${cmd.nums.join(",")}` : "";
-      await sendWhatsAppText(from, `❓ Equipamento "${cmd.base}${nLabel}" não encontrado.`, farmId);
+      await sendWhatsAppText(from, `❓ Equipamento "${cmd.base}${nLabel}" não encontrado.` + (await suggestEquipments(farmId, cmd.base, cmd.nums)), farmId);
       return;
     }
     const days = (cmd.days && cmd.days.length) ? cmd.days : ["mon", "tue", "wed", "thu", "fri"];
@@ -10199,7 +10243,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
   if (cmd.kind === "del_schedule") {
     const eqs = await resolveEquipmentsForBase(farmId, cmd.base, cmd.nums);
     if (!eqs.length) {
-      await sendWhatsAppText(from, `❓ Equipamento "${cmd.base} ${cmd.nums.join(",")}" não encontrado.`, farmId);
+      await sendWhatsAppText(from, `❓ Equipamento "${cmd.base} ${cmd.nums.join(",")}" não encontrado.` + (await suggestEquipments(farmId, cmd.base, cmd.nums)), farmId);
       return;
     }
     const dayFilter = cmd.days && cmd.days.length ? new Set(cmd.days) : null;
@@ -10303,7 +10347,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
     const eqs = await resolveEquipmentsForBase(farmId, cmd.base, cmd.nums);
     if (!eqs.length) {
       const nLabel = cmd.nums.length ? ` ${cmd.nums.join(",")}` : "";
-      await sendWhatsAppText(from, `❓ Equipamento "${cmd.base}${nLabel}" não encontrado.`, farmId);
+      await sendWhatsAppText(from, `❓ Equipamento "${cmd.base}${nLabel}" não encontrado.` + (await suggestEquipments(farmId, cmd.base, cmd.nums)), farmId);
       return;
     }
     eqs.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name), "pt-BR", { numeric: true }));
