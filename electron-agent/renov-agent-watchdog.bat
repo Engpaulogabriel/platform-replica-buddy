@@ -58,15 +58,13 @@ if exist "%WDLOG%" for %%F in ("%WDLOG%") do if %%~zF GTR 1048576 (
   ren "%WDLOG%" "watchdog.log.1" >NUL 2>&1
 )
 
-REM -- BLOQUEIO DE SEGURANCA: clone detectado ou app.asar adulterado ---------
-REM  O agente grava agent-blocked.flag e encerra de proposito. Relancar aqui
-REM  ressuscitaria um agente comprometido a cada minuto. Fica MORTO ate alguem
-REM  apagar o arquivo (reconfiguracao autorizada pelo suporte RENOV).
-if exist "%BLOCKFLAG%" (
-  call :LOG "BLOQUEIO DE SEGURANCA ativo (agent-blocked.flag) - NAO relancando"
-  endlocal
-  exit /b 0
-)
+REM -- v3.25.48: O WATCHDOG NAO VERIFICA MAIS agent-blocked.flag --------------
+REM  Antes, se o flag existisse, o watchdog NAO relancava - e um falso positivo
+REM  de seguranca (asar/clone) deixava a fazenda parada indefinidamente sem
+REM  acesso remoto. Agora o agente decide sozinho no boot: a v3.25.48 tem
+REM  enforcement OFF + self-heal (apaga o flag e inicia). Se o agente morreu, o
+REM  watchdog SEMPRE relanca; quem decide operar ou nao e o proprio agente.
+REM  (Removemos tambem a exclusao do flag aqui - o agente faz o self-heal.)
 
 REM Esta rodando?
 tasklist /FI "IMAGENAME eq %AGENT_NAME%" 2>NUL | find /I "%AGENT_NAME%" >NUL

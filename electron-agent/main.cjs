@@ -2222,10 +2222,13 @@ async function checkForceRebootInsideHeartbeat() {
       Accept: "application/json",
       "Content-Type": "application/json",
     };
+    // v3.25.48: além de agent_restart, cobre reboot_agent e unblock_agent — este
+    // caminho roda DENTRO do heartbeat (HTTP puro), então funciona mesmo se o
+    // Realtime/poll de agent_commands cair OU se o agente estiver bloqueado.
     const query = new URLSearchParams({
-      select: "id,created_at",
+      select: "id,created_at,kind",
       farm_id: `eq.${farmId}`,
-      kind: "eq.agent_restart",
+      kind: "in.(agent_restart,reboot_agent,unblock_agent)",
       status: "eq.pending",
       created_at: `gte.${new Date(Date.now() - 300_000).toISOString()}`,
       order: "created_at.desc",
@@ -2264,8 +2267,13 @@ async function checkForceRebootInsideHeartbeat() {
       "force-reboot heartbeat PATCH",
       4_000,
     ).catch(() => null);
-    try { pushLog("warn", "system", "[FORCE-REBOOT] Comando detectado via HTTP polling no heartbeat"); } catch (_) {}
-    try { console.log("[FORCE-REBOOT] Comando detectado via HTTP polling no heartbeat"); } catch (_) {}
+    try { pushLog("warn", "system", `[FORCE-REBOOT] Comando ${cmd.kind} detectado via HTTP polling no heartbeat`); } catch (_) {}
+    try { console.log(`[FORCE-REBOOT] Comando ${cmd.kind} detectado via HTTP polling no heartbeat`); } catch (_) {}
+    // v3.25.48: unblock_agent (ou qualquer restart remoto) limpa o kill-file e o
+    // estado de bloqueio antes do relaunch — garante que o agente volte operando
+    // mesmo que tivesse sido bloqueado por segurança.
+    try { fs.unlinkSync(BLOCK_FLAG_FILE); } catch (_) {}
+    try { agentBlocked = false; licenseKillSwitchTriggered = false; antiCloneTriggered = false; machineMismatchStrikes = 0; } catch (_) {}
     setTimeout(() => { void relaunchAgent("manual_restart", 0); }, 250);
   } catch (_) {}
 }
@@ -7546,8 +7554,11 @@ async function handleAgentCommand(cmd) {
       }
 
       case "agent_restart":
+      case "reboot_agent":
       case "restart_agent": {
-        // v3.25.39: aceita os dois kinds (restart_agent = alias da plataforma web).
+        // v3.25.39: aceita os kinds (restart_agent/reboot_agent = aliases da web).
+        // v3.25.48: funciona MESMO com o agente bloqueado — handleAgentCommand não
+        // checa agentBlocked e o poll HTTP (tickAgentCommandPoll) segue ativo.
         pushLog("warn", "system", "[REMOTE] Restart solicitado via plataforma web. Reiniciando...");
         // marca done ANTES de reiniciar (garante o PATCH antes do relaunch)
         await resolveAgentCommand(cmd.id, "done", {
@@ -7555,6 +7566,26 @@ async function handleAgentCommand(cmd) {
           data: { restarting: true },
         });
         setTimeout(() => { void relaunchAgent("manual_restart", 0); }, 800);
+        break;
+      }
+
+      case "unblock_agent": {
+        // v3.25.48: DESTRAVA o agente remotamente mesmo se ele entrou em bloqueio
+        // de segurança. Apaga o kill-file, zera o estado de bloqueio em memória e
+        // reinicia limpo (com self-heal + enforcement off, sobe operando 100%).
+        // Processado mesmo com agentBlocked=true (o switch não checa o flag).
+        pushLog("warn", "system", "[REMOTE] Unblock solicitado via plataforma web — limpando bloqueio e reiniciando.");
+        try { fs.unlinkSync(BLOCK_FLAG_FILE); } catch (_) {}
+        agentBlocked = false;
+        licenseKillSwitchTriggered = false;
+        antiCloneTriggered = false;
+        machineMismatchStrikes = 0;
+        pollingPaused = false;
+        await resolveAgentCommand(cmd.id, "done", {
+          duration_ms: Date.now() - startedAt,
+          data: { unblocked: true, restarting: true },
+        });
+        setTimeout(() => { void relaunchAgent("remote_unblock", 0); }, 800);
         break;
       }
 

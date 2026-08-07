@@ -18,6 +18,9 @@ export type AgentCmdKind =
   | "resume_polling"
   | "list_ports"
   | "agent_restart"
+  // v3.25.48 — controle remoto de bloqueio/restart pela plataforma
+  | "reboot_agent"
+  | "unblock_agent"
   | "update_agent"
   | "force_reboot"
   | "force_rollback"

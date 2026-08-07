@@ -5596,6 +5596,8 @@ export type Database = {
         | "list_ports"
         | "update_agent"
         | "agent_restart"
+        | "reboot_agent"
+        | "unblock_agent"
         | "force_reboot"
         | "force_rollback"
         | "start_log_stream"
@@ -5787,6 +5789,8 @@ export const Constants = {
         "list_ports",
         "update_agent",
         "agent_restart",
+        "reboot_agent",
+        "unblock_agent",
         "force_reboot",
         "force_rollback",
         "start_log_stream",

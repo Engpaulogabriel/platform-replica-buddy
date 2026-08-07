@@ -12,6 +12,7 @@ import { notify } from "@/lib/notify";
 import {
   Power, Trash2, MessageSquare, ToggleLeft, RefreshCw, Send, AlertOctagon, AlertTriangle, Info,
   Cable, RotateCw, ListChecks, PauseCircle, PlayCircle, Loader2, Zap,
+  ShieldCheck, LockOpen, KeyRound, CheckCircle2, WifiOff,
 } from "lucide-react";
 import { enqueueAgentCommand, runAgentCommand, type AgentCmdKind, type AgentCmdResult } from "@/lib/agentCommands";
 import { useSiteHealth } from "@/hooks/useSiteHealth";
@@ -150,6 +151,46 @@ export default function PlatformRemoteControl({ isAdmin }: { isAdmin: boolean })
       setBridgeBusy(null);
     }
   }
+  // ── v3.25.48 — Segurança & Recuperação do Agente ──
+  // Botões que funcionam MESMO com o agente bloqueado (o handler no agente não
+  // checa agentBlocked e o poll HTTP segue ativo). unblock_agent limpa o kill-file
+  // + agentBlocked e reinicia operando.
+  const restartAgent = guard("sec-restart", async () => {
+    const id = await enqueueAgentCommand({ farmId, kind: "agent_restart", payload: {}, expiresInSec: 300 });
+    notify.ok("Agente", `Reinício enfileirado · cmd ${id.slice(0, 8)}. O agente reinicia em até ~30s.`);
+  });
+  const unblockAgent = guard("sec-unblock", async () => {
+    if (!confirm("Desbloquear o agente desta fazenda?\n\nEle apaga o kill-file de segurança, zera o estado de bloqueio e reinicia OPERANDO.")) return;
+    const id = await enqueueAgentCommand({ farmId, kind: "unblock_agent", payload: {}, expiresInSec: 300 });
+    notify.ok("Agente", `Desbloqueio enfileirado · cmd ${id.slice(0, 8)}. O agente limpa o bloqueio e reinicia em ~30s.`);
+  });
+  const resetLicense = guard("sec-reset", async () => {
+    if (!confirm("Resetar licença / anti-clone desta fazenda?\n\n• Envia unblock ao agente (limpa o kill-file)\n• Zera device_licenses (fingerprint + revogação)\n• Marca agent_hardware para re-registrar o hardware no próximo boot")) return;
+    let cmdId = "";
+    try {
+      cmdId = await enqueueAgentCommand({ farmId, kind: "unblock_agent", payload: {}, expiresInSec: 300 });
+    } catch (e: any) {
+      notify.fail("Licença", `Falha ao enviar unblock: ${e?.message ?? String(e)}`);
+    }
+    const dev = await supabase.from("device_licenses")
+      .update({ fingerprint_mismatch_count: 0, revoked_at: null }).eq("farm_id", farmId);
+    const hw = await supabase.from("agent_hardware")
+      .update({ reset_requested: true, alert_level: "ok", changed_components: [] }).eq("farm_id", farmId);
+    if (dev.error || hw.error) {
+      notify.fail("Licença", `Unblock enviado${cmdId ? ` (cmd ${cmdId.slice(0, 8)})` : ""}, mas o reset das tabelas exige permissão: ${dev.error?.message ?? hw.error?.message ?? ""}. Rode o SQL de reset se necessário.`);
+    } else {
+      notify.ok("Licença", `Licença + hardware resetados e unblock enviado${cmdId ? ` · cmd ${cmdId.slice(0, 8)}` : ""}.`);
+    }
+  });
+
+  // Status visual do agente (Operando / Sem serial / Offline).
+  const secBusy = busy === "sec-restart" || busy === "sec-unblock" || busy === "sec-reset";
+  const agentState: "operando" | "sem-serial" | "offline" | "loading" | "none" =
+    !farmId ? "none"
+    : health.loading ? "loading"
+    : health.state === "online" ? (health.comConnected ? "operando" : "sem-serial")
+    : "offline";
+
   const bridgeBusyAny = bridgeBusy !== null;
   const portsList = (bridgeResult?.kind === "list_ports" && bridgeResult.result.result?.data &&
     (bridgeResult.result.result.data as any).ports) || null;
@@ -178,6 +219,43 @@ export default function PlatformRemoteControl({ isAdmin }: { isAdmin: boolean })
           {farmRow ? (
             <span>Fazenda: <strong className="text-foreground">{farmRow.name}</strong> · plano <Badge variant="outline" className="uppercase">{farmRow.plan}</Badge> · licença {farmRow.license_status}</span>
           ) : "Selecione uma fazenda."}
+        </CardContent>
+      </Card>
+
+      {/* v3.25.48 — Segurança & Recuperação do Agente */}
+      <Card className="border-primary/30">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-primary" />
+              Segurança &amp; Recuperação do Agente
+            </CardTitle>
+            <AgentStatusBadge state={agentState} age={health.ageSeconds} version={health.agentVersion} />
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-[11px] text-muted-foreground">
+            Comandos de recuperação chegam ao agente pelo heartbeat + polling HTTP — funcionam
+            <strong> mesmo se o agente estiver bloqueado</strong>. O <em>Desbloquear</em> apaga o kill-file
+            de segurança, zera o bloqueio em memória e reinicia operando.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <Button variant="default" className="justify-start"
+              onClick={unblockAgent} disabled={!farmId || secBusy}>
+              {busy === "sec-unblock" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <LockOpen className="h-4 w-4 mr-2" />}
+              Desbloquear Agente
+            </Button>
+            <Button variant="outline" className="justify-start"
+              onClick={restartAgent} disabled={!farmId || secBusy}>
+              {busy === "sec-restart" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RotateCw className="h-4 w-4 mr-2" />}
+              Reiniciar Agente
+            </Button>
+            <Button variant="outline" className="justify-start text-amber-600 dark:text-amber-400"
+              onClick={resetLicense} disabled={!farmId || secBusy}>
+              {busy === "sec-reset" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <KeyRound className="h-4 w-4 mr-2" />}
+              Resetar Licença
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
@@ -402,6 +480,16 @@ export default function PlatformRemoteControl({ isAdmin }: { isAdmin: boolean })
       </Card>
     </div>
   );
+}
+
+function AgentStatusBadge({ state, age, version }: { state: string; age: number | null; version: string | null }) {
+  const ageTxt = age == null ? "" : age < 60 ? ` · ${age}s atrás` : age < 3600 ? ` · ${Math.floor(age / 60)}min atrás` : ` · ${Math.floor(age / 3600)}h atrás`;
+  const verTxt = version ? ` · v${version}` : "";
+  if (state === "none") return <Badge variant="outline" className="text-muted-foreground">Selecione a fazenda</Badge>;
+  if (state === "loading") return <Badge variant="outline" className="text-muted-foreground"><Loader2 className="w-3 h-3 mr-1 animate-spin" />Verificando…</Badge>;
+  if (state === "operando") return <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"><CheckCircle2 className="w-3 h-3 mr-1" />Operando{verTxt}</Badge>;
+  if (state === "sem-serial") return <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30"><AlertTriangle className="w-3 h-3 mr-1" />Online sem serial{ageTxt}</Badge>;
+  return <Badge variant="destructive"><WifiOff className="w-3 h-3 mr-1" />Offline{ageTxt}{verTxt}</Badge>;
 }
 
 function ModuleToggle({ label, hint, checked, onChange, disabled }: any) {
