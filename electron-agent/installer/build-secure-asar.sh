@@ -72,6 +72,16 @@ fi
 cp "$MAIN_SRC" "$MAIN_APP"
 echo "[build-secure] main.cjs sincronizado -> app/"
 
+# --- 1b) sincroniza a VERSAO -> app/package.json --------------------------
+# BUG historico (ate 3.25.48): so o main.cjs era sincronizado, entao o
+# package.json DENTRO do asar ficava na versao antiga. Como
+# AGENT_VERSION = require("./package.json").version le esse package.json,
+# uma release "3.25.48" rodava o codigo novo mas se IDENTIFICAVA como 3.25.47
+# (nenhuma fazenda reportava a versao nova). Sincronizar aqui e obrigatorio.
+SRC_VER=$(node -p "require('$AGENT_DIR/package.json').version")
+node -e "const fs=require('fs');const p='$APP_DIR/package.json';const d=JSON.parse(fs.readFileSync(p,'utf8'));d.version='$SRC_VER';fs.writeFileSync(p,JSON.stringify(d,null,2)+'\n');"
+echo "[build-secure] versao sincronizada -> app/package.json = $SRC_VER"
+
 # --- 2) backup do fonte limpo (idempotente) -------------------------------
 # Se ja existe backup de uma rodada anterior, restaura antes (garante que
 # nunca ofuscamos um arquivo ja ofuscado).
