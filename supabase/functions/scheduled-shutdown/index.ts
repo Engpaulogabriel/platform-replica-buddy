@@ -175,12 +175,14 @@ async function fetchOnPumps(supabase: any, a: any): Promise<any[]> {
 
 async function commandShutdown(supabase: any, a: any, onPumps: any[], step: Step): Promise<any[]> {
   const farmId = a.farm_id;
-  // Atribuição no relatório ("Por" = nome da regra). Gravamos APENAS last_changed_by
-  // (campo display-only; o agente nunca o lê). NÃO tocamos last_actuation_origin:
-  // a detecção de bomba LOCAL (='local') dispara o desligamento FORÇADO no agente;
-  // sobrescrever com 'automation' quebraria o forçado. A troca de origem no
-  // relatório é feita pelo trigger BEFORE INSERT em automation_log.
-  const changedBy = a.name || "Desligamento Programado";
+  // Atribuição no relatório ("Por"). Gravamos APENAS last_changed_by (campo
+  // display-only; o agente nunca o lê). NÃO tocamos last_actuation_origin: a
+  // detecção de bomba LOCAL (='local') alimenta o desligamento FORÇADO e a
+  // reconciliação do polling no agente; sobrescrever quebraria isso. A troca de
+  // ORIGEM no relatório é feita pelo trigger BEFORE INSERT em automation_log.
+  // Rótulo "Automação {HH}h" derivado do horário da regra (ex.: "Automação 17h").
+  const hh = parseInt(String(a.time_brt ?? "").slice(0, 2), 10);
+  const changedBy = Number.isFinite(hh) ? `Automação ${hh}h` : (a.name || "Desligamento Programado");
   const nowIso = new Date().toISOString();
   const acted: any[] = [];
   for (const p of onPumps) {
