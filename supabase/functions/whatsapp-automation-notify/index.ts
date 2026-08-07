@@ -1995,6 +1995,29 @@ async function processImmediateAlert(supabase: any, config: any, phoneNumberId: 
       phone: ph, name: "Sistema", role: "super_admin",
       last_message_at: null, receive_alerts: true, is_active: true,
     }));
+  } else if (equipmentName && (typeof body?.new_state !== "undefined" || body?.action === "turn_on" || body?.action === "turn_off")) {
+    // ACIONAMENTO DE EQUIPAMENTO (trigger do banco notify_equipment_state_change):
+    // compõe o formato PADRONIZADO a partir dos campos estruturados (não do
+    // _message feio do trigger). Igual às demais mensagens:
+    //   ✅ POÇO 07 — LIGADO
+    //   Fazenda Pérola
+    //
+    //   Por: Sistema
+    //   Via: Local
+    //   Horário: 07/08, 14:52h
+    const isOn = body?.action === "turn_on" || Number(body?.new_state) === 1;
+    const estado = isOn ? "LIGADO" : "DESLIGADO";
+    const emoji = isOn ? "✅" : "⛔";
+    const origRaw = String(body?.origin ?? "").toLowerCase();
+    const origem = origRaw === "local" ? "Local"
+      : (origRaw === "automation" || origRaw === "automacao") ? "Automação"
+      : origRaw === "whatsapp" ? "WhatsApp"
+      : "Plataforma Web";
+    const who = origRaw === "local" ? "Sistema" : String((body?.actor_name as string) || "Sistema");
+    message = `${emoji} ${equipmentName} — ${estado}\n${fazendaLabel(farmName)}\n\nPor: ${who}\nVia: ${origem}\nHorário: ${ts}`;
+    tplParams = buildAlertaEquipamentoParams(message, { farm_name: farmName, equipment_name: equipmentName, via: origem, change_type: "equipment_state" });
+    tplNameOverride = "alerta_equipamento";
+    targets = await loadFarmOperators(supabase, resolvedFarmId);
   } else {
     const header = isRecovery ? (equipmentName ? `✅ ${equipmentName}` : `✅ ${farmName}`) : (equipmentName ? `⚠️ ${equipmentName}` : `⚠️ ${farmName}`);
     message = `${header}\n${messageInput}\nFazenda: ${farmName}\n${ts}`;
