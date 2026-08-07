@@ -130,26 +130,59 @@ function templateParamsFor(name: string, params: string[]): string[] {
 // 132000 ("number of params (1) != expected (4)") e NADA é entregue fora da
 // janela de 24h. Este helper monta os 4 slots a partir da mensagem + metadata.
 function buildAlertaEquipamentoParams(message: string, md: Record<string, unknown>): string[] {
-  // A mensagem já vem composta: "{título}\n{fazenda}\n...\n{horário}". Extraímos os
-  // 4 slots do template (⚠️ Alerta RENOV — {{1}} / Equipamento: {{2}} / Tipo: {{3}} /
-  // Detalhes: {{4}}) para preencher com DADO REAL (evita "-"):
-  //   {{1}} = 1ª linha (ação/título)   {{4}} = demais linhas (fazenda+por+horário)
-  //   {{2}} = equipamento (metadata)   {{3}} = tipo humanizado (metadata)
-  // OBS: params de template NÃO aceitam \n (regra Meta) — sanitizeTplParam achata;
-  // por isso o layout multilinha do formato antigo só é possível no TEXTO (<24h).
+  // Preenche os 4 slots do template SEM redundância. A mensagem já vem composta:
+  //   "{ícone equip estado}\n{Fazenda X}\nPor: {quem}\n{horário}".
+  //   {{1}} = título (ícone + equipamento + estado)  — ex.: "✅ Poço 04 — LIGADO"
+  //   {{2}} = FAZENDA (reaproveita o slot "Equipamento:" para mostrar a fazenda)
+  //   {{3}} = estado + origem                          — ex.: "LIGADO via Plataforma Web"
+  //   {{4}} = quem + quando                            — ex.: "Por: Paulo Gabriel · 07/08, 12:30h"
+  // OBS: params de template NÃO aceitam \n (regra Meta); o layout multilinha antigo
+  // só existe no TEXTO (<24h).
   const lines = String(message).split("\n").map((l) => l.trim()).filter(Boolean);
-  const titulo = lines[0] || String((md?.farm_name as string) || "Notificação");
-  const detalhes = lines.slice(1).join(" · ") || String((md?.farm_name as string) || message);
-  const equip = String((md?.equipment_name as string) || "Bombas");
-  const tipoRaw = String((md?.change_type as string) || (md?.alert_type as string) || "Notificação");
+  const titulo = lines[0] || "Notificação";
+
+  // {{2}} fazenda
+  const farm = String(
+    (md?.farm_name as string) ||
+    (lines.find((l) => /^fazenda\b/i.test(l)) || "").replace(/^fazenda\s*/i, "") ||
+    "—",
+  ).trim();
+
+  // estado (LIGADO/DESLIGADO/…) — do título ou de metadata.new
+  const estadoMatch = titulo.match(/\b(LIGAD[OA]|DESLIGAD[OA]|LIGOU|DESLIGOU|BLOQUEAD[OA]|LIBERAD[OA]|OFFLINE|ONLINE)\b/i);
+  const estado = estadoMatch
+    ? estadoMatch[0].toUpperCase()
+    : (typeof md?.new === "string" ? ((md.new as string) === "on" ? "LIGADO" : "DESLIGADO") : null);
+
+  // origem (via) humanizada
+  const viaRaw = String((md?.via as string) || (md?.changed_via as string) || "").toLowerCase().trim();
+  const viaMap: Record<string, string> = {
+    web: "Plataforma Web", remote: "Plataforma Web", frontend: "Plataforma Web",
+    "remote-cmd": "Plataforma Web", dashboard: "Plataforma Web",
+    local: "Local", whatsapp: "WhatsApp", automacao: "Automação", automatico: "Automação",
+  };
+  const origem = viaMap[viaRaw] || (viaRaw ? viaRaw : "");
+
+  // {{3}} estado via origem (ou tipo humanizado quando não há estado)
   const tipoMap: Record<string, string> = {
     equipment_state: "Acionamento", equipment_state_batch: "Acionamento",
     schedule_change: "Programação", mode_change: "Modo automático",
     maintenance_block: "Manutenção", maintenance_release: "Manutenção",
     local: "Acionamento local", local_change: "Acionamento local",
   };
-  const tipo = tipoMap[tipoRaw] || tipoRaw;
-  return [titulo, equip, tipo, detalhes].map((p) => sanitizeTplParam(p).slice(0, 1000));
+  const tipoBase = estado || tipoMap[String(md?.change_type ?? md?.alert_type ?? "")] || "Notificação";
+  const tipo = origem ? `${tipoBase} via ${origem}` : tipoBase;
+
+  // {{4}} Por: quem · quando
+  const porLine = lines.find((l) => /^por:/i.test(l));
+  const who = porLine
+    ? porLine.replace(/^por:\s*/i, "").trim()
+    : String((md?.actor_name as string) || (md?.changed_by ? String(md.changed_by).split("|")[0] : "") || "Sistema").trim();
+  const tsLine = [...lines].reverse().find((l) => /\d{2}\/\d{2}|\d{1,2}:\d{2}|h\b/.test(l) && !/^por:/i.test(l)) || "";
+  const quando = tsLine.replace(/^hor[aá]rio:\s*/i, "").trim();
+  const detalhes = `Por: ${who}${quando ? ` · ${quando}` : ""}`;
+
+  return [titulo, farm, tipo, detalhes].map((p) => sanitizeTplParam(p).slice(0, 1000));
 }
 
 
