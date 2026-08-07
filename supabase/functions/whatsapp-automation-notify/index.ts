@@ -124,6 +124,19 @@ function templateParamsFor(name: string, params: string[]): string[] {
   return params.map(sanitizeTplParam);
 }
 
+// O template `alerta_equipamento` (APROVADO na conta) tem 4 variáveis:
+//   ⚠️ Alerta RENOV — {{1}} / Equipamento: {{2}} / Tipo: {{3}} / Detalhes: {{4}}
+// Vários callers passam só a mensagem composta (1 param) → a Meta rejeita com
+// 132000 ("number of params (1) != expected (4)") e NADA é entregue fora da
+// janela de 24h. Este helper monta os 4 slots a partir da mensagem + metadata.
+function buildAlertaEquipamentoParams(message: string, md: Record<string, unknown>): string[] {
+  const titulo = String((md?.farm_name as string) || "Notificação");
+  const equip = String((md?.equipment_name as string) || "Sistema");
+  const tipo = String((md?.change_type as string) || (md?.alert_type as string) || "Notificação");
+  const detalhes = message;
+  return [titulo, equip, tipo, detalhes].map((p) => sanitizeTplParam(p).slice(0, 1000));
+}
+
 
 function addOperatorOnce(
   opsByFarm: Map<string, any[]>,
@@ -289,7 +302,10 @@ async function sendSingleWhatsAppMessage(args: {
   let metaId: string | null = null;
   let usedMode: "text" | "template" = "text";
 
-  const sanitizedParams = templateParamsFor(tplName, tplParams);
+  // alerta_equipamento exige 4 params — monta sempre os 4 (senão 132000 e não entrega).
+  const sanitizedParams = tplName === "alerta_equipamento"
+    ? buildAlertaEquipamentoParams(message, metadata)
+    : templateParamsFor(tplName, tplParams);
 
 
   try {
@@ -311,7 +327,7 @@ async function sendSingleWhatsAppMessage(args: {
 
         usedMode = "template";
         tplName = "alerta_equipamento";
-        const fallbackParams = [sanitizeTplParam(message).slice(0, 1000)];
+        const fallbackParams = buildAlertaEquipamentoParams(message, metadata);
         const rf = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
           method: "POST",
           headers: { Authorization: `Bearer ${config.api_token}`, "Content-Type": "application/json" },
@@ -353,7 +369,7 @@ async function sendSingleWhatsAppMessage(args: {
         console.error(`[whatsapp-send] template ${tplName} fail`, toDigits, JSON.stringify((j as any)?.error || j));
 
         const fallbackTpl = "alerta_equipamento";
-        const fallbackParams = [sanitizeTplParam(message).slice(0, 1000)];
+        const fallbackParams = buildAlertaEquipamentoParams(message, metadata);
         const rf = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
           method: "POST",
           headers: { Authorization: `Bearer ${config.api_token}`, "Content-Type": "application/json" },
