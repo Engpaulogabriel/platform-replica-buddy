@@ -288,16 +288,18 @@ Deno.serve(async (req) => {
   }
 
   if (alert_type === "local_change") {
-    const acao = new_running ? "LIGOU" : "DESLIGOU";
-    const emoji = new_running ? "🔔" : "⚠️";
-    freeText = `${emoji} ${eqLabel} ${acao} — Local (Painel do Poço)\n${farmLine(farmLabel)}\n${tsLine}`;
-    templateParams = [farmDisplayName(farmLabel), eqLabel, `Acionamento local — ${acao}`, `${acao} pelo painel do poço em ${tsLine}`];
+    // v3.25.x: MESMO formato do whatsapp-automation-notify (sem redundância):
+    //   {{1}}=título(ícone+equip+estado)  {{2}}=fazenda  {{3}}=estado via origem  {{4}}=detalhe
+    const estado = new_running ? "LIGADO" : "DESLIGADO";
+    const emoji = new_running ? "✅" : "⛔";
+    freeText = `${emoji} ${eqLabel} — ${estado}\n${farmLine(farmLabel)}\nPor: Painel do poço\n${tsLine}`;
+    templateParams = [`${emoji} ${eqLabel} — ${estado}`, farmDisplayName(farmLabel), `${estado} via Local`, `Painel do poço · ${tsLine}`];
   } else if (alert_type === "offline") {
-    freeText = `⚠️ ${eqLabel} está OFFLINE\n${farmLine(farmLabel)}\n${tsLine}`;
-    templateParams = [farmDisplayName(farmLabel), eqLabel, "Equipamento OFFLINE", `Sem comunicação desde ${tsLine}`];
+    freeText = `🔴 ${eqLabel} — OFFLINE\n${farmLine(farmLabel)}\n${tsLine}`;
+    templateParams = [`🔴 ${eqLabel} — OFFLINE`, farmDisplayName(farmLabel), "Sem comunicação", `Sem resposta desde ${tsLine}`];
   } else if (alert_type === "back_online") {
-    freeText = `✅ ${eqLabel} voltou ONLINE\n${farmLine(farmLabel)}\n${tsLine}`;
-    templateParams = [farmDisplayName(farmLabel), eqLabel, "Equipamento ONLINE", `Comunicação restabelecida em ${tsLine}`];
+    freeText = `🟢 ${eqLabel} — ONLINE\n${farmLine(farmLabel)}\n${tsLine}`;
+    templateParams = [`🟢 ${eqLabel} — ONLINE`, farmDisplayName(farmLabel), "Comunicação restabelecida", `Voltou em ${tsLine}`];
   } else if (alert_type === "peak_hours") {
     // Group running equipment per farm and send ONE clean message to each farm's operators.
     const { data: runningEqs } = await supabase
@@ -695,6 +697,9 @@ Deno.serve(async (req) => {
     let metaMessageId: string | null = null;
     let mode: "template" | "text" | "failed" = "template";
     const paramsForTpl = templateParams.length ? templateParams : [freeText];
+    // DEBUG (v3.25.x): identifica ESTA função (whatsapp-alerts) + alert_type + params,
+    // para confirmar no log qual sender está no ar após o deploy.
+    try { console.log("[whatsapp-alerts:sendTpl]", JSON.stringify({ alert_type, template: templateName, params: paramsForTpl }).slice(0, 1200)); } catch (_) { /* noop */ }
     const tplResult = await sendTpl(op.phone, templateName, paramsForTpl);
     let textResult: { id: string | null; ok: boolean; error?: any } | null = null;
     if (tplResult.ok) {
