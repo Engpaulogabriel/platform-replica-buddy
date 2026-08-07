@@ -141,12 +141,13 @@ function buildAlertaEquipamentoParams(message: string, md: Record<string, unknow
   const lines = String(message).split("\n").map((l) => l.trim()).filter(Boolean);
   const titulo = lines[0] || "Notificação";
 
-  // {{2}} fazenda
-  const farm = String(
-    (md?.farm_name as string) ||
-    (lines.find((l) => /^fazenda\b/i.test(l)) || "").replace(/^fazenda\s*/i, "") ||
-    "—",
-  ).trim();
+  // {{2}} fazenda — de metadata OU da linha "Fazenda X" da mensagem; sempre com prefixo.
+  let farmRaw = String((md?.farm_name as string) || "").trim();
+  if (!farmRaw) {
+    const fl = lines.find((l) => /^fazenda\b/i.test(l));
+    if (fl) farmRaw = fl.trim();
+  }
+  const farm = farmRaw ? fazendaLabel(farmRaw) : "—";
 
   // estado (LIGADO/DESLIGADO/…) — do título ou de metadata.new
   const estadoMatch = titulo.match(/\b(LIGAD[OA]|DESLIGAD[OA]|LIGOU|DESLIGOU|BLOQUEAD[OA]|LIBERAD[OA]|OFFLINE|ONLINE)\b/i);
@@ -154,14 +155,19 @@ function buildAlertaEquipamentoParams(message: string, md: Record<string, unknow
     ? estadoMatch[0].toUpperCase()
     : (typeof md?.new === "string" ? ((md.new as string) === "on" ? "LIGADO" : "DESLIGADO") : null);
 
-  // origem (via) humanizada
+  // origem (via) humanizada — de metadata.via OU da própria linha "Via:" da mensagem.
   const viaRaw = String((md?.via as string) || (md?.changed_via as string) || "").toLowerCase().trim();
   const viaMap: Record<string, string> = {
     web: "Plataforma Web", remote: "Plataforma Web", frontend: "Plataforma Web",
-    "remote-cmd": "Plataforma Web", dashboard: "Plataforma Web",
+    "remote-cmd": "Plataforma Web", dashboard: "Plataforma Web", "plataforma web": "Plataforma Web",
     local: "Local", whatsapp: "WhatsApp", automacao: "Automação", automatico: "Automação",
   };
-  const origem = viaMap[viaRaw] || (viaRaw ? viaRaw : "");
+  let origem = viaMap[viaRaw] || "";
+  if (!origem) {
+    const viaLine = lines.find((l) => /^via:/i.test(l));
+    if (viaLine) origem = viaLine.replace(/^via:\s*/i, "").trim();        // preserva "Plataforma Web"
+    else if (viaRaw) origem = viaRaw;
+  }
 
   // {{3}} estado via origem (ou tipo humanizado quando não há estado)
   const tipoMap: Record<string, string> = {
@@ -182,7 +188,15 @@ function buildAlertaEquipamentoParams(message: string, md: Record<string, unknow
   const quando = tsLine.replace(/^hor[aá]rio:\s*/i, "").trim();
   const detalhes = `Por: ${who}${quando ? ` · ${quando}` : ""}`;
 
-  return [titulo, farm, tipo, detalhes].map((p) => sanitizeTplParam(p).slice(0, 1000));
+  const out = [titulo, farm, tipo, detalhes].map((p) => sanitizeTplParam(p).slice(0, 1000));
+  // DEBUG (v3.25.x): loga a mensagem RAW + metadata + os 4 params montados, para
+  // confirmar no log da edge function que o parse está correto após o deploy.
+  try {
+    console.log("[buildAlertaEquipamentoParams]", JSON.stringify({
+      raw: message, md, params: out,
+    }).slice(0, 1500));
+  } catch (_) { /* noop */ }
+  return out;
 }
 
 // Destinatários dos alertas de SISTEMA (agente offline / equipamentos sem
