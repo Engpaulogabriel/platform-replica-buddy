@@ -67,6 +67,25 @@ function formatPhone(phone: string) {
   return phone;
 }
 
+// Telefone canônico BR: 55 + DDD(2) + 9 dígitos = 13 dígitos, sem "+"/espaços.
+// Corrige o "duplicado" (mesma pessoa em formatos diferentes: com/sem "+", com/sem
+// o 9º dígito) unindo tudo na mesma chave de contato.
+function canonPhone(raw: string): string {
+  let d = (raw || "").replace(/\D/g, "");
+  if (!d) return "";
+  if (!d.startsWith("55") && (d.length === 10 || d.length === 11)) d = "55" + d;
+  if (d.startsWith("55")) {
+    const rest = d.slice(2); // DDD(2) + local
+    if (rest.length === 10) d = "55" + rest.slice(0, 2) + "9" + rest.slice(2); // insere 9º dígito
+  }
+  return d;
+}
+// Últimos 8 dígitos são estáveis entre todos os formatos (o "+"/9º dígito ficam
+// antes) — usados para casar TODAS as variantes de um número no filtro do banco.
+function phoneSuffix8(raw: string): string {
+  return (raw || "").replace(/\D/g, "").slice(-8);
+}
+
 function resultBadge(result: string | null) {
   if (!result) return null;
   const map: Record<string, { label: string; cls: string }> = {
@@ -120,17 +139,20 @@ export default function HistoricoWhatsApp() {
       const map = new Map<string, Contact>();
       for (const r of (data ?? []) as { phone: string; operator_name: string | null; created_at: string; farm_id: string | null }[]) {
         if (!r.phone) continue;
-        const existing = map.get(r.phone);
+        // Agrupa por telefone CANÔNICO — une variantes (com/sem "+", com/sem 9º dígito)
+        // da mesma pessoa numa única conversa.
+        const key = canonPhone(r.phone) || r.phone.replace(/\D/g, "");
+        const existing = map.get(key);
         if (existing) {
           existing.count += 1;
-          if (r.operator_name && (existing.name === formatPhone(r.phone) || !existing.name)) {
+          if (r.operator_name && (existing.name === formatPhone(existing.phone) || !existing.name)) {
             existing.name = r.operator_name;
           }
           if (!existing.farmId && r.farm_id) existing.farmId = r.farm_id;
         } else {
-          map.set(r.phone, {
-            phone: r.phone,
-            name: r.operator_name || formatPhone(r.phone),
+          map.set(key, {
+            phone: key,
+            name: r.operator_name || formatPhone(key),
             count: 1,
             lastAt: r.created_at,
             farmId: r.farm_id ?? null,
@@ -159,7 +181,11 @@ export default function HistoricoWhatsApp() {
         .order("created_at", { ascending: false })
         .limit(2000);
       if (selectedPhone) {
-        q = q.eq("phone", selectedPhone);
+        // Casa TODAS as variantes de formato do número selecionado (o "+"/9º dígito
+        // ficam no prefixo; os últimos 8 dígitos são estáveis). Funciona mesmo antes
+        // do backfill; depois do backfill, os phones já ficam canônicos.
+        const suffix = phoneSuffix8(selectedPhone);
+        q = suffix ? q.ilike("phone", `%${suffix}`) : q.eq("phone", selectedPhone);
       }
       if (farmFilter !== "all") {
         q = q.eq("farm_id", farmFilter);

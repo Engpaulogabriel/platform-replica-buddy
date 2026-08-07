@@ -11491,20 +11491,48 @@ Deno.serve(async (req) => {
       for (const entry of entries) {
         const changes = entry?.changes ?? [];
         for (const ch of changes) {
-          // [DIAG-SEMEAR] Loga statuses (delivered/read/failed) da Meta para telefones da Semear.
+          // CAPTURA DE STATUS DE ENTREGA da Meta (sent/delivered/read/failed).
+          // A Meta manda o resultado REAL da entrega de forma assíncrona neste array.
+          // Atualizamos a linha OUTBOUND correspondente (casada por wamid) no
+          // whatsapp_message_log, gravando status + (em failed) código/motivo do erro
+          // no metadata. Assim dá para VER no histórico quando/por que NÃO entregou
+          // (ex.: 131047 fora da janela 24h, 131049 cap/preferências, 131026 número
+          // indisponível/invalido). Best-effort: nunca derruba o processamento.
           const statuses = ch?.value?.statuses ?? [];
           for (const st of statuses) {
-            const recipient = String(st?.recipient_id ?? "");
-            if (recipient === "557798654782" || recipient === "557788120550") {
-              console.log("[DIAG-SEMEAR] META status", {
-                recipient,
-                status: st?.status,
-                message_id: st?.id,
-                timestamp: st?.timestamp,
-                errors: st?.errors ?? null,
-                conversation: st?.conversation ?? null,
-                pricing: st?.pricing ?? null,
-              });
+            try {
+              const wamid = st?.id;
+              if (!wamid) continue;
+              const err = Array.isArray(st?.errors) && st.errors.length ? st.errors[0] : null;
+              const delivery = {
+                status: st?.status ?? null,
+                recipient: st?.recipient_id ?? null,
+                at: st?.timestamp
+                  ? new Date(Number(st.timestamp) * 1000).toISOString()
+                  : new Date().toISOString(),
+                error_code: err?.code ?? null,
+                error_title: err?.title ?? null,
+                error_message: err?.message ?? err?.error_data?.details ?? null,
+                conversation_origin: st?.conversation?.origin?.type ?? null,
+              };
+              const { data: existing } = await supabase
+                .from("whatsapp_message_log")
+                .select("id, metadata")
+                .eq("message_id", wamid)
+                .order("created_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              if (existing) {
+                const md = { ...((existing as any).metadata || {}), delivery };
+                await supabase.from("whatsapp_message_log")
+                  .update({ metadata: md })
+                  .eq("id", (existing as any).id);
+              }
+              if (delivery.status === "failed") {
+                console.error("[WA-DELIVERY-FAIL]", JSON.stringify({ wamid, ...delivery }));
+              }
+            } catch (e) {
+              console.error("[WA-DELIVERY] falha ao gravar status:", (e as Error).message);
             }
           }
           const messages = ch?.value?.messages ?? [];
