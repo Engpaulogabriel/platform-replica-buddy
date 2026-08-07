@@ -134,6 +134,25 @@ const SUPABASE_ANON_DEFAULT = process.env.RENOV_SUPABASE_ANON
 const TAMPER_SIGNING_SECRET = process.env.RENOV_TAMPER_SECRET
   || "dev-only-tamper-secret-replace-in-build";
 
+// ── FASE 2 (v3.25.50): token rotativo + credenciais machine-bound (DPAPI) ──
+// FLAG-GATED (default OFF, mesmo padrão de SECURITY_BLOCK_ENFORCEMENT): enquanto
+// false, NADA muda o comportamento — o token é obtido/rotacionado e as
+// credenciais espelhadas em %ProgramData%, mas QUALQUER falha (DPAPI, rede,
+// 403) é NÃO-FATAL: o agente segue conectando com anon+config como sempre. Só
+// quando true a falha de credenciais machine-bound impede a operação. Ver
+// [[renov-agent-resilience-policy]] — nunca morre por falta de nuvem.
+const SECURITY_PHASE2_ENFORCEMENT = false;
+// credentials.enc: cópia machine-bound (DPAPI) das credenciais de conexão em
+// %ProgramData%\Renov\ — se a pasta for copiada p/ outro PC, o DPAPI falha ao
+// decifrar (chave atrelada à máquina) e o clone não obtém credenciais.
+const CREDENTIALS_ENC_FILE = path.join("C:\\ProgramData", "Renov", "credentials.enc");
+const AGENT_TOKEN_TTL_MS = 5 * 60 * 1000;      // TTL do token (servidor manda 300s)
+const AGENT_TOKEN_REFRESH_SKEW_MS = 90 * 1000; // renova ~90s antes de expirar
+let agentToken = null;                 // JWT rotativo atual (em memória)
+let agentTokenExpiresAt = 0;           // epoch ms de expiração
+let lastTokenRefreshAt = 0;
+let credentialsDpapiFailed = false;    // true se credentials.enc existe mas não decifra
+
 const LOG_DIR = path.join(app.getPath("userData"), "logs");
 const POLL_INTERVAL_MS = 10_000; // v3.7.8: aumentado de 3s para 10s — comandos manuais chegam via Realtime fast-path; reduz IO no banco em 70%
 // v3.9.10: gap entre o FIM (RX/timeout) de uma comunicação de polling e o INÍCIO (TX) da próxima.
@@ -2554,6 +2573,137 @@ function saveConfig(cfg) {
     throw e;
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FASE 2 (v3.25.50) — credentials.enc machine-bound + token rotativo.
+// TODAS as funções abaixo são NÃO-FATAIS quando SECURITY_PHASE2_ENFORCEMENT=false.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Só as credenciais de conexão (não estado operacional) vão para credentials.enc.
+function _connectionCredsFromConfig(cfg) {
+  if (!cfg) return null;
+  return {
+    email: cfg.email, password: cfg.password,
+    farmId: cfg.farmId, farmName: cfg.farmName,
+    supabaseUrl: cfg.supabaseUrl || activeSupabaseUrl,
+    supabaseAnonKey: cfg.supabaseAnonKey || activeSupabaseAnonKey,
+    deviceId: cfg.deviceId, machineIdHash: cfg.machineIdHash,
+    savedAt: new Date().toISOString(),
+  };
+}
+
+// Lê %ProgramData%\Renov\credentials.enc (DPAPI). Retorna:
+//   objeto de credenciais | null (não existe) | { __dpapiFailed:true } (não decifra)
+function readCredentialsEnc() {
+  try {
+    if (!fs.existsSync(CREDENTIALS_ENC_FILE)) return null;
+    const raw = fs.readFileSync(CREDENTIALS_ENC_FILE);
+    if (!_safeAvailable()) {
+      // sem DPAPI: aceita texto puro (dev/Linux)
+      try { return JSON.parse(raw.toString("utf8")); } catch { return { __dpapiFailed: true }; }
+    }
+    const plain = safeStorage.decryptString(raw);
+    return JSON.parse(plain);
+  } catch (e) {
+    // Existe mas não decifra → provavelmente copiado de outra máquina (DPAPI machine-bound).
+    console.error("[CREDS] credentials.enc não decifrou (DPAPI):", e.message);
+    return { __dpapiFailed: true };
+  }
+}
+
+// Escreve credentials.enc (DPAPI) em %ProgramData%\Renov\. Best-effort.
+function writeCredentialsEnc(creds) {
+  try {
+    if (!creds || !creds.farmId) return false;
+    try { fs.mkdirSync(path.dirname(CREDENTIALS_ENC_FILE), { recursive: true }); } catch (_) {}
+    const plain = JSON.stringify(creds);
+    if (_safeAvailable()) {
+      fs.writeFileSync(CREDENTIALS_ENC_FILE, safeStorage.encryptString(plain));
+    } else {
+      console.warn("[CREDS] safeStorage indisponível — credentials.enc em texto puro");
+      fs.writeFileSync(CREDENTIALS_ENC_FILE, plain, "utf8");
+    }
+    return true;
+  } catch (e) {
+    console.error("[CREDS] writeCredentialsEnc erro:", e.message);
+    return false;
+  }
+}
+
+// Após conectar com sucesso: garante credentials.enc e apaga provisioning.json
+// em texto puro (não deve sobrar credencial legível em disco após o 1º boot).
+function ensureCredentialsEnc(cfg) {
+  try {
+    const existing = readCredentialsEnc();
+    if (!existing || existing.__dpapiFailed) {
+      const creds = _connectionCredsFromConfig(cfg);
+      if (creds && creds.email && creds.farmId) {
+        if (writeCredentialsEnc(creds)) console.log("[CREDS] credentials.enc gravado (machine-bound)");
+      }
+    }
+    // apaga qualquer provisioning.json em texto puro remanescente
+    for (const p of PROVISIONING_LOOKUP_PATHS) {
+      try { if (fs.existsSync(p)) { fs.unlinkSync(p); console.log("[CREDS] provisioning.json removido:", p); } } catch (_) {}
+    }
+  } catch (e) { console.error("[CREDS] ensureCredentialsEnc erro:", e.message); }
+}
+
+// Base URL/anon ativos (usa config/globais com fallback aos defaults de build).
+function _activeBaseUrl(cfg) {
+  return (cfg && cfg.supabaseUrl) || activeSupabaseUrl || SUPABASE_URL_DEFAULT;
+}
+function _activeAnon(cfg) {
+  return (cfg && cfg.supabaseAnonKey) || activeSupabaseAnonKey || SUPABASE_ANON_DEFAULT;
+}
+
+// Obtém/rotaciona o token rotativo (agent-auth). NÃO-FATAL: qualquer erro só
+// loga e deixa o agente seguir com anon+config. Retorna o token (ou null).
+async function refreshAgentToken(cfg, opts = {}) {
+  try {
+    const force = !!opts.force;
+    const now = Date.now();
+    // Já temos token válido e longe de expirar? Não faz nada (rate-limit implícito).
+    if (!force && agentToken && agentTokenExpiresAt - now > AGENT_TOKEN_REFRESH_SKEW_MS) return agentToken;
+    if (!force && now - lastTokenRefreshAt < 20_000) return agentToken; // no máx a cada 20s
+    lastTokenRefreshAt = now;
+
+    let fp;
+    try { fp = getMachineFingerprint(); } catch (_) { return agentToken; }
+    const baseUrl = _activeBaseUrl(cfg);
+    const anon = _activeAnon(cfg);
+
+    const resp = await fetch(`${baseUrl}/functions/v1/agent-auth`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "apikey": anon, "Authorization": `Bearer ${anon}` },
+      body: JSON.stringify({
+        machine_id_hash: fp.machine_id_hash,
+        fingerprint: fp.fingerprint,
+        current_token: agentToken || null,
+        agent_version: AGENT_VERSION,
+      }),
+    });
+    const result = await resp.json().catch(() => ({}));
+    if (!resp.ok || !result || result.ok !== true || !result.token) {
+      // 403 = licença/clone; demais = rede. Ambos NÃO-FATAIS aqui (FASE 2 off).
+      const reason = (result && result.reason) || `http_${resp.status}`;
+      try { pushLog("warn", "system", `[AGENT-AUTH] sem token novo (${reason}) — segue com anon`); } catch (_) {}
+      if (SECURITY_PHASE2_ENFORCEMENT && resp.status === 403) {
+        // Em enforcement, um 403 explícito de licença é a ÚNICA condição de parada.
+        try { pushLog("error", "system", `[AGENT-AUTH] 403 em enforcement: ${reason}`); } catch (_) {}
+      }
+      return agentToken;
+    }
+    agentToken = result.token;
+    agentTokenExpiresAt = now + (Number(result.expires_in || 300) * 1000);
+    return agentToken;
+  } catch (e) {
+    try { pushLog("warn", "system", `[AGENT-AUTH] refresh falhou: ${e.message} — segue com anon`); } catch (_) {}
+    return agentToken;
+  }
+}
+
+// Wrapper fire-and-forget para uso no heartbeat (nunca lança).
+function refreshAgentTokenSafe(cfg) { void refreshAgentToken(cfg).catch(() => {}); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Safety timer (120s) — failsafe que desliga a bomba se nao confirmar comando
@@ -6085,7 +6235,9 @@ async function upsertSiteHealth() {
           com_port: comPort,
           com_connected: bridgeReady,
           agent_version: AGENT_VERSION,
-          last_error: lastBridgeError,
+          // FASE 2: reporta dpapi_failed (credentials.enc copiado de outra máquina)
+          // sem sobrescrever um erro de bridge já existente.
+          last_error: credentialsDpapiFailed ? (lastBridgeError || "dpapi_failed") : lastBridgeError,
         },
         { onConflict: "farm_id" }
       ),
@@ -6162,6 +6314,8 @@ async function sendHeartbeat() {
   try {
     const cfgNow = loadConfig();
     if (cfgNow) await validateLicenseHeartbeat(cfgNow);
+    // FASE 2: rotaciona o token rotativo no ritmo do heartbeat (não-fatal).
+    if (cfgNow) refreshAgentTokenSafe(cfgNow);
   } catch (_) {}
   if (licenseKillSwitchTriggered) return;
   // Refresca cache de nomes de equipamentos a cada 5 min
@@ -9235,6 +9389,23 @@ app.whenReady().then(async () => {
     try { cfg = loadConfig(); _bootLog(`loadConfig: ${cfg ? "found" : "empty"}`); }
     catch (e) { _bootLog(`loadConfig FAIL: ${e && e.stack || e}`); }
 
+    // 2.5) FASE 2: fallback machine-bound (credentials.enc em %ProgramData%).
+    // Se a config de userData sumiu mas há credentials.enc válido, recupera.
+    // Se existir mas não decifrar (copiado de outro PC) → dpapi_failed.
+    if (!cfg || !cfg.email || !cfg.password || !cfg.farmId) {
+      try {
+        const creds = readCredentialsEnc();
+        if (creds && creds.__dpapiFailed) {
+          credentialsDpapiFailed = true;
+          _bootLog("credentials.enc presente mas NÃO decifra (dpapi_failed)");
+        } else if (creds && creds.email && creds.password && creds.farmId) {
+          cfg = { ...creds };
+          try { saveConfig(cfg); } catch (_) {} // re-hidrata o .enc de userData
+          _bootLog("config recuperada de credentials.enc (machine-bound)");
+        }
+      } catch (e) { _bootLog(`readCredentialsEnc FAIL: ${e && e.stack || e}`); }
+    }
+
     // 3) Se não tem config, tenta auto-provision
     if (!cfg || !cfg.email || !cfg.password || !cfg.farmId) {
       try { cfg = await tryAutoProvision(); _bootLog(`tryAutoProvision: ${cfg ? "ok" : "no-token"}`); }
@@ -9243,6 +9414,10 @@ app.whenReady().then(async () => {
 
     // 4) Inicia agente OU setup manual
     if (cfg && cfg.email && cfg.password && cfg.farmId) {
+      // FASE 2: espelha credenciais (machine-bound) e apaga provisioning em texto
+      // puro; obtém o 1º token rotativo. Tudo best-effort/não-fatal (flag off).
+      try { ensureCredentialsEnc(cfg); } catch (e) { _bootLog(`ensureCredentialsEnc FAIL: ${e && e.message || e}`); }
+      try { refreshAgentTokenSafe(cfg); } catch (_) {}
       _bootLog("calling startAgent");
       try { startAgent(cfg); }
       catch (e) { _bootLog(`startAgent FAIL: ${e && e.stack || e}`); }

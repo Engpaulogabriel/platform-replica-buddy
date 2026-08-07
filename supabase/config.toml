@@ -47,6 +47,11 @@ verify_jwt = false
 [functions.scheduled-shutdown]
 verify_jwt = false
 
+# agent-auth: o Bearer/apikey e a anon key; a validacao real e por fingerprint +
+# token rotativo (FASE 2). Requer env AGENT_TOKEN_SECRET definido em Functions.
+[functions.agent-auth]
+verify_jwt = false
+
 
 
 
