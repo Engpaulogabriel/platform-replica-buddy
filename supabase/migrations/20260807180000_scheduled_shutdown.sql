@@ -1,24 +1,32 @@
 -- Desligamento Programado (Fazenda Semear, 17h BRT) ─────────────────────────
--- Tabela de auditoria (estado da máquina + histórico) + agendamento pg_cron
--- que dispara a edge function `scheduled-shutdown` a cada minuto das
--- 17:00 às 17:04 BRT (= 20:00–20:04 UTC). A função é idempotente: cada disparo
--- avança uma tentativa (1→2→3) e o disparo final confere e alerta se sobrou.
+-- Tabela de auditoria (estado da máquina + histórico) + agendamento pg_cron.
+-- Ciclo (seg–sex): 17:00 tent.1 · 17:05 tent.2 · 17:10 tent.3 + AVISO 1 ·
+-- 17:20 verificação final + AVISO 2 (só se ainda houver bomba ligada).
+-- A edge function `scheduled-shutdown` é idempotente: indexa cada passo pelo
+-- minuto BRT e o registra em steps_done, agindo uma única vez por passo.
 
 -- 1) Tabela de auditoria / estado ------------------------------------------
 CREATE TABLE IF NOT EXISTS public.scheduled_shutdowns (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id      uuid NOT NULL,
   run_date     date NOT NULL,                 -- data BRT do "run" do dia
-  attempt      int  NOT NULL DEFAULT 0,       -- 0..3 (tentativas já executadas)
+  attempt      int  NOT NULL DEFAULT 0,       -- última tentativa executada (1..3)
   status       text NOT NULL DEFAULT 'running', -- running | done
-  last_attempt_at timestamptz,                -- p/ janela de confirmação ~60s
+  steps_done   jsonb NOT NULL DEFAULT '[]'::jsonb, -- passos já executados: ["a1","a2","a3","final"]
+  last_attempt_at timestamptz,                -- horário da última tentativa
   targeted     jsonb,                         -- bombas comandadas na última tentativa
-  remaining    jsonb,                         -- bombas que resistiram (final)
-  alert_sent   boolean NOT NULL DEFAULT false,
+  remaining    jsonb,                         -- bombas que resistiram (17:10 / 17:20)
+  alert1_sent  boolean NOT NULL DEFAULT false, -- AVISO 1 (17:10)
+  alert2_sent  boolean NOT NULL DEFAULT false, -- AVISO 2 (17:20)
   created_at   timestamptz NOT NULL DEFAULT now(),
   updated_at   timestamptz NOT NULL DEFAULT now(),
   UNIQUE (farm_id, run_date)
 );
+
+-- Colunas novas (idempotente, caso a tabela já exista de um deploy anterior).
+ALTER TABLE public.scheduled_shutdowns ADD COLUMN IF NOT EXISTS steps_done  jsonb   NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE public.scheduled_shutdowns ADD COLUMN IF NOT EXISTS alert1_sent boolean NOT NULL DEFAULT false;
+ALTER TABLE public.scheduled_shutdowns ADD COLUMN IF NOT EXISTS alert2_sent boolean NOT NULL DEFAULT false;
 
 ALTER TABLE public.scheduled_shutdowns ENABLE ROW LEVEL SECURITY;
 
@@ -32,7 +40,6 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_shutdowns_farm_date
   ON public.scheduled_shutdowns (farm_id, run_date DESC);
 
 -- 2) Agendamento pg_cron ----------------------------------------------------
--- Extensões (idempotente; já habilitadas no projeto).
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
 
@@ -44,10 +51,11 @@ EXCEPTION WHEN OTHERS THEN
   NULL; -- não existia ainda
 END $$;
 
--- Dispara 20:00–20:04 UTC (17:00–17:04 BRT), 1x por minuto.
+-- Dispara 20:00–20:20 UTC (17:00–17:20 BRT), 1x/min, SEG–SEX (dow 1-5).
+-- A hora 20 UTC cai no mesmo dia da semana que 17 BRT, então dow no cron = dow BRT.
 SELECT cron.schedule(
   'scheduled-shutdown-semear-17h',
-  '0-4 20 * * *',
+  '0-20 20 * * 1-5',
   $cron$
   SELECT net.http_post(
     url     := 'https://dnyukgfedredvxpzjpqz.supabase.co/functions/v1/scheduled-shutdown',
