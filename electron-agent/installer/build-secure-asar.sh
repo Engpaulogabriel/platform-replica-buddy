@@ -104,6 +104,8 @@ restore() {
   [ -f "$MAIN_BAK" ] && cp "$MAIN_BAK" "$MAIN_APP" && rm -f "$MAIN_BAK"
   [ -f "$PY_STASH" ] && mv "$PY_STASH" "$PY_APP"
   [ -f "$EXE_STASH" ] && mv "$EXE_STASH" "$EXE_APP"
+  # FASE 3: remove o ofuscado temporario se o build abortou antes de cifrar
+  [ -f "${OBF_TMP:-}" ] && [ "${RENOV_ENCRYPT_ASAR:-0}" != "1" ] && rm -f "$OBF_TMP"
   return 0
 }
 trap restore EXIT
@@ -126,6 +128,15 @@ echo "[build-secure] ofuscando main.cjs ..."
 # --- 4) valida sintaxe do arquivo ofuscado --------------------------------
 node --check "$MAIN_APP"
 echo "[build-secure] node --check OK (ofuscado)"
+
+# --- 4b) FASE 3: captura o main.cjs OFUSCADO antes do restore (para cifrar) -
+# O alvo da cifragem AES e a LOGICA DE NEGOCIO (main.cjs ofuscado), nao os bytes
+# do asar — nao da para montar/executar um asar a partir de um buffer em memoria,
+# mas da para compilar o JS decifrado. So captura quando RENOV_ENCRYPT_ASAR=1.
+OBF_TMP="$AGENT_DIR/.main.obf.tmp"
+if [ "${RENOV_ENCRYPT_ASAR:-0}" = "1" ]; then
+  cp "$MAIN_APP" "$OBF_TMP"
+fi
 
 # --- 5) .py e .exe NUNCA entram no asar (movidos, nao deletados) ----------
 [ -f "$PY_APP" ] && mv "$PY_APP" "$PY_STASH"
@@ -182,3 +193,48 @@ echo "-----------------------------------------------------------"
 echo " REGISTRE este sha256 em agent_releases.file_hash para esta"
 echo " versao. O agente BLOQUEIA a operacao se o hash divergir."
 echo "==========================================================="
+
+# --- 9) FASE 3 (OPCIONAL): cifra o main.cjs ofuscado com AES-256-GCM -------
+# So roda quando RENOV_ENCRYPT_ASAR=1. Gera main.enc = [12B IV][ciphertext][16B TAG]
+# a partir do main.cjs OFUSCADO (capturado em 4b) e imprime a CHAVE (base64) que
+# deve ir para agent_release_keys.aes_key desta versao. O build normal (sem a env)
+# NAO e afetado. So use no BUILD PILOTO enquanto a FASE 3 nao for promovida.
+if [ "${RENOV_ENCRYPT_ASAR:-0}" = "1" ]; then
+  if [ ! -f "$OBF_TMP" ]; then
+    echo "[build-secure] ERRO FASE 3: $OBF_TMP ausente (ofuscado nao capturado)."; exit 5
+  fi
+  ENC_OUT="$(dirname "$OUT")/main.enc"
+  echo ""
+  echo "[build-secure] FASE 3: cifrando main.cjs ofuscado (AES-256-GCM) -> $ENC_OUT"
+  AES_KEY_B64=$(node -e '
+    const fs=require("fs"),crypto=require("crypto");
+    const inp=process.argv[1], out=process.argv[2];
+    const key=crypto.randomBytes(32), iv=crypto.randomBytes(12);
+    const data=fs.readFileSync(inp);
+    const c=crypto.createCipheriv("aes-256-gcm",key,iv);
+    const ct=Buffer.concat([c.update(data),c.final()]);
+    const tag=c.getAuthTag();
+    fs.writeFileSync(out,Buffer.concat([iv,ct,tag]));
+    process.stdout.write(key.toString("base64"));
+  ' "$OBF_TMP" "$ENC_OUT")
+  rm -f "$OBF_TMP"
+  if have shasum; then ENC_HASH=$(shasum -a 256 "$ENC_OUT" | awk '{print $1}');
+  elif have sha256sum; then ENC_HASH=$(sha256sum "$ENC_OUT" | awk '{print $1}');
+  else ENC_HASH="(sha256 indisponivel)"; fi
+  ENC_SIZE=$(wc -c < "$ENC_OUT" | tr -d ' ')
+  echo ""
+  echo "==========================================================="
+  echo " FASE 3 — main.enc gerado: $ENC_OUT"
+  echo " sha256(main.enc): $ENC_HASH"
+  echo " tamanho(main.enc):$ENC_SIZE bytes"
+  echo " AES key (base64):"
+  echo "   $AES_KEY_B64"
+  echo "-----------------------------------------------------------"
+  echo " REGISTRE a chave acima em agent_release_keys (version='$SRC_VER'):"
+  echo "   INSERT INTO agent_release_keys(version,aes_key) VALUES('$SRC_VER','<chave>')"
+  echo "   ON CONFLICT (version) DO UPDATE SET aes_key=EXCLUDED.aes_key;"
+  echo " No build PILOTO: package.json main=loader.cjs; empacote main.enc +"
+  echo " package.json (texto puro, nao-secreto) em resources; NAO inclua main.cjs"
+  echo " puro se quiser 'sem plaintext em disco'. NUNCA suba a chave junto do artefato."
+  echo "==========================================================="
+fi

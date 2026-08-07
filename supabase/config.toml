@@ -52,6 +52,11 @@ verify_jwt = false
 [functions.agent-auth]
 verify_jwt = false
 
+# agent-asar-key (FASE 3): entrega a chave AES do asar cifrado apos validar
+# fingerprint + token. verify_jwt=false; a validacao e feita na propria funcao.
+[functions.agent-asar-key]
+verify_jwt = false
+
 
 
 
