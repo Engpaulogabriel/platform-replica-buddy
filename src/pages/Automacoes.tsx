@@ -9,6 +9,7 @@ import { useAutomacoes } from "@/hooks/useAutomacoes";
 import { AutomacaoCard } from "@/components/automacoes/AutomacaoCard";
 import { AutomacaoFormDialog } from "@/components/automacoes/AutomacaoFormDialog";
 import { AutomacoesAuditPanel } from "@/components/automacoes/AutomacoesAuditPanel";
+import { ScheduledShutdownSection } from "@/components/automacoes/ScheduledShutdownSection";
 import { usePermission } from "@/contexts/MasterManagerContext";
 
 
@@ -143,6 +144,13 @@ export default function Automacoes() {
         </section>
       )}
 
+
+      {/* Desligamento Programado (config-driven, tabela scheduled_automations) */}
+      <ScheduledShutdownSection
+        farmId={activeFarmId}
+        equipments={equipments}
+        canEdit={canEditSchedules}
+      />
 
       {/* History */}
       <section className="space-y-3">
