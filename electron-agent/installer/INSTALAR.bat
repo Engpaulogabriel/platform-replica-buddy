@@ -3,8 +3,10 @@ REM ===========================================================================
 REM  INSTALAR.bat - RENOV Agent (instalacao segura, zero interacao)
 REM ---------------------------------------------------------------------------
 REM  100% ASCII + CRLF de proposito. Rode como Administrador (auto-eleva).
-REM  Faz tudo sozinho: fecha o agente, copia, limpa, tranca NTFS, cria as
-REM  tarefas de boot e watchdog, e inicia o agente. Sem pause/choice/confirmacao.
+REM  Faz tudo sozinho: fecha o agente, copia, limpa, cria as tarefas de boot e
+REM  watchdog, e inicia o agente. Sem pause/choice/confirmacao.
+REM  v3.25.48: ZERO NTFS. Nenhum icacls/permissao — a seguranca e 100% online
+REM  (server-side). Isso garante que o OTA NUNCA trave por falta de permissao.
 REM  Destino padrao: C:\Gestor de Bombas   (sobrescreva: INSTALAR.bat "D:\Path")
 REM ===========================================================================
 setlocal EnableExtensions EnableDelayedExpansion
@@ -76,19 +78,12 @@ for %%N in ("Agente-Renov.exe" "Gestor de Bombas Key.exe" "GestorDeBombasKey.exe
 if not defined AGENT_EXE goto FAIL
 echo       Agente: !AGENT_EXE!
 
-REM -- 5) NTFS: so SYSTEM e Administrators leem app.asar e serial_bridge.exe --
-echo [5/9] Aplicando permissoes NTFS...
-set "ASAR=%RES%\app.asar"
-set "BRIDGE=%RES%\serial_bridge.exe"
-REM  Pasta: quebra heranca, mantem SYSTEM+Admins, remove Users/Everyone.
-icacls "%DEST%" /inheritance:r >nul 2>&1
-REM  O usuario que roda o agente precisa de MODIFY para o OTA conseguir
-REM  substituir o app.asar (ENOENT/permissao se so SYSTEM+Admins tiverem acesso
-REM  e o agente rodar como usuario). SYSTEM+Admins seguem Full; Users/Everyone fora.
-icacls "%DEST%" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" "%USERDOMAIN%\%USERNAME%:(OI)(CI)M" >nul 2>&1
-icacls "%DEST%" /remove:g "Users" "Everyone" "Authenticated Users" >nul 2>&1
-REM  Arquivos sensiveis: heranca off + leitura SO para SYSTEM e Administrators.
-for %%P in ("%ASAR%" "%BRIDGE%") do if exist "%%~P" icacls "%%~P" /inheritance:r /grant:r "SYSTEM:F" "Administrators:F" "%USERDOMAIN%\%USERNAME%:M" /remove:g "Users" "Everyone" "Authenticated Users" >nul 2>&1
+REM -- 5) (REMOVIDO na v3.25.48) NADA de NTFS/icacls. ------------------------
+REM  Antes travavamos app.asar/serial_bridge.exe por NTFS (so SYSTEM/Admins).
+REM  Isso causava OTA travado (o agente rodando como usuario nao conseguia
+REM  substituir o app.asar) e nao agregava seguranca real (admin local contorna).
+REM  A pasta fica com as permissoes herdadas padrao; a seguranca e 100% online.
+echo [5/9] (sem permissoes NTFS - OTA livre)
 
 REM -- 6) Tarefa de BOOT: inicia o agente como SYSTEM, sem login -------------
 echo [6/9] Registrando tarefa de boot RENOV-Agent-Boot...
@@ -111,7 +106,7 @@ echo  Instalacao concluida. Agente iniciado.
 echo  - Bridge: serial_bridge.exe sem Python
 echo  - Boot: tarefa RENOV-Agent-Boot como SYSTEM sem login
 echo  - Watchdog: RENOV-Agent-Watchdog a cada 1 min
-echo  - app.asar e serial_bridge.exe travados por NTFS
+echo  - Sem NTFS/icacls: OTA nunca trava; seguranca 100%% online
 echo ============================================================
 exit /b 0
 

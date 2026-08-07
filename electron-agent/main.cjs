@@ -617,17 +617,12 @@ function readBlockFlag() {
 }
 
 function writeBlockFlag(reason, details) {
-  try {
-    fs.writeFileSync(BLOCK_FLAG_FILE, JSON.stringify({
-      reason,
-      details: details || null,
-      agent_version: AGENT_VERSION,
-      hostname: os.hostname(),
-      at: new Date().toISOString(),
-    }, null, 2));
-  } catch (e) {
-    try { _bootLog(`[SECURITY] não consegui gravar o kill-file: ${e.message}`); } catch (_) {}
-  }
+  // v3.25.48: NO-OP. O kill-file local NUNCA mais é criado — proteção local não
+  // agrega (admin local contorna) e já parou fazenda por falso positivo. Toda
+  // trava de segurança agora é ONLINE (server-side revoga o token). Mantida a
+  // assinatura para não quebrar chamadores; o boot ainda APAGA qualquer flag
+  // remanescente de versões antigas (ver readBlockFlag/boot self-heal).
+  void reason; void details;
 }
 
 // Encerra a operação de forma DEFINITIVA: sem relaunch, sem watchdog, sem OTA.
@@ -6135,23 +6130,9 @@ async function reportUpdateStatus(patch) {
 // ─────────────────────────────────────────────────────────────────────────────
 // v3.10.6 — OTA via app.asar + bucket privado.
 // ─────────────────────────────────────────────────────────────────────────────
-// v3.25.47: SELF-HEAL do OTA vs NTFS. Concede ao usuário atual permissão de
-// escrita (Modify) no app.asar + pasta resources via icacls, para o copy do OTA
-// funcionar mesmo se o INSTALAR.bat trancou o arquivo. Só tem efeito se o agente
-// tiver WRITE_DAC (SYSTEM/admin/dono) — senão o icacls falha e o OTA cai no erro
-// acionável. Best-effort: nunca lança.
-function _otaGrantSelfWrite(resourcesPath, asarPath, account) {
-  try {
-    const { execSync } = require("child_process");
-    let user = account && account !== "?" ? account : null;
-    if (!user) { try { user = require("os").userInfo().username; } catch (_) { user = null; } }
-    if (!user) return false;
-    const opts = { windowsHide: true, timeout: 8000, stdio: "ignore" };
-    if (resourcesPath) execSync(`icacls "${resourcesPath}" /grant "${user}:(OI)(CI)M"`, opts);
-    if (asarPath) execSync(`icacls "${asarPath}" /grant "${user}:M"`, opts);
-    return true;
-  } catch (_) { return false; }
-}
+// v3.25.48: ZERO NTFS. O OTA é simplesmente baixar → substituir → reiniciar.
+// Removido o self-heal de icacls (o INSTALAR.bat não tranca mais nada, então a
+// pasta é gravável e o copy funciona direto). Sem permissões locais, sem icacls.
 
 async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize) {
   if (isInstallingUpdate) return;
@@ -6320,11 +6301,10 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
       return recordFailure(`nenhum app.asar nem pasta app encontrados em ${process.resourcesPath}`);
     }
 
-    // v3.25.47: loga a CONTA sob a qual o agente roda — responde "SYSTEM ou
-    // usuario?" e ajuda a diagnosticar OTA que falha por permissao NTFS.
-    let _otaAccount = "?";
-    try { _otaAccount = require("os").userInfo().username; } catch (_) {}
-    pushLog("info", "update", `[OTA-asar] Substituindo app.asar... (agente rodando como '${_otaAccount}', destino ${currentAsar})`);
+    // v3.25.48: OTA sem NTFS — baixar, substituir, reiniciar. Sem icacls, sem
+    // permissões locais. Se o copy falhar, restaura o backup e reporta (o próximo
+    // ciclo tenta de novo); a pasta é gravável porque o INSTALAR.bat não tranca nada.
+    pushLog("info", "update", `[OTA-asar] Substituindo app.asar... (destino ${currentAsar})`);
     try {
       // tmpAsar é .new fora do asar — usa fs normal pra ler; destino é .asar — usa originalFs.
       if (!originalFs.existsSync(tmpAsar)) return recordFailure(`arquivo temporario sumiu: ${tmpAsar}`);
@@ -6332,29 +6312,8 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
       try { fs.unlinkSync(tmpAsar); } catch (_) {}
     } catch (e) {
       const code = (e && e.code) || "?";
-      // v3.25.47 SELF-HEAL: se falhou por permissão NTFS, tenta liberar via icacls
-      // e repetir o copy (funciona quando o agente tem WRITE_DAC — SYSTEM/admin/dono).
-      let healed = false;
-      if ((code === "EACCES" || code === "EPERM" || code === "ENOENT") && process.platform === "win32") {
-        pushLog("warn", "update", `[OTA-asar] copy falhou (${code}) — tentando liberar permissao via icacls e repetir...`);
-        if (_otaGrantSelfWrite(process.resourcesPath, currentAsar, _otaAccount)) {
-          try {
-            originalFs.copyFileSync(tmpAsar, currentAsar);
-            try { fs.unlinkSync(tmpAsar); } catch (_) {}
-            healed = true;
-            pushLog("info", "update", "[OTA-asar] copy OK apos icacls (self-heal)");
-          } catch (e2) {
-            pushLog("error", "update", `[OTA-asar] copy ainda falhou apos icacls: ${e2.message}`);
-          }
-        }
-      }
-      if (!healed) {
-        try { originalFs.copyFileSync(bakAsar, currentAsar); } catch (_) {}
-        const permHint = (code === "EPERM" || code === "EACCES" || code === "ENOENT")
-          ? ` — SEM PERMISSAO NTFS: o agente roda como '${_otaAccount}' e nao conseguiu escrever ${currentAsar} nem via icacls (sem WRITE_DAC). Re-rode o INSTALAR.bat (concede Modify a esse usuario) ou rode o agente como SYSTEM.`
-          : "";
-        return recordFailure(`falha ao substituir app.asar: ${e.message} (conta='${_otaAccount}', code=${code})${permHint} — backup restaurado`);
-      }
+      try { originalFs.copyFileSync(bakAsar, currentAsar); } catch (_) {}
+      return recordFailure(`falha ao substituir app.asar: ${e.message} (code=${code}) — backup restaurado`);
     }
 
     await reportUpdateStatus({ update_status: "installing", completed_at: new Date().toISOString() });
@@ -6965,8 +6924,8 @@ async function quitWithAuth() {
 // frames TX/RX, endereços de PLC e o protocolo serial a qualquer pessoa que
 // abrisse o agente na fazenda. Não existe mais NENHUMA interface visual de log
 // (nem com senha — a senha só denunciava que o log existia). O log continua
-// sendo gravado APENAS em arquivo (%APPDATA%/logs cifrado por DPAPI, boot.log,
-// liveness.txt), protegido por NTFS (INSTALAR.bat: só SYSTEM/Administrators leem).
+// sendo enviado para a nuvem (agent_logs). Sem log local sensível e sem NTFS
+// (v3.25.48: zero proteção local); só liveness.txt (timestamp) permanece.
 // Estas funções viraram no-op para blindar qualquer caminho remanescente.
 async function showLogWindow() {
   try { _bootLog("[SECURITY] showLogWindow() ignorado — janela de log removida (v3.25.46)"); } catch (_) {}
