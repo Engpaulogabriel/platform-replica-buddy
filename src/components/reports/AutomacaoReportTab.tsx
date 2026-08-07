@@ -35,6 +35,7 @@ function getOriginIcon(origin: string) {
 
 function getOriginLabel(origin: string) {
   if (origin === "Manual") return "Local";
+  if (origin === "Automático") return "Automação"; // desligamento programado
   return origin;
 }
 
@@ -155,7 +156,8 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
         const isSystem = SYSTEM_ACTIONS.has(e.action) || e.origin === "Sistema";
         if (isSystem) return false;
         if (!showReadings && e.action === "Leitura OK") return false;
-        return e.origin === "Remoto" || e.origin === "Manual" || e.origin === "WhatsApp";
+        return e.origin === "Remoto" || e.origin === "Manual" || e.origin === "WhatsApp"
+          || e.origin === "Automático"; // desligamento programado (origin='auto')
       });
     // O nome exibido (item.user) vem DIRETO do actor_label do banco (resolveUser já o
     // prioriza) — sem override, sem JOIN com profiles, sem resolver por user_id.

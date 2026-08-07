@@ -116,7 +116,7 @@ Deno.serve(async (req) => {
 
       // Tentativas — comanda desligamento nas bombas ligadas.
       let acted: any[] = [];
-      if (step.attempt) acted = await commandShutdown(supabase, a.farm_id, onPumps, step);
+      if (step.attempt) acted = await commandShutdown(supabase, a, onPumps, step);
 
       // AVISO 2 (verificação final) — só se ainda há bomba ligada.
       let alert2Sent = false;
@@ -173,7 +173,15 @@ async function fetchOnPumps(supabase: any, a: any): Promise<any[]> {
   return pumps.filter((e) => isRunning(e.last_outputs_state, e.saida));
 }
 
-async function commandShutdown(supabase: any, farmId: string, onPumps: any[], step: Step): Promise<any[]> {
+async function commandShutdown(supabase: any, a: any, onPumps: any[], step: Step): Promise<any[]> {
+  const farmId = a.farm_id;
+  // Atribuição no relatório ("Por" = nome da regra). Gravamos APENAS last_changed_by
+  // (campo display-only; o agente nunca o lê). NÃO tocamos last_actuation_origin:
+  // a detecção de bomba LOCAL (='local') dispara o desligamento FORÇADO no agente;
+  // sobrescrever com 'automation' quebraria o forçado. A troca de origem no
+  // relatório é feita pelo trigger BEFORE INSERT em automation_log.
+  const changedBy = a.name || "Desligamento Programado";
+  const nowIso = new Date().toISOString();
   const acted: any[] = [];
   for (const p of onPumps) {
     const isLocal = String(p.last_actuation_origin ?? "").toLowerCase() === "local";
@@ -187,7 +195,11 @@ async function commandShutdown(supabase: any, farmId: string, onPumps: any[], st
       if (useForced && p.forced_shutdown_enabled !== true) {
         await supabase.from("equipments").update({ forced_shutdown_enabled: true }).eq("id", p.id);
       }
-      await supabase.from("equipments").update({ desired_running: false }).eq("id", p.id);
+      await supabase.from("equipments").update({
+        desired_running: false,
+        last_changed_by: changedBy,
+        updated_at: nowIso,
+      }).eq("id", p.id);
       await supabase.rpc("enqueue_reset_pump_command", {
         _farm_id: farmId, _equipment_id: p.id,
         _reason: `scheduled_shutdown_a${step.attempt}${useForced ? "_forced" : ""}`,
