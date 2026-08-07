@@ -1,0 +1,62 @@
+-- Desligamento Programado (Fazenda Semear, 17h BRT) ─────────────────────────
+-- Tabela de auditoria (estado da máquina + histórico) + agendamento pg_cron
+-- que dispara a edge function `scheduled-shutdown` a cada minuto das
+-- 17:00 às 17:04 BRT (= 20:00–20:04 UTC). A função é idempotente: cada disparo
+-- avança uma tentativa (1→2→3) e o disparo final confere e alerta se sobrou.
+
+-- 1) Tabela de auditoria / estado ------------------------------------------
+CREATE TABLE IF NOT EXISTS public.scheduled_shutdowns (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  farm_id      uuid NOT NULL,
+  run_date     date NOT NULL,                 -- data BRT do "run" do dia
+  attempt      int  NOT NULL DEFAULT 0,       -- 0..3 (tentativas já executadas)
+  status       text NOT NULL DEFAULT 'running', -- running | done
+  last_attempt_at timestamptz,                -- p/ janela de confirmação ~60s
+  targeted     jsonb,                         -- bombas comandadas na última tentativa
+  remaining    jsonb,                         -- bombas que resistiram (final)
+  alert_sent   boolean NOT NULL DEFAULT false,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (farm_id, run_date)
+);
+
+ALTER TABLE public.scheduled_shutdowns ENABLE ROW LEVEL SECURITY;
+
+-- leitura para usuários autenticados (auditoria via plataforma); escrita só
+-- pela service_role (edge function) — nenhuma policy de INSERT/UPDATE p/ authenticated.
+DROP POLICY IF EXISTS scheduled_shutdowns_select ON public.scheduled_shutdowns;
+CREATE POLICY scheduled_shutdowns_select ON public.scheduled_shutdowns
+  FOR SELECT TO authenticated USING (true);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_shutdowns_farm_date
+  ON public.scheduled_shutdowns (farm_id, run_date DESC);
+
+-- 2) Agendamento pg_cron ----------------------------------------------------
+-- Extensões (idempotente; já habilitadas no projeto).
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_net;
+
+-- Remove agendamento anterior (idempotência do deploy).
+DO $$
+BEGIN
+  PERFORM cron.unschedule('scheduled-shutdown-semear-17h');
+EXCEPTION WHEN OTHERS THEN
+  NULL; -- não existia ainda
+END $$;
+
+-- Dispara 20:00–20:04 UTC (17:00–17:04 BRT), 1x por minuto.
+SELECT cron.schedule(
+  'scheduled-shutdown-semear-17h',
+  '0-4 20 * * *',
+  $cron$
+  SELECT net.http_post(
+    url     := 'https://dnyukgfedredvxpzjpqz.supabase.co/functions/v1/scheduled-shutdown',
+    headers := jsonb_build_object(
+      'Authorization', 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRueXVrZ2ZlZHJlZHZ4cHpqcHF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2ODU1OTQsImV4cCI6MjA5MjI2MTU5NH0.OSg44w0CRVvD-f6Ts_U9DVeQkQ-4c37passKEK5X0kk',
+      'apikey',        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRueXVrZ2ZlZHJlZHZ4cHpqcHF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2ODU1OTQsImV4cCI6MjA5MjI2MTU5NH0.OSg44w0CRVvD-f6Ts_U9DVeQkQ-4c37passKEK5X0kk',
+      'Content-Type',  'application/json'
+    ),
+    body := jsonb_build_object('source','pg_cron','ts', now())
+  );
+  $cron$
+);

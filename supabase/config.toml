@@ -42,6 +42,11 @@ verify_jwt = false
 [functions.verify-master-password]
 verify_jwt = false
 
+# scheduled-shutdown: disparada pelo pg_cron (apikey anon no header). A propria
+# funcao usa SERVICE_ROLE p/ ler equipments e enfileirar o reset — sem JWT de usuario.
+[functions.scheduled-shutdown]
+verify_jwt = false
+
 
 
 
