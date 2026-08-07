@@ -51,11 +51,11 @@ EXCEPTION WHEN OTHERS THEN
   NULL; -- não existia ainda
 END $$;
 
--- Dispara 20:00–20:20 UTC (17:00–17:20 BRT), 1x/min, SEG–SEX (dow 1-5).
--- A hora 20 UTC cai no mesmo dia da semana que 17 BRT, então dow no cron = dow BRT.
+-- Dispara às 17:00, 17:05, 17:10, 17:15, 17:20 BRT (20:00/05/10/15/20 UTC),
+-- SEG–SEX (dow 1-5). A hora 20 UTC cai no mesmo dia da semana que 17 BRT.
 SELECT cron.schedule(
   'scheduled-shutdown-semear-17h',
-  '0-20 20 * * 1-5',
+  '0,5,10,15,20 20 * * 1-5',
   $cron$
   SELECT net.http_post(
     url     := 'https://dnyukgfedredvxpzjpqz.supabase.co/functions/v1/scheduled-shutdown',
