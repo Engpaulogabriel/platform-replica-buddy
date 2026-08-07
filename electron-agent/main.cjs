@@ -593,6 +593,16 @@ function writeLiveness() {
 //   • o próprio agente checa no boot e recusa iniciar a operação.
 // Some apenas por ação humana: apagar o arquivo = reconfiguração autorizada.
 let agentBlocked = false;
+// ─── v3.25.48 KILL-SWITCH DO ENFORCEMENT DE SEGURANÇA ───────────────────────
+// Desativa TODOS os bloqueios de segurança que podem PARAR uma fazenda por falso
+// positivo: anti-clone por hardware (agent_hardware), anti-clone server-side
+// (license-validate machine_mismatch) e integridade do asar contra o banco
+// (verifyAsarAgainstServer / asar_tampered). Com o flag OFF os checks ainda RODAM
+// e LOGAM (warn), mas NUNCA chamam blockAgentPermanently — a operação das bombas
+// jamais é interrompida por essas heurísticas. Ativar novamente só após testar a
+// causa raiz dos falsos positivos (hash de release divergente, wmic ausente etc.).
+// NÃO afeta a revogação/suspensão EXPLÍCITA de licença pelo servidor (billing).
+const SECURITY_BLOCK_ENFORCEMENT = false;
 const BLOCK_FLAG_FILE = process.resourcesPath
   ? path.join(process.resourcesPath, "..", "agent-blocked.flag")
   : path.join(app.getPath("userData"), "agent-blocked.flag");
@@ -8020,7 +8030,15 @@ async function startAgent(cfg) {
   // Só sai deste estado quando alguém apagar o arquivo manualmente.
   try {
     const blocked = readBlockFlag();
-    if (blocked) {
+    // v3.25.48 SELF-HEAL: com o enforcement de segurança OFF, um kill-file remanescente
+    // (gravado por um falso positivo de asar_tampered/clone em versão anterior) NÃO pode
+    // mais manter a fazenda parada. Apaga o flag e inicia a operação normalmente.
+    if (blocked && !SECURITY_BLOCK_ENFORCEMENT) {
+      try { fs.unlinkSync(BLOCK_FLAG_FILE); } catch (_) {}
+      agentBlocked = false;
+      pushLog("warn", "system",
+        `[SECURITY] kill-file remanescente (motivo: ${blocked.reason || "?"}) IGNORADO e removido — enforcement DESATIVADO (v3.25.48). Iniciando operação.`);
+    } else if (blocked) {
       agentBlocked = true;
       pushLog("error", "system",
         `[SECURITY] Agente BLOQUEADO desde ${blocked.at || "?"} (motivo: ${blocked.reason || "?"}). ` +
@@ -8495,6 +8513,13 @@ async function verifyAsarAgainstServer(cfg) {
       `[SECURITY] app.asar adulterado — hash local ${actual} != hash registrado ${String(rel.file_hash).trim()}`);
     await reportTampering(cfg, "asar_server_mismatch", "critical",
       { version: AGENT_VERSION, source: "agent_releases" }, rel.file_hash, actual);
+    // v3.25.48: enforcement OFF → NÃO bloqueia (falsos positivos por hash de
+    // release divergente pararam fazendas). Loga/reporta e SEGUE operando.
+    if (!SECURITY_BLOCK_ENFORCEMENT) {
+      pushLog("warn", "system",
+        "[SECURITY] enforcement DESATIVADO (v3.25.48) — asar divergente NÃO bloqueia; operação mantida.");
+      return { level: "mismatch_warn_only", expected: rel.file_hash, actual };
+    }
     await blockAgentPermanently("asar_tampered",
       `arquivo do agente foi adulterado na fazenda ${cfg?.farmName || cfg?.farmId || "?"}.`,
       { version: AGENT_VERSION, expected: String(rel.file_hash).trim(), actual });
@@ -8735,6 +8760,13 @@ function scheduleBackgroundAntiCloneCheck(cfg) {
     try {
       const res = await verifyHardwareFingerprint(cfg);
       if (!res || res.level !== "blocked") return;
+      // v3.25.48: enforcement OFF → NÃO encerra nem bloqueia por hardware divergente
+      // (falsos positivos por wmic ausente/MAC de Starlink pararam fazendas). Apenas loga.
+      if (!SECURITY_BLOCK_ENFORCEMENT) {
+        pushLog("warn", "system",
+          `[SECURITY] anti-clone DESATIVADO (v3.25.48) — hardware divergente (${(res.changed || []).join(", ")}) NÃO bloqueia; operação mantida.`);
+        return;
+      }
       antiCloneTriggered = true;
       pushLog("error", "system",
         `[SECURITY] CLONE detectado em background — componentes divergentes: ${(res.changed || []).join(", ")}. Encerrando em 60s.`);
@@ -8973,6 +9005,12 @@ async function validateLicenseHeartbeat(cfg) {
       pushLog("error", "system",
         `[SECURITY] Servidor reportou machine_mismatch (clone?) — strike ${machineMismatchStrikes}/${MACHINE_MISMATCH_STRIKES_TO_BLOCK}`);
       if (machineMismatchStrikes >= MACHINE_MISMATCH_STRIKES_TO_BLOCK) {
+        // v3.25.48: enforcement OFF → o machine_mismatch do servidor NÃO bloqueia.
+        if (!SECURITY_BLOCK_ENFORCEMENT) {
+          pushLog("warn", "system",
+            "[SECURITY] anti-clone server-side DESATIVADO (v3.25.48) — machine_mismatch NÃO bloqueia; operação mantida.");
+          return;
+        }
         try {
           await blockAgentPermanently("clone_detected",
             `hardware nao corresponde ao device registrado da fazenda ${cfg?.farmName || cfg?.farmId || "?"}.`,
