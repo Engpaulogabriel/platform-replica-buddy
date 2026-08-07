@@ -71,9 +71,21 @@ function fmtShortTimestamp(d: Date): string {
 }
 
 function normalizePhoneKey(phone: string | null | undefined): string {
-  const digits = String(phone ?? "").replace(/\D/g, "");
+  let digits = String(phone ?? "").replace(/\D/g, "");
   if (!digits) return "";
-  return digits.startsWith("55") ? digits : `55${digits}`;
+  // Prepend country code quando faltar (número local de 10/11 dígitos).
+  if (!digits.startsWith("55") && (digits.length === 10 || digits.length === 11)) {
+    digits = `55${digits}`;
+  }
+  // CORREÇÃO DE ENTREGA (BR): insere o 9º dígito do celular quando o número está
+  // com 12 dígitos (55 + DDD + 8 locais). Sem isso, "557781503429" (Paulo) sai
+  // para um número que NÃO é o WhatsApp real dele — a Meta conta como entregue,
+  // mas a pessoa nunca recebe. Celular BR = 55 + DDD(2) + 9 dígitos = 13.
+  if (digits.startsWith("55")) {
+    const rest = digits.slice(2); // DDD(2) + local
+    if (rest.length === 10) digits = `55${rest.slice(0, 2)}9${rest.slice(2)}`;
+  }
+  return digits;
 }
 
 // Phone format the Meta API expects: digits only (we use the E.164 digits without "+").
