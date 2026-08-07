@@ -185,6 +185,51 @@ function buildAlertaEquipamentoParams(message: string, md: Record<string, unknow
   return [titulo, farm, tipo, detalhes].map((p) => sanitizeTplParam(p).slice(0, 1000));
 }
 
+// Destinatários dos alertas de SISTEMA (agente offline / equipamentos sem
+// comunicação). São avisos operacionais (Starlink/PC/rádio) → vão para os
+// admins do sistema, não para os operadores da fazenda.
+const SYSTEM_ALERT_RECIPIENTS = ["5577999608294", "5577981503951"];
+
+function fazendaLabel(name: string): string {
+  const n = String(name ?? "").trim();
+  return /^fazenda\b/i.test(n) ? n : `Fazenda ${n}`;
+}
+function fmtHeartbeatSafe(iso: unknown): string {
+  try { if (typeof iso === "string" && iso) return fmtShortTimestamp(new Date(iso)); } catch (_) {}
+  return "—";
+}
+
+// Monta os 4 slots do template alerta_equipamento para os alertas de sistema,
+// no formato pedido (sem redundância). baseType: agent_offline | com_missing.
+function buildWatchdogAlertParams(baseType: string, isRecovery: boolean, farmName: string, md: Record<string, unknown>): string[] {
+  const farm = fazendaLabel(farmName);
+  let s: [string, string, string, string];
+  if (baseType === "agent_offline") {
+    if (isRecovery) {
+      const dt = String(md?.downtime ?? md?.downtime_min ?? "").trim();
+      s = [`🟢 AGENTE ONLINE — ${farm}`, farm, "Comunicação restabelecida",
+        dt ? `Ficou offline por ${dt}` : "Sistema operacional novamente"];
+    } else {
+      const mins = Number(md?.age_sec) ? Math.round(Number(md.age_sec) / 60) : 5;
+      s = [`🔴 AGENTE OFFLINE — ${farm}`, farm, `Sem comunicação há ${mins} min`,
+        `Último heartbeat: ${fmtHeartbeatSafe(md?.last_heartbeat)} · Verificar Starlink/PC`];
+    }
+  } else if (baseType === "com_missing" || baseType === "pumps_offline") {
+    const n = Number(md?.count ?? 0);
+    if (isRecovery) {
+      s = ["✅ COMUNICAÇÃO RESTAURADA", farm, "Comunicação normalizada",
+        n ? `${n} equipamento(s) voltaram a responder` : "Equipamentos voltaram a responder"];
+    } else {
+      const list = String(md?.equipment_list ?? "").trim();
+      s = [`⚠️ ${n} EQUIPAMENTO(S) SEM RESPOSTA`, farm, "Falha de comunicação",
+        `${list}${list ? " · " : ""}Possível falha no rádio`];
+    }
+  } else {
+    s = [isRecovery ? `✅ ${farm}` : `⚠️ ${farm}`, farm, baseType.replace(/_/g, " "), fmtShortTimestamp(new Date())];
+  }
+  return s.map((p) => sanitizeTplParam(p).slice(0, 1000));
+}
+
 
 function addOperatorOnce(
   opsByFarm: Map<string, any[]>,
@@ -350,9 +395,10 @@ async function sendSingleWhatsAppMessage(args: {
   let metaId: string | null = null;
   let usedMode: "text" | "template" = "text";
 
-  // alerta_equipamento exige 4 params — monta sempre os 4 (senão 132000 e não entrega).
+  // alerta_equipamento exige 4 params. Se o caller já passou os 4 (ex.: watchdog,
+  // whatsapp-alerts), usa-os; se passou 1 (mensagem composta), monta os 4 a partir dela.
   const sanitizedParams = tplName === "alerta_equipamento"
-    ? buildAlertaEquipamentoParams(message, metadata)
+    ? (tplParams.length === 4 ? templateParamsFor(tplName, tplParams) : buildAlertaEquipamentoParams(message, metadata))
     : templateParamsFor(tplName, tplParams);
 
 
@@ -1452,6 +1498,7 @@ async function sendToAll(args: {
   tplParams: string[];
   messageType: string;
   metadata: Record<string, unknown>;
+  tplNameOverride?: string;
 }) {
   const results = await Promise.all(args.operators.map((op) => sendSingleWhatsAppMessage({
     supabase: args.supabase,
@@ -1463,6 +1510,7 @@ async function sendToAll(args: {
     tplParams: args.tplParams,
     messageType: args.messageType,
     metadata: args.metadata,
+    tplNameOverride: args.tplNameOverride,
   })));
   return results.filter(Boolean).length;
 }
@@ -1917,24 +1965,32 @@ async function processImmediateAlert(supabase: any, config: any, phoneNumberId: 
     }
   }
 
-  const header = isRecovery ? (equipmentName ? `✅ ${equipmentName}` : `✅ ${farmName}`) : (equipmentName ? `⚠️ ${equipmentName}` : `⚠️ ${farmName}`);
-  const message = `${header}\n${messageInput}\nFazenda: ${farmName}\n${ts}`;
-  const tplParams = [
-    (equipmentName ?? farmName).slice(0, 60),
-    alertType,
-    farmName,
-    ts,
-  ];
-  let targets = await loadFarmOperators(supabase, resolvedFarmId);
-  // electron_watchdog / agent_offline_watchdog: enviar APENAS para admins/super_admins da fazenda
+  let message: string;
+  let tplParams: string[];
+  let targets: any[];
+  let tplNameOverride: string | undefined;
+
   if (isWatchdog) {
-    const before = targets.length;
-    targets = targets.filter((o: any) => o?.role === "super_admin" || o?.role === "admin");
-    console.log(`[NOTIFY] watchdog admin-only filter: ${before} → ${targets.length}`);
+    // Alertas de sistema: template alerta_equipamento (4 slots) no formato pedido,
+    // e destinatários FIXOS (admins do sistema), não os operadores da fazenda.
+    tplParams = buildWatchdogAlertParams(baseType, isRecovery, farmName, (body?.metadata ?? {}) as Record<string, unknown>);
+    tplNameOverride = "alerta_equipamento";
+    // Texto (<24h): 3 linhas úteis (título, estado, detalhes) — sem repetir a fazenda.
+    message = [tplParams[0], tplParams[2], tplParams[3]].filter(Boolean).join("\n");
+    targets = SYSTEM_ALERT_RECIPIENTS.map((ph) => ({
+      phone: ph, name: "Sistema", role: "super_admin",
+      last_message_at: null, receive_alerts: true, is_active: true,
+    }));
+  } else {
+    const header = isRecovery ? (equipmentName ? `✅ ${equipmentName}` : `✅ ${farmName}`) : (equipmentName ? `⚠️ ${equipmentName}` : `⚠️ ${farmName}`);
+    message = `${header}\n${messageInput}\nFazenda: ${farmName}\n${ts}`;
+    tplParams = [(equipmentName ?? farmName).slice(0, 60), alertType, farmName, ts];
+    targets = await loadFarmOperators(supabase, resolvedFarmId);
   }
+
   const sent = await sendToAll({
     supabase, config, phoneNumberId, operators: targets, farmId: resolvedFarmId,
-    message, tplParams, messageType: `alert_${alertType}`,
+    message, tplParams, messageType: `alert_${alertType}`, tplNameOverride,
     metadata: { via: body?.source ?? "frontend", source: "immediate_dashboard", alert_type: alertType, base_type: baseType, is_recovery: isRecovery, equipment_id: equipmentId, equipment_name: equipmentName },
   });
   return { ok: true, mode: "immediate", type: "alert", sent, operators: targets.length, alert_type: alertType, is_recovery: isRecovery };
