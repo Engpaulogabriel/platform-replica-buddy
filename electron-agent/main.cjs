@@ -536,6 +536,16 @@ const BRIDGE_PING_INTERVAL_MS = 10_000;
 const BRIDGE_PING_TIMEOUT_MS = 4_000;
 const AUTO_RESET_TIMEOUT_THRESHOLD = 3;
 const BRIDGE_RESET_SETTLE_MS = 800;
+// v3.25.49 — supervisão da bridge: auto-recovery com backoff, COM travada e morte silenciosa.
+const BRIDGE_BACKOFF_MS = [3000, 5000, 10000, 15000, 30000]; // 3→5→10→15→30s
+const BRIDGE_MAX_RELAUNCH = 5;
+const COM_STUCK_MS = 60_000;   // bridge aberta mas sem RX por 60s = COM travada
+const COM_STUCK_MAX = 3;       // 3 travamentos na mesma COM → tenta a próxima
+const COM_CYCLE = ["COM1","COM2","COM3","COM4","COM5","COM6","COM7","COM8","COM9","COM10","COM11","COM12","COM13","COM14","COM15"];
+let bridgeRelaunchAttempts = 0;
+let bridgeRelaunchTimer = null;
+let bridgeDead = false;        // 5 tentativas falharam → serial morta; polling HTTP segue
+let comStuckCount = 0;
 const LOG_FLUSH_MAX_BUFFER = 50;
 // v3.25.39 HARDENING: teto de 10s em TODA chamada de nuvem (Starlink standby).
 // Nuvem é best-effort: se estourar, loga e segue operação local (COM). Nunca bloqueia.
@@ -4204,12 +4214,84 @@ async function recoverBridge(reason, options = {}) {
   }
 }
 
+// v3.25.49 — AUTO-RECOVERY da bridge com BACKOFF. Chamado quando o processo da
+// bridge MORRE/crasha (exit/error) ou some silenciosamente (pid check). Espera
+// o backoff (3→5→10→15→30s), relança até BRIDGE_MAX_RELAUNCH vezes. Se todas
+// falharem: marca bridgeDead e o agente SEGUE rodando (só a serial morre; o
+// polling HTTP continua). NUNCA mostra popup — headless total.
+function scheduleBridgeRelaunch(reason) {
+  if (appClosing || portManuallyClosed || bridgeStopping || bridgeRecovering) return;
+  if (bridgeRelaunchTimer || bridgeReady) return; // já agendado ou já subiu
+  if (bridgeRelaunchAttempts >= BRIDGE_MAX_RELAUNCH) {
+    if (!bridgeDead) {
+      bridgeDead = true;
+      lastBridgeError = "bridge_dead";
+      pushLog("error", "system", `[BRIDGE] ${BRIDGE_MAX_RELAUNCH} tentativas falharam (${reason}) — serial MORTA; polling HTTP continua. Sem popup.`);
+      try { void sendHeartbeat(); } catch (_) {}
+    }
+    return;
+  }
+  const delay = BRIDGE_BACKOFF_MS[Math.min(bridgeRelaunchAttempts, BRIDGE_BACKOFF_MS.length - 1)];
+  bridgeRelaunchAttempts++;
+  lastBridgeError = `bridge_relaunch_${bridgeRelaunchAttempts}`;
+  pushLog("warn", "system", `[BRIDGE] relançando em ${Math.round(delay / 1000)}s (tentativa ${bridgeRelaunchAttempts}/${BRIDGE_MAX_RELAUNCH}) — ${reason}`);
+  bridgeRelaunchTimer = setTimeout(async () => {
+    bridgeRelaunchTimer = null;
+    if (appClosing || portManuallyClosed || !comPort || bridgeReady) return;
+    try {
+      await stopBridge();
+      await startBridge(comPort); // o handler READY reseta os contadores
+    } catch (e) {
+      pushLog("warn", "system", `[BRIDGE] relançamento falhou: ${e.message}`);
+      scheduleBridgeRelaunch(`falha no relançamento: ${e.message}`);
+    }
+  }, delay);
+}
+
+function nextComPort(cur) {
+  const i = COM_CYCLE.indexOf(String(cur || "").toUpperCase());
+  return i === -1 ? COM_CYCLE[0] : COM_CYCLE[(i + 1) % COM_CYCLE.length];
+}
+
+// v3.25.49 — COM TRAVADA: bridge aberta mas sem NENHUM RX por 60s. Mata+reabre;
+// após COM_STUCK_MAX travamentos na mesma porta, tenta a próxima COM.
+function handleComStuck() {
+  if (bridgeRecovering || bridgeRelaunchTimer) return;
+  comStuckCount++;
+  lastBridgeError = "com_stuck";
+  pushLog("warn", "serial", `[COM-STUCK] sem RX há >${COM_STUCK_MS / 1000}s em ${comPort} — reset (${comStuckCount}/${COM_STUCK_MAX})`);
+  try { void sendHeartbeat(); } catch (_) {}
+  if (comStuckCount >= COM_STUCK_MAX) {
+    const next = nextComPort(comPort);
+    pushLog("warn", "serial", `[COM-STUCK] ${COM_STUCK_MAX} travamentos — próxima COM: ${comPort} → ${next}`);
+    comPort = next;
+    comStuckCount = 0;
+  }
+  lastRxTimestamp = 0; // baseline zerado: só re-dispara após RX na nova tentativa
+  void recoverBridge(`COM travada (sem RX ${COM_STUCK_MS / 1000}s)`);
+}
+
 function startBridgeWatchdog() {
   stopBridgeWatchdog();
 
   bridgeWatchdogTimer = setInterval(() => {
-    if (appClosing || bridgeStopping || bridgeRecovering || portManuallyClosed) return;
+    if (appClosing || bridgeStopping || bridgeRecovering || portManuallyClosed || bridgeRelaunchTimer) return;
+
+    // v3.25.49 (pid check) — morte SILENCIOSA: a bridge já subiu nesta sessão mas
+    // o processo sumiu/morreu sem disparar 'exit'. Relança com backoff.
+    if (bridgeWasEverReady && !bridgeDead && !bridgeReady &&
+        (!bridgeProcess || bridgeProcess.exitCode !== null || bridgeProcess.killed)) {
+      scheduleBridgeRelaunch("processo da bridge ausente (pid check)");
+      return;
+    }
+
     if (!bridgeReady || !bridgeProcess) return;
+
+    // v3.25.49 (COM travada) — bridge aberta mas SEM RX há > 60s (já teve RX antes).
+    if (lastRxTimestamp > 0 && Date.now() - lastRxTimestamp > COM_STUCK_MS) {
+      handleComStuck();
+      return;
+    }
 
     if (bridgePingSentAt && Date.now() - bridgePingSentAt > BRIDGE_PING_TIMEOUT_MS) {
       bridgePingSentAt = 0;
@@ -4762,6 +4844,12 @@ function startBridge(portPath) {
             bridgeProcess = proc;
             bridgeReady = true;
             bridgeWasEverReady = true; // habilita o watchdog interno a escalar p/ relaunch
+            // v3.25.49: subiu → zera os contadores de auto-recovery.
+            bridgeRelaunchAttempts = 0;
+            bridgeDead = false;
+            comStuckCount = 0;
+            if (bridgeRelaunchTimer) { clearTimeout(bridgeRelaunchTimer); bridgeRelaunchTimer = null; }
+            lastBridgeError = null;
             markBridgeAlive();
             startBridgeWatchdog();
             pushLog("info", "serial", `Bridge conectada em ${portPath}`);
@@ -4779,6 +4867,7 @@ function startBridge(portPath) {
           if (trimmed.startsWith("RX:")) {
             markBridgeAlive();
             lastRxTimestamp = Date.now(); // anti-colisao TX
+            comStuckCount = 0;            // v3.25.49: RX real → COM não está travada
             // v3.22.0: salva última COM funcional após primeiro RX válido
             try {
               if (!global.__lastWorkingComSaved) {
@@ -4850,6 +4939,8 @@ function startBridge(portPath) {
           lastBridgeError = err.message;
           pushLog("error", "serial", `Bridge morreu: ${err.message}`);
           bridgeReady = false;
+          bridgeProcess = null;
+          scheduleBridgeRelaunch(`erro da bridge: ${err.message}`); // v3.25.49
         }
       });
 
@@ -4892,11 +4983,8 @@ function startBridge(portPath) {
           pushLog("error", "serial", `Bridge encerrou (code ${code})`);
           bridgeReady = false;
           bridgeProcess = null;
-          setTimeout(() => {
-            if (comPort && !appClosing && !portManuallyClosed) {
-              void recoverBridge(`bridge encerrou (code ${code})`);
-            }
-          }, 5000);
+          // v3.25.49: auto-recovery com backoff (3→5→10→15→30s, até 5x) — sem popup.
+          scheduleBridgeRelaunch(`bridge encerrou (code ${code})`);
         }
       });
 
@@ -8081,9 +8169,16 @@ async function startAgent(cfg) {
       startupStep = `abrir bridge serial (COM-first) em ${comPort}`;
       await startBridge(comPort);
     } catch (bridgeErr) {
-      pushLog("error", "system", `Bridge falhou (COM-first): ${bridgeErr.message}`);
-      if (tray) { try { setTrayStatus("ERRO Python"); } catch (_) {} }
-      // NÃO retorna: segue p/ nuvem + retries; o watchdog de bridge tenta recuperar.
+      // v3.25.49: SEM popup/tray "ERRO Python" no headless. Qualquer erro da bridge
+      // é APENAS logado + reportado no heartbeat (last_error). O auto-recovery com
+      // backoff tenta reabrir em background; o polling HTTP segue funcionando.
+      pushLog("error", "system", `Bridge falhou (COM-first): ${bridgeErr.message} — auto-recovery em background (sem popup)`);
+      lastBridgeError = "bridge_start_failed";
+      // NÃO seta bridgeWasEverReady aqui: se a bridge nunca subiu (Python/porta),
+      // o watchdog interno de AGENTE não deve relançar o processo. O relaunch da
+      // BRIDGE é feito pelo scheduleBridgeRelaunch (independente daquele flag).
+      scheduleBridgeRelaunch(`falha no boot: ${bridgeErr.message}`);
+      // NÃO retorna: segue p/ nuvem; o polling HTTP e o auto-recovery cuidam do resto.
     }
 
     // Nuvem é BEST-EFFORT — conecta DEPOIS do COM. Anti-clone valida em background.
