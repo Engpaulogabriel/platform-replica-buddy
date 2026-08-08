@@ -46,17 +46,21 @@ const STATUS_REFRESH_MS = 30_000;
 // segurança: se o comando ficou pending/sent além de 5min (agente pode ter
 // crashado), o card passa a exibir ERRO em vez de ficar preso em "Ligando".
 const PENDING_MAX_MS = 300_000;
-// PROBLEMA 2 — latch anti-oscilação do desligamento forçado. Assim que o card
-// confirma DESLIGADO (last_outputs_state=0), se um RX transitório voltar a mostrar
-// 1 mas a INTENÇÃO ainda é desligar (desired_running=false — ex.: o pulso {1}→{0}
-// da sequência de desligamento forçado), o card NÃO volta para "Ligado"/"Desligando"
-// dentro desta janela. Um religamento LOCAL real muda desired_running=true (LOCAL
+// PROBLEMA 2 — latch anti-oscilação do desligamento forçado. Assim que a bomba
+// confirma DESLIGADO FISICAMENTE (last_outputs_state=0) com intenção desligar
+// (desired_running=false), o card entra em "Desligado" e AÍ FICA: um RX
+// transitório voltando a mostrar 1 (ex.: o pulso {1}→{0} da sequência de
+// desligamento forçado) NÃO faz o card voltar para "Ligado"/"Desligando" dentro
+// desta janela. Um religamento LOCAL real muda desired_running=true (LOCAL
 // OVERRIDE no agente) e libera o latch imediatamente — então não escondemos
 // acionamento genuíno.
-const CONFIRMED_OFF_LATCH_MS = 30_000;
+// v(fix): 30s → 90s — a sequência forçada pode ter até 3 ciclos {1}→RX→{0} e
+// levar >30s; a janela precisa cobrir todos os pulsos.
+const CONFIRMED_OFF_LATCH_MS = 90_000;
 
 // Aplica o latch: recebe o estado calculado + snapshots e devolve running/pending/
-// confirmedOffAt já latcheados. `oldRunning` = running visual anterior.
+// confirmedOffAt já latcheados. `oldRunning` = running visual anterior;
+// `cloudRunning` = realidade física (last_outputs_state) deste tick.
 type PumpPending = "turning_on" | "turning_off" | "resetting" | "error" | "comm_fail" | undefined;
 function applyConfirmedOffLatch(
   running: boolean,
@@ -64,14 +68,31 @@ function applyConfirmedOffLatch(
   oldRunning: boolean | undefined,
   oldConfirmedOffAt: number | undefined,
   desiredRunning: boolean | null | undefined,
+  cloudRunning: boolean,
 ): { running: boolean; pending: PumpPending; confirmedOffAt: number | undefined } {
   let confirmedOffAt = oldConfirmedOffAt;
-  // Acabou de confirmar desligado (true → false): marca o instante.
-  if (!running && oldRunning === true) confirmedOffAt = Date.now();
+  // FIX PRINCIPAL: desligado CONFIRMADO FISICAMENTE (RX real = 0) + intenção
+  // desligar, DENTRO de uma transição de desligamento (estava "Ligado"/"Desligando"
+  // ou reset) → marca a confirmação. Isto engata o latch MESMO que um comando
+  // manual (ex.: sequência de desligamento forçado) ainda esteja "fresh" na fila
+  // segurando o card em "Desligando…". Sem isto, o card ficava preso até o
+  // timeout de 5min e virava ERRO ("SEM RESPOSTA") apesar de a bomba ter desligado.
+  // A guarda (oldRunning/pending) evita engatar em bombas já em regime DESLIGADO —
+  // do contrário um acionamento LOCAL genuíno ficaria escondido pela janela.
+  if (
+    cloudRunning === false && desiredRunning === false && !confirmedOffAt &&
+    (oldRunning === true || pending === "turning_off" || pending === "resetting")
+  ) {
+    confirmedOffAt = Date.now();
+  }
+  // Compat: transição visual true → false também marca (quando desired é null).
+  if (!running && oldRunning === true && !confirmedOffAt) confirmedOffAt = Date.now();
   // Intenção voltou a LIGAR (religamento real) → libera o latch.
   if (desiredRunning === true) confirmedOffAt = undefined;
-  // Dentro da janela + intenção ainda desligar + RX transitório mostra ligado → segura Desligado.
-  if (running && confirmedOffAt && (Date.now() - confirmedOffAt < CONFIRMED_OFF_LATCH_MS) && desiredRunning === false) {
+  // Dentro da janela + intenção ainda desligar → mantém DESLIGADO estável: não
+  // oscila para "Ligado" e não re-exibe "Desligando" por pulsos transitórios.
+  // Limpa o pending (é o que tira o card do preso "Desligando…" → ERRO).
+  if (confirmedOffAt && (Date.now() - confirmedOffAt < CONFIRMED_OFF_LATCH_MS) && desiredRunning === false) {
     return { running: false, pending: undefined, confirmedOffAt };
   }
   return { running, pending, confirmedOffAt };
@@ -451,6 +472,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
         const _latch = applyConfirmedOffLatch(
           running, pending, old?.running, old?.confirmedOffAt,
           typeof e.desired_running === "boolean" ? e.desired_running : null,
+          cloudRunning,
         );
         running = _latch.running;
         pending = _latch.pending;
@@ -599,6 +621,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
           const _latch2 = applyConfirmedOffLatch(
             running, pending, p.running, p.confirmedOffAt,
             typeof cloudEq.desired_running === "boolean" ? cloudEq.desired_running : null,
+            cloudRunning,
           );
           running = _latch2.running;
           pending = _latch2.pending;
