@@ -474,9 +474,18 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
         // Sem pending → realidade física é a verdade absoluta (running = cloudRunning).
 
         // PROBLEMA 2 — latch anti-oscilação (ver applyConfirmedOffLatch).
+        // Passamos a INTENÇÃO derivada, não o desired_running cru do banco: num
+        // reset/desligamento o pending já é "resetting"/"turning_off" (intenção =
+        // desligar), mesmo que o desired_running do banco esteja true (override
+        // local numa bomba local). Sem isto o latch não engatava e o card voltava
+        // a "LIGADO"/"Desligando".
+        const intentDesired: boolean | null =
+          pending === "turning_off" || pending === "resetting" ? false
+          : pending === "turning_on" ? true
+          : (typeof e.desired_running === "boolean" ? e.desired_running : null);
         const _latch = applyConfirmedOffLatch(
           running, pending, old?.running, old?.confirmedOffAt,
-          typeof e.desired_running === "boolean" ? e.desired_running : null,
+          intentDesired,
           cloudRunning,
         );
         running = _latch.running;
@@ -623,9 +632,16 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
 
 
           // PROBLEMA 2 — latch anti-oscilação (mesma regra do bloco Realtime).
+          // Passa a INTENÇÃO derivada (não o desired_running cru): pending
+          // resetting/turning_off = desligar, mesmo com desired_running=true no
+          // banco (override local). É o que faz o latch engatar no forçado.
+          const intentDesired2: boolean | null =
+            pending === "turning_off" || pending === "resetting" ? false
+            : pending === "turning_on" ? true
+            : (typeof cloudEq.desired_running === "boolean" ? cloudEq.desired_running : null);
           const _latch2 = applyConfirmedOffLatch(
             running, pending, p.running, p.confirmedOffAt,
-            typeof cloudEq.desired_running === "boolean" ? cloudEq.desired_running : null,
+            intentDesired2,
             cloudRunning,
           );
           running = _latch2.running;
