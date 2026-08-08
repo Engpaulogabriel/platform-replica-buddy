@@ -177,21 +177,19 @@ export function PumpTable({ pumps, onToggle, onReset, onModeChange, onRefreshSta
     setRefreshing(prev => ({ ...prev, [id]: true }));
     onRefreshStatus?.(id);
 
-    // Timeout de 30s: se a bomba não responder nesse prazo, marca como falha (vermelho)
-    // e o ícone vermelho permanece até a próxima atualização (manual ou automática).
+    // Timeout SUAVE de 10s: se a bomba não responder nesse prazo, apenas PARA o
+    // spinner e mantém o estado ATUAL — SEM toast de falha e SEM marcar vermelho.
+    // (Se o RX chegar antes, o efeito de lastCommunication limpa e confirma sucesso.)
+    // Antes eram 30s + falha; isso deixava o ícone "carregando" por muito tempo.
     refreshTimers.current[id] = setTimeout(() => {
       setRefreshing(prev => {
-        if (prev[id]) {
-          const pumpName = pumps.find(p => p.id === id)?.name || id;
-          notify.fail("Bombas", `${pumpName}: bomba não respondeu em 30s — status NÃO foi atualizado`);
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        }
-        return prev;
+        if (!prev[id]) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
       });
-      showResult(id, "fail");
-    }, 30000);
+      delete refreshTimers.current[id];
+    }, 10000);
   }, [refreshing, onRefreshStatus, pumps, showResult]);
 
   // Limpa o estado de falha (vermelho) quando chega QUALQUER leitura automática nova
