@@ -79,8 +79,13 @@ function applyConfirmedOffLatch(
   // timeout de 5min e virava ERRO ("SEM RESPOSTA") apesar de a bomba ter desligado.
   // A guarda (oldRunning/pending) evita engatar em bombas já em regime DESLIGADO —
   // do contrário um acionamento LOCAL genuíno ficaria escondido pela janela.
+  // desiredRunning !== true cobre false E null/undefined — numa bomba local ou
+  // remote-desired o desired_running pode não vir estritamente `false` durante o
+  // forçado; exigir `=== false` fazia o latch NÃO engatar (bug reportado: o card
+  // volta a "LIGADO"/"Desligando"). A guarda (oldRunning/pending) segue impedindo
+  // engate em bomba já em regime desligado (não esconde acionamento local).
   if (
-    cloudRunning === false && desiredRunning === false && !confirmedOffAt &&
+    cloudRunning === false && desiredRunning !== true && !confirmedOffAt &&
     (oldRunning === true || pending === "turning_off" || pending === "resetting")
   ) {
     confirmedOffAt = Date.now();
@@ -89,10 +94,10 @@ function applyConfirmedOffLatch(
   if (!running && oldRunning === true && !confirmedOffAt) confirmedOffAt = Date.now();
   // Intenção voltou a LIGAR (religamento real) → libera o latch.
   if (desiredRunning === true) confirmedOffAt = undefined;
-  // Dentro da janela + intenção ainda desligar → mantém DESLIGADO estável: não
-  // oscila para "Ligado" e não re-exibe "Desligando" por pulsos transitórios.
-  // Limpa o pending (é o que tira o card do preso "Desligando…" → ERRO).
-  if (confirmedOffAt && (Date.now() - confirmedOffAt < CONFIRMED_OFF_LATCH_MS) && desiredRunning === false) {
+  // Dentro da janela + ainda NÃO é religamento (desired !== true) → mantém
+  // DESLIGADO estável: não oscila para "Ligado" e não re-exibe "Desligando" por
+  // pulsos transitórios. Limpa o pending (tira o card do preso "Desligando…").
+  if (confirmedOffAt && (Date.now() - confirmedOffAt < CONFIRMED_OFF_LATCH_MS) && desiredRunning !== true) {
     return { running: false, pending: undefined, confirmedOffAt };
   }
   return { running, pending, confirmedOffAt };
