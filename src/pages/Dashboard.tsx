@@ -534,6 +534,19 @@ const Dashboard = () => {
     if (useQueue) {
       void (async () => {
         try {
+          // BUG 2: LIGAR em 1 clique numa bomba com desligamento forçado ATIVO.
+          // Desativa forced_shutdown_enabled ANTES de enviar o comando de ligar —
+          // senão o agente re-força o {0} e o front oscila (falso ligado/desligado).
+          // O operador não precisa mais desativar o forçado manualmente.
+          if (willTurnOn) {
+            const cloudEq = cloudEquipments.find((e) => e.id === id);
+            if (cloudEq?.forced_shutdown_enabled === true) {
+              await supabase
+                .from("equipments")
+                .update({ forced_shutdown_enabled: false })
+                .eq("id", id);
+            }
+          }
           const enq = await enqueueManualPumpCommand({
             equipmentId: target.id,
             turnOn: willTurnOn,

@@ -1770,7 +1770,7 @@ async function refreshEquipmentCache() {
   try {
     const { data, error } = await supabase
       .from("equipments")
-      .select("id, hw_id, name, saida, vazao_mode, flow_total_m3")
+      .select("id, hw_id, name, saida, vazao_mode, flow_total_m3, forced_shutdown_enabled")
       .eq("farm_id", farmId);
     if (error || !data) return;
     equipmentByHwId.clear();
@@ -1781,7 +1781,9 @@ async function refreshEquipmentCache() {
       const hw = String(eq.hw_id || "").trim().toUpperCase();
       if (!hw) continue;
       equipmentByHwId.set(hw, { name: eq.name, saida: eq.saida });
-      if (eq.id) equipmentById.set(String(eq.id), { name: eq.name, hw_id: hw, saida: eq.saida });
+      // forced_shutdown_enabled no cache: usado para NÃO atribuir um desligamento
+      // FORÇADO (comando remoto) como acionamento LOCAL (ver LOCAL OVERRIDE).
+      if (eq.id) equipmentById.set(String(eq.id), { name: eq.name, hw_id: hw, saida: eq.saida, forced_shutdown_enabled: eq.forced_shutdown_enabled === true });
       const tsnn = hw.length >= 4 ? hw.substring(0, 4) : hw;
       const arr = equipmentByTsnn.get(tsnn) || [];
       arr.push({ name: eq.name, saida: eq.saida, hw_id: hw });
@@ -3330,9 +3332,18 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       // resto do LOCAL OVERRIDE (atualizar desired, cancelar stale) continua igual:
       // é uma atuação deliberada, só que atribuída ao técnico.
       const _isTech = isTechTerminalWindow();
-      originForRpc = _isTech ? "tech_terminal" : "local";
       const _stateBit = extractStateBit(rawPayload);
       const realRunning = _stateBit === "1";
+      // BUG 1: desligamento FORÇADO (comando remoto da web) NÃO é acionamento local.
+      // Se a bomba tem forced_shutdown_enabled=true e acabou de DESLIGAR (bit 0), o
+      // {0} veio do forçado — atribui 'remote-desired', não 'local'. Assim o
+      // relatório não mostra "Local" e o badge LOCAL não aparece. Um religamento
+      // (bit 1) segue como local/tech (botoeira). Ver runForcedShutdownSequence.
+      const _fsEnabled = resolvedEqId
+        ? (equipmentById.get(String(resolvedEqId))?.forced_shutdown_enabled === true)
+        : false;
+      const _isForcedOff = _fsEnabled && !realRunning;
+      originForRpc = _isTech ? "tech_terminal" : (_isForcedOff ? "remote-desired" : "local");
       const reason = safetyArmedForFrame
         ? "safety cancelado"
         : pendingCommandActive
@@ -5510,6 +5521,31 @@ async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetInde
         saida: (fsMeta && fsMeta.saida) || (targetIndex + 1),
         name: fsMeta && fsMeta.name,
       });
+      // BUG 1 (#3): registra o desligamento FORÇADO no relatório como REMOTO com
+      // autor "Desligamento Forçado" (não "Local"/"Sistema"). O row do comando
+      // backend-reset fica como origin=system (filtrado no relatório); ESTE é o que
+      // aparece. Uma única linha, atribuída corretamente. Best-effort.
+      try {
+        await withCloudTimeout(
+          supabase.from("automation_log").insert({
+            farm_id: farmId,
+            equipment_id: cmd.equipment_id,
+            equipment_name: (fsMeta && fsMeta.name) || null,
+            action: "pump_off",
+            origin: "remote",
+            actor_label: "Desligamento Forçado",
+            result: "success",
+            new_state: "off",
+            source_device: "forced-shutdown",
+            occurred_at: new Date().toISOString(),
+            details: { forced_shutdown: true },
+          }),
+          "forced-shutdown automation_log",
+          CLOUD_WRITE_TIMEOUT_MS,
+        );
+      } catch (e) {
+        pushLog("warn", "cloud", `[FORCED OFF] registro no relatório falhou: ${e.message}`);
+      }
     }
 
     // Grava o resultado no banco. Falha após 3 ciclos → 'timeout' (o relatório atribui
