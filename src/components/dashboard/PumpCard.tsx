@@ -286,7 +286,7 @@ function PumpCardImpl(props: PumpCardProps) {
                 className={`flex items-center shrink-0 transition-colors hover:text-primary ${
                   isOffline
                     ? "text-muted-foreground"
-                    : refreshing || isTransitioning
+                    : refreshing
                       ? lastFailed ? "text-destructive" : "text-warning"
                       : refreshResult === "success"
                         ? "text-primary"
@@ -299,16 +299,18 @@ function PumpCardImpl(props: PumpCardProps) {
                 title={
                   refreshing
                     ? "Atualizando leitura da bomba..."
-                    : isPending && pump.pending !== "error"
-                      ? pump.pending === "turning_on" ? "Ligando..." : pump.pending === "resetting" ? "Resetando..." : "Desligando..."
-                      : refreshResult === "success"
-                        ? "Leitura confirmada com sucesso"
-                        : refreshResult === "fail" || lastFailed
-                          ? "Falha na última leitura — clique para tentar novamente"
-                          : "Atualizar status (faz nova leitura na bomba)"
+                    : refreshResult === "success"
+                      ? "Leitura confirmada com sucesso"
+                      : refreshResult === "fail" || lastFailed
+                        ? "Falha na última leitura — clique para tentar novamente"
+                        : "Atualizar status (faz nova leitura na bomba)"
                 }
               >
-                {refreshing || (isPending && pump.pending !== "error") ? (
+                {/* Spinner do ícone de refresh SÓ no refresh MANUAL (não em pending/
+                    transição). A transição "Ligando…/Desligando…" é mostrada como
+                    TEXTO (span pendingLabel abaixo), não como spinner eterno — assim
+                    o desligamento forçado não deixa o ícone girando para sempre. */}
+                {refreshing ? (
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                 ) : refreshResult === "success" ? (
                   <CheckCircle2 className="w-3.5 h-3.5" />
