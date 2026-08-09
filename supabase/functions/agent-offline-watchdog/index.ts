@@ -48,7 +48,7 @@ Deno.serve(async (req) => {
   const { data: states } = await supabase
     .from("watchdog_alerts_state")
     .select("farm_id, alert_type, is_active, last_sent_at")
-    .in("alert_type", ["agent_offline", "com_missing"])
+    .in("alert_type", ["agent_offline", "com_missing", "bridge_down"])
     .eq("is_active", true);
   const activeAgent = new Map<string, string>(); // farm_id -> last_sent_at
   const activeCom = new Map<string, string>();
@@ -64,11 +64,46 @@ Deno.serve(async (req) => {
   // ─────────────────────────────────────────────────────────────────────────
   const { data: sh, error: shErr } = await supabase
     .from("site_health")
-    .select("farm_id, last_heartbeat, farm:farm_id(name, is_demo)")
+    .select("farm_id, last_heartbeat, com_connected, last_error, farm:farm_id(name, is_demo)")
     .not("farm_id", "is", null);
   if (shErr) {
     console.error("[watchdog] site_health query failed:", shErr.message);
   }
+
+  // ── #1b BRIDGE MORTA: agente ONLINE (heartbeat recente) mas a serial caiu
+  //    (last_error='bridge_dead' ou com_connected=false). O offline (#1) NÃO
+  //    pega esse caso — o heartbeat continua vindo. Sem serial a fazenda não
+  //    controla bombas → alerta direto. Pareado com recovery via bridge_recovered.
+  const activeBridge = new Map<string, string>();
+  for (const s of (states ?? []) as any[]) {
+    if (s.alert_type === "bridge_down") activeBridge.set(s.farm_id, s.last_sent_at);
+  }
+  for (const r of (sh ?? []) as any[]) {
+    if (r?.farm?.is_demo || !r.last_heartbeat) continue;
+    const farmName = r?.farm?.name ?? "Fazenda";
+    const hbAge = nowMs - new Date(r.last_heartbeat).getTime();
+    const agentOnline = hbAge <= AGENT_OFFLINE_MS;
+    const bridgeDead = agentOnline && (r.last_error === "bridge_dead" || r.com_connected === false);
+    if (bridgeDead) {
+      const res = await invokeAlert({
+        type: "alert", immediate: true, source: "agent_offline_watchdog",
+        alert_type: "bridge_down", farm_id: r.farm_id, farm_name: farmName, equipment_name: "Bridge serial",
+        message: `🟠 SERIAL CAÍDA — ${farmName} (agente online, sem controle de bombas)`,
+        metadata: { last_error: r.last_error, com_connected: r.com_connected },
+      });
+      results.push({ farm_id: r.farm_id, kind: "bridge_dead", ...res });
+    } else if (agentOnline && activeBridge.has(r.farm_id)) {
+      const startedAt = activeBridge.get(r.farm_id);
+      const res = await invokeAlert({
+        type: "alert", immediate: true, source: "agent_offline_watchdog",
+        alert_type: "bridge_recovered", farm_id: r.farm_id, farm_name: farmName, equipment_name: "Bridge serial",
+        message: `🟢 SERIAL RESTAURADA — ${farmName}`,
+        metadata: { downtime: startedAt ? fmtDowntime(nowMs - new Date(startedAt).getTime()) : "" },
+      });
+      results.push({ farm_id: r.farm_id, kind: "bridge_recovered", ...res });
+    }
+  }
+
   for (const r of (sh ?? []) as any[]) {
     if (r?.farm?.is_demo || !r.last_heartbeat) continue;
     const farmName = r?.farm?.name ?? "Fazenda";

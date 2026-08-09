@@ -57,6 +57,12 @@ verify_jwt = false
 [functions.agent-asar-key]
 verify_jwt = false
 
+# agent-offline-watchdog: chamada pelo pg_cron (apikey anon). SEM esta entrada o
+# gateway exigia JWT valido e devolvia 401 — o watchdog NUNCA rodava (nenhum
+# alerta offline/bridge_dead disparava). Usa SERVICE_ROLE internamente.
+[functions.agent-offline-watchdog]
+verify_jwt = false
+
 
 
 

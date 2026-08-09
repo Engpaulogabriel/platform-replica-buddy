@@ -238,6 +238,16 @@ function buildWatchdogAlertParams(baseType: string, isRecovery: boolean, farmNam
       s = [`⚠️ ${n} EQUIPAMENTO(S) SEM RESPOSTA`, farm, "Falha de comunicação",
         `${list}${list ? " · " : ""}Possível falha no rádio`];
     }
+  } else if (baseType === "bridge_down") {
+    // Agente ONLINE mas serial caída — a fazenda não controla bombas.
+    if (isRecovery) {
+      const dt = String(md?.downtime ?? "").trim();
+      s = [`🟢 SERIAL RESTAURADA — ${farm}`, farm, "Bridge serial voltou",
+        dt ? `Ficou sem serial por ${dt}` : "Controle de bombas normalizado"];
+    } else {
+      s = [`🟠 SERIAL CAÍDA — ${farm}`, farm, "Agente online, sem controle de bombas",
+        `Erro: ${String(md?.last_error ?? "bridge_dead")} · Verificar cabo/COM/serial_bridge`];
+    }
   } else {
     s = [isRecovery ? `✅ ${farm}` : `⚠️ ${farm}`, farm, baseType.replace(/_/g, " "), fmtShortTimestamp(new Date())];
   }

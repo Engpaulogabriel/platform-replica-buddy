@@ -35,6 +35,37 @@ import serial  # pyserial
 
 kernel32 = ctypes.windll.kernel32
 
+# ── HEADLESS: handler GLOBAL de exceção — NUNCA mostra popup/janela ───────────
+# Qualquer exceção NÃO tratada (ex.: OSError [Errno 22] fora do out()/write()) é
+# logada no stderr e o processo encerra em SILÊNCIO. Sem isto, o bootloader do
+# PyInstaller (modo windowed) exibe "Unhandled exception in script" — o popup que
+# trava a fazenda. os._exit(1) mata na hora, sem dialog; o agente (main.cjs)
+# relança a bridge com backoff (3→5→10→15→30s). Cobre main thread e threads.
+def _global_excepthook(exc_type, exc_value, exc_tb):
+    try:
+        import traceback
+        sys.stderr.write("[PY][FATAL] excecao nao tratada: "
+                         + "".join(traceback.format_exception(exc_type, exc_value, exc_tb)) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        os._exit(1)  # encerra sem dialog/atexit; o OS libera a COM e o agente relanca
+    except Exception:
+        pass
+
+sys.excepthook = _global_excepthook
+try:
+    def _thread_excepthook(args):
+        try:
+            sys.stderr.write(f"[PY][FATAL-thread] {getattr(args.exc_type,'__name__','?')}: {args.exc_value}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+    threading.excepthook = _thread_excepthook  # Python 3.8+
+except Exception:
+    pass
+
 # DCB bit masks
 DCB_fAbortOnError = 0x4000  # bit 14
 DCB_fOutX         = 0x0100  # bit 8
@@ -107,11 +138,14 @@ def out(msg):
             sys.stdout.write(f"{msg}\n")
             sys.stdout.flush()
             return
-        except OSError as e:
+        except Exception as e:
+            # Amplo (não só OSError): Errno 22, pipe fechado, encoding — NADA aqui
+            # pode derrubar a bridge. 1 retry curto; senão loga e segue.
             if attempt == 0:
                 time.sleep(0.05)
                 continue
-            log(f"[PY] out() OSError (stdout pipe): {e} — descartando '{msg[:40]}'")
+            try: log(f"[PY] out() erro (stdout pipe): {e} — descartando '{str(msg)[:40]}'")
+            except Exception: pass
             return
 
 
@@ -571,4 +605,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Rede de segurança final: se main() abortar por qualquer motivo, encerra em
+    # SILÊNCIO (sem popup). O agente relança a bridge. NUNCA propaga p/ o bootloader.
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as _e:
+        try:
+            sys.stderr.write(f"[PY][FATAL] main() abortou: {_e}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(1)
