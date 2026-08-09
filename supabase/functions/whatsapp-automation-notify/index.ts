@@ -573,6 +573,31 @@ Deno.serve(async (req) => {
 
   const phoneNumberId = config.phone_number_id;
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // KILL-SWITCH DE POLÍTICA (por decisão do dono): o WhatsApp SÓ envia 2 alertas
+  // CRÍTICOS de sistema — AGENTE OFFLINE e BRIDGE MORTA — ambos vindos do
+  // agent-offline-watchdog. TODO o resto é DESCARTADO: acionamento de bomba
+  // (liga/desliga), acionamento local, com_missing, recovery, agent_dying (agente
+  // reiniciou), TX travada, schedule, manutenção, etc. NINGUÉM recebe alerta de
+  // bomba por ora. (No futuro: configurável por fazenda — flag/tabela.)
+  const ALLOWED_SYSTEM_ALERTS = new Set(["agent_offline", "bridge_down"]);
+  const _isAllowed = directBody?.immediate === true
+    && String(directBody?.source ?? "") === "agent_offline_watchdog"
+    && ALLOWED_SYSTEM_ALERTS.has(String(directBody?.alert_type ?? ""));
+  if (!_isAllowed) {
+    if (directBody?.immediate !== true) {
+      // Chamada do cron (drain/schedule): esvazia as filas SEM enviar nada,
+      // para não acumular indefinidamente.
+      const nowIso2 = new Date().toISOString();
+      try { await supabase.from("pending_notifications").update({ processed: true, processed_at: nowIso2 }).eq("processed", false); } catch (_) {}
+      try { await supabase.from("automation_execution_log").update({ notified_at: nowIso2 }).is("notified_at", null); } catch (_) {}
+    }
+    console.log(`[POLICY] WhatsApp desativado (exceto sistema) — DESCARTADO: source=${directBody?.source} alert_type=${directBody?.alert_type} immediate=${directBody?.immediate}`);
+    return new Response(JSON.stringify({ ok: true, sent: 0, skipped: "alerts_disabled_policy" }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
   if (directBody?.immediate === true) {
     const result = await processImmediateNotification(supabase, config, phoneNumberId, directBody);
     return new Response(JSON.stringify(result), {

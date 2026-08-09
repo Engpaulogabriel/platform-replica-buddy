@@ -111,6 +111,17 @@ Deno.serve(async (req) => {
     alert_type = body.kind;
   }
 
+  // ═══ KILL-SWITCH DE POLÍTICA (por decisão do dono) ═════════════════════════
+  // O WhatsApp SÓ envia 2 alertas de SISTEMA (AGENTE OFFLINE e BRIDGE MORTA), e
+  // ambos vêm do agent-offline-watchdog → whatsapp-automation-notify. Esta função
+  // (local_change, bridge_offline, offline, back_online, agent_tx_stalled/TX
+  // travada, level, safety_timer, etc.) fica TOTALMENTE DESATIVADA — nada sai por
+  // aqui. Reativar quando os alertas forem configuráveis por fazenda.
+  console.log(`[POLICY] whatsapp-alerts DESATIVADO — descartado alert_type=${alert_type} farm=${farm_id}`);
+  return new Response(JSON.stringify({ ok: true, status: "alerts_disabled_policy", alert_type }), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+
   if (isSemear(farm_id)) {
     semearLog("INBOUND alert", { alert_type, equipment_id, equipment_name, new_running, farm_id, farm_name, force });
   }
