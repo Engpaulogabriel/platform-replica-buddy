@@ -2016,6 +2016,24 @@ async function processImmediateAlert(supabase: any, config: any, phoneNumberId: 
     //   Via: Local
     //   Horário: 07/08, 14:52h
     const isOn = body?.action === "turn_on" || Number(body?.new_state) === 1;
+    // ── DEBOUNCE 60s ATÔMICO (race-proof) — NUNCA manda a mesma msg 2x ──────────
+    // O trigger de estado pode disparar várias vezes para o MESMO evento (vários
+    // UPDATEs no equipamento em ~2s). O claim no banco serializa: só o 1º disparo
+    // "ganha" e envia; os demais recebem claimed=false e descartam. Chave = ação
+    // (on/off) → um liga→desliga real dentro de 60s ainda notifica (chave difere).
+    if (equipmentId) {
+      try {
+        const { data: claimed } = await supabase.rpc("try_claim_equipment_notification", {
+          _equipment_id: equipmentId, _key: isOn ? "on" : "off", _window_seconds: 60,
+        });
+        if (claimed === false) {
+          console.log(`[dedup] equipment_state DUPLICADO descartado eq=${equipmentId} action=${isOn ? "on" : "off"}`);
+          return { ok: true, mode: "immediate", type: "alert", sent: 0, deduped: true };
+        }
+      } catch (e) {
+        console.warn("[dedup] claim RPC falhou — seguindo (fail-open):", (e as Error).message);
+      }
+    }
     const estado = isOn ? "LIGADO" : "DESLIGADO";
     const emoji = isOn ? "✅" : "⛔";
     const origRaw = String(body?.origin ?? "").toLowerCase();
