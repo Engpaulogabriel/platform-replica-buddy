@@ -24,6 +24,57 @@ const corsHeaders = {
 const AGENT_OFFLINE_MS = 5 * 60_000;      // #1: 5 min sem heartbeat
 const BRIDGE_DEAD_GRACE_MS = 5 * 60_000;  // #2: bridge morta por >= 5 min antes de avisar
 
+// ── EMAIL crítico (Resend) — configs por env (secret na edge function) ──────
+const EMAIL_TO = Deno.env.get("ALERT_EMAIL_TO") || "contato@renovelectronics.com.br";
+const RESEND_FROM = Deno.env.get("RESEND_FROM") || "RENOV Alertas <onboarding@resend.dev>";
+const PLATFORM_URL = Deno.env.get("PLATFORM_URL") || "https://app.renovelectronics.com.br";
+
+function fmtTs(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Bahia" }); }
+  catch { return String(iso); }
+}
+
+// Só é enviado para os 2 alertas CRÍTICOS (agente offline / bridge morta). Best-effort:
+// se RESEND_API_KEY não estiver configurada ou a API falhar, não quebra o alerta WhatsApp.
+async function sendCriticalEmail(subject: string, html: string): Promise<{ ok: boolean; error?: string }> {
+  const key = Deno.env.get("RESEND_API_KEY");
+  if (!key) { console.warn("[email] RESEND_API_KEY não configurada — pulando email"); return { ok: false, error: "no_key" }; }
+  try {
+    const r = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: RESEND_FROM, to: [EMAIL_TO], subject, html }),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      console.error("[email] Resend falhou", r.status, t.slice(0, 200));
+      return { ok: false, error: `http_${r.status}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    console.error("[email] erro:", (e as Error).message);
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+function criticalEmailHtml(o: { title: string; farmName: string; erro: string; lastHeartbeat: string; acao: string; barColor: string }): string {
+  return `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;color:#111827;background:#f3f4f6;margin:0;padding:16px">
+  <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb">
+    <div style="background:${o.barColor};color:#fff;padding:16px 20px"><h2 style="margin:0;font-size:18px">${o.title}</h2></div>
+    <div style="padding:20px">
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <tr><td style="padding:6px 0;color:#6b7280;width:140px">Fazenda</td><td style="padding:6px 0;font-weight:bold">${o.farmName}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280">Erro</td><td style="padding:6px 0;font-weight:bold">${o.erro}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280">Último heartbeat</td><td style="padding:6px 0">${o.lastHeartbeat}</td></tr>
+      </table>
+      <p style="margin:16px 0 8px;padding:12px;background:#fef2f2;border-left:4px solid #b91c1c;border-radius:4px;font-size:14px">
+        <strong>Ação necessária:</strong> ${o.acao}</p>
+      <a href="${PLATFORM_URL}" style="display:inline-block;margin-top:8px;background:#2563eb;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-weight:bold;font-size:14px">Abrir plataforma</a>
+    </div>
+  </div></body></html>`;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -85,7 +136,18 @@ Deno.serve(async (req) => {
           message: `🔴 AGENTE OFFLINE — ${farmName}`,
           metadata: { age_sec: Math.round(hbAge / 1000), last_heartbeat: r.last_heartbeat },
         });
-        results.push({ farm_id: r.farm_id, kind: "agent_offline", ...res });
+        // EMAIL crítico (item 2) — mesma ocorrência, best-effort.
+        const email = await sendCriticalEmail(
+          `🔴 ALERTA RENOV — Fazenda ${farmName} OFFLINE`,
+          criticalEmailHtml({
+            title: `🔴 AGENTE OFFLINE — ${farmName}`, farmName,
+            erro: `Sem heartbeat há ${Math.round(hbAge / 60_000)} min (PC ou Starlink caiu)`,
+            lastHeartbeat: fmtTs(r.last_heartbeat),
+            acao: "Verificar energia e internet (Starlink) na fazenda e se o PC do agente está ligado.",
+            barColor: "#b91c1c",
+          }),
+        );
+        results.push({ farm_id: r.farm_id, kind: "agent_offline", ...res, email: email.ok });
       }
       continue; // offline: não faz sentido avaliar a bridge
     }
@@ -117,7 +179,18 @@ Deno.serve(async (req) => {
             message: `🟠 BRIDGE MORTA — ${farmName} (serial não recupera há ${downMin} min)`,
             metadata: { last_error: r.last_error, down_min: downMin, first_dead_at: bs?.metadata?.first_dead_at },
           });
-          results.push({ farm_id: r.farm_id, kind: "bridge_down", down_min: downMin, ...res });
+          // EMAIL crítico (item 2) — best-effort.
+          const email = await sendCriticalEmail(
+            `🟠 ALERTA RENOV — Fazenda ${farmName} SEM CONTROLE (bridge morta)`,
+            criticalEmailHtml({
+              title: `🟠 BRIDGE MORTA — ${farmName}`, farmName,
+              erro: `serial_bridge morta há ${downMin} min (${r.last_error || "bridge_dead"}) — agente online, sem controle de bombas`,
+              lastHeartbeat: fmtTs(r.last_heartbeat),
+              acao: "Verificar cabo serial / porta COM / serial_bridge no PC da fazenda. O agente está online mas não controla as bombas.",
+              barColor: "#c2410c",
+            }),
+          );
+          results.push({ farm_id: r.farm_id, kind: "bridge_down", down_min: downMin, ...res, email: email.ok });
         }
         // else: dentro da janela de graça (< 5 min) → silêncio (pode recuperar sozinha)
       }
