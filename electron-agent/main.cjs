@@ -954,6 +954,13 @@ const STARTUP_SYNC_INTERVAL_MS = 3_000;
 let agentStartupAt = 0;
 let startupSyncTimer = null;
 let startupSyncEndTimer = null;
+// Duração em que o agente ficou OFFLINE antes deste boot (último heartbeat gravado
+// no site_health vs agora). Se > 15 min, a proteção do PLC (15 min sem comunicação)
+// já desligou as bombas — então QUALQUER bomba encontrada LIGADA no startup sync
+// foi religada na BOTOEIRA (acionamento LOCAL). Capturado 1x no startAgent, ANTES
+// de sobrescrever o site_health.
+let bootOfflineMs = 0;
+let wasOfflineLong = false;
 function isInStartupSyncWindow() {
   return agentStartupAt > 0 && (Date.now() - agentStartupAt) < STARTUP_SYNC_DURATION_MS;
 }
@@ -3295,7 +3302,20 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
           `[STARTUP SYNC] Sinal espontaneo 0 ignorado para eq ${_eqKey.substring(0,8)} — comando Ligar confirmado ha ${Math.round(_ageMs/1000)}s`,
         );
       } else {
-        originForRpc = "remote-desired";
+        // Se o agente ficou offline > 15 min E a bomba está LIGADA (realRunning) divergindo
+        // do desired (estava desligada), a proteção do PLC já a havia desligado durante o
+        // offline → ela só pode ter sido RELIGADA na BOTOEIRA (local). Marca origin='local'
+        // (badge LOCAL no card), sincroniza desired_running=true e NÃO desliga (respeita a
+        // atuação local). Fora desse caso: comportamento normal (remote-desired = sistema).
+        const _localByOffline = wasOfflineLong && realRunning;
+        originForRpc = _localByOffline ? "local" : "remote-desired";
+        if (_localByOffline) {
+          pushLog(
+            "warn",
+            "system",
+            `[STARTUP SYNC] eq ${String(resolvedEqId || "").substring(0,8)} LIGADA após ${Math.round(bootOfflineMs / 60000)}min offline → acionamento LOCAL (botoeira): desired_running=true, sem desligar`,
+          );
+        }
         try {
           if (resolvedEqId) {
             await withCloudTimeout(
@@ -3309,7 +3329,7 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
             pushLog(
               "info",
               "system",
-              `[STARTUP SYNC] eq ${String(resolvedEqId).substring(0,8)} sincronizado: desired_running=${realRunning} (estado real do PLC)`,
+              `[STARTUP SYNC] eq ${String(resolvedEqId).substring(0,8)} sincronizado: desired_running=${realRunning}${_localByOffline ? " (LOCAL — botoeira)" : " (estado real do PLC)"}`,
             );
           }
         } catch (e) {
@@ -8380,6 +8400,22 @@ async function startAgent(cfg) {
     // a versão real do .asar em execução.
     try {
       if (supabase && farmId) {
+        // STARTUP SYNC: mede o tempo OFFLINE (último heartbeat ANTES deste boot vs
+        // agora) — LER antes de sobrescrever. > 15 min ⇒ proteção do PLC desligou
+        // as bombas ⇒ bomba ligada = acionamento LOCAL (botoeira). Ver applySpontaneous.
+        try {
+          const { data: prevSh } = await supabase
+            .from("site_health").select("last_heartbeat").eq("farm_id", farmId).maybeSingle();
+          if (prevSh?.last_heartbeat) {
+            bootOfflineMs = Date.now() - new Date(prevSh.last_heartbeat).getTime();
+            wasOfflineLong = bootOfflineMs > STARTUP_SYNC_DURATION_MS;
+            if (wasOfflineLong) {
+              pushLog("warn", "system",
+                `[STARTUP SYNC] agente ficou OFFLINE ~${Math.round(bootOfflineMs / 60000)}min (>15min) — bombas ligadas serão tratadas como acionamento LOCAL (botoeira)`);
+            }
+          }
+        } catch (_) { /* sem site_health prévio (1º boot) → wasOfflineLong=false */ }
+
         await supabase.from("agent_update_status").upsert(
           {
             farm_id: farmId,
