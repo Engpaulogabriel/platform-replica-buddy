@@ -239,14 +239,14 @@ function buildWatchdogAlertParams(baseType: string, isRecovery: boolean, farmNam
         `${list}${list ? " · " : ""}Possível falha no rádio`];
     }
   } else if (baseType === "bridge_down") {
-    // Agente ONLINE mas serial caída — a fazenda não controla bombas.
+    // Agente ONLINE mas serial morta e NÃO recuperou por >= 5 min → intervenção.
+    // (Recovery não é mais enviado pelo watchdog; mantido por robustez.)
     if (isRecovery) {
-      const dt = String(md?.downtime ?? "").trim();
-      s = [`🟢 SERIAL RESTAURADA — ${farm}`, farm, "Bridge serial voltou",
-        dt ? `Ficou sem serial por ${dt}` : "Controle de bombas normalizado"];
+      s = [`🟢 SERIAL OK — ${farm}`, farm, "Bridge serial voltou", "Controle de bombas normalizado"];
     } else {
-      s = [`🟠 SERIAL CAÍDA — ${farm}`, farm, "Agente online, sem controle de bombas",
-        `Erro: ${String(md?.last_error ?? "bridge_dead")} · Verificar cabo/COM/serial_bridge`];
+      const dm = Number(md?.down_min) || 5;
+      s = [`🟠 BRIDGE MORTA — ${farm}`, farm, "Sem controle de bombas — precisa intervir",
+        `serial_bridge não recupera há ${dm} min · Verificar cabo/COM/PC`];
     }
   } else {
     s = [isRecovery ? `✅ ${farm}` : `⚠️ ${farm}`, farm, baseType.replace(/_/g, " "), fmtShortTimestamp(new Date())];
