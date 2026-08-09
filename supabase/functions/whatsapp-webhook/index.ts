@@ -9353,9 +9353,12 @@ async function processMessage(from: string, text: string, location: WaLocation =
   const fmtHb = (d: Date | null) => d
     ? d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" })
     : "—";
-  const bridgeOfflineMsg = (h: BridgeHealth) =>
-    `🚨 *Bridge OFFLINE*\n\nSem comunicação com os equipamentos ${h.lastTs ? `desde ${fmtHb(h.lastTs)}` : "há muito tempo"}.\nOs dados de status não estão disponíveis no momento.\n\nVerifique o computador da Bridge e a conexão de internet.`;
-  const bridgeOfflineCmdMsg = "🚨 Bridge OFFLINE. Comando não pode ser executado — sem comunicação com os equipamentos.";
+  // Mensagens ao CLIENTE (resposta ao comando/consulta): SEM termos técnicos
+  // ("Bridge", "computador da Bridge"). O cliente só vê que está indisponível e
+  // deve tentar depois — o detalhe técnico vai para os admins pelos alertas.
+  const bridgeOfflineMsg = (_h: BridgeHealth) =>
+    `⚠️ *Status temporariamente indisponível*\n\nO sistema está reconectando com os equipamentos. Tente novamente em alguns minutos.`;
+  const bridgeOfflineCmdMsg = "⚠️ Sistema temporariamente indisponível. Não foi possível executar o comando agora — tente novamente em alguns minutos.";
 
   // ===== status_all: lista todos os equipamentos de TODAS as fazendas
   // acessíveis ao operador, com badge AUTO quando há programação ativa. =====

@@ -2047,10 +2047,18 @@ async function processImmediateAlert(supabase: any, config: any, phoneNumberId: 
     tplNameOverride = "alerta_equipamento";
     targets = await loadFarmOperators(supabase, resolvedFarmId);
   } else {
+    // CATCH-ALL = alerta TÉCNICO/SISTEMA (agent_dying, bridge_offline, erros
+    // internos, etc.). REGRA ABSOLUTA: o CLIENTE NUNCA recebe mensagem técnica.
+    // Só o acionamento de bomba (branch equipment_state acima) vai para operadores.
+    // Tudo que cai aqui → SOMENTE admins do sistema (SYSTEM_ALERT_RECIPIENTS).
     const header = isRecovery ? (equipmentName ? `✅ ${equipmentName}` : `✅ ${farmName}`) : (equipmentName ? `⚠️ ${equipmentName}` : `⚠️ ${farmName}`);
     message = `${header}\n${messageInput}\nFazenda: ${farmName}\n${ts}`;
     tplParams = [(equipmentName ?? farmName).slice(0, 60), alertType, farmName, ts];
-    targets = await loadFarmOperators(supabase, resolvedFarmId);
+    targets = SYSTEM_ALERT_RECIPIENTS.map((ph) => ({
+      phone: ph, name: "Sistema", role: "super_admin",
+      last_message_at: null, receive_alerts: true, is_active: true,
+    }));
+    console.log(`[NOTIFY] alerta técnico '${alertType}' (source=${body?.source}) → SÓ admins (cliente não recebe)`);
   }
 
   const sent = await sendToAll({

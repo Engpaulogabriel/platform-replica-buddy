@@ -224,6 +224,26 @@ Deno.serve(async (req) => {
   let operators = farmOperators;
   let usedGlobalFallback = false;
 
+  // ── REGRA ABSOLUTA: alertas TÉCNICOS nunca vão para o CLIENTE ────────────────
+  // O operador comum da fazenda (cliente) só pode receber acionamento de bomba
+  // (local_change). Bridge/agente/comunicação/erros = técnico → SÓ super_admins +
+  // fallback admin, mesmo que a fazenda tenha operadores locais.
+  const TECH_ALERT_TYPES = new Set([
+    "bridge_warning", "bridge_offline", "bridge_recovered", "bridge_down",
+    "agent_tx_stalled", "agent_clone_detected", "agent_dying", "agent_offline",
+    "offline", "back_online", "com_missing", "com_stuck",
+  ]);
+  if (TECH_ALERT_TYPES.has(String(alert_type))) {
+    const adminList: any[] = (allOperators ?? []).filter((o: any) => o.phone && o.role === "super_admin");
+    for (const phone of adminFallbackPhones) {
+      if (!adminList.some((o) => normalizePhone(o.phone) === normalizePhone(phone))) {
+        adminList.push({ phone, name: "Admin Renov", role: "super_admin", notification_preference: "default", receive_alerts: true, farm_id: null });
+      }
+    }
+    operators = adminList;
+    console.log(`[whatsapp-alerts] alerta TÉCNICO '${alert_type}' → SÓ admins (${adminList.length}); CLIENTE não recebe`);
+  }
+
   if ((!operators || !operators.length) && (isBridgeAlert || CRITICAL_ALERT_TYPES.has(String(alert_type)))) {
     // Alerta crítico sem responsável local — cai para admins globais.
     const fallback: any[] = [];
