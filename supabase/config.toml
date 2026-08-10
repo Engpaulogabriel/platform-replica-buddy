@@ -69,6 +69,9 @@ verify_jwt = false
 verify_jwt = false
 [functions.diag-session]
 verify_jwt = false
+# diag-license: registro/validação anti-clone por device_id (sem login de usuário).
+[functions.diag-license]
+verify_jwt = false
 
 
 

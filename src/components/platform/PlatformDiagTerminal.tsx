@@ -8,13 +8,14 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { KeyRound, TerminalSquare, Radio, Send, Lock, Copy, Plug } from "lucide-react";
+import { KeyRound, Radio, Send, Lock, Copy, Plug, ShieldCheck, Check, Ban, RefreshCw } from "lucide-react";
 
 type LogLine = { kind: "tx" | "rx" | "info" | "err"; text: string; at: string };
 const MAX_LOG = 200;
 const now = () => new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 interface Session { id: string; code: string; com_port: string | null; status: string; expires_at: string; }
+interface License { id: string; device_id: string; hostname: string | null; status: string; last_seen: string | null; activated_at: string | null; revoked_at: string | null; }
 
 export default function PlatformDiagTerminal({ isAdmin }: { isAdmin: boolean }) {
   const [pin, setPin] = useState<string | null>(null);
@@ -29,8 +30,29 @@ export default function PlatformDiagTerminal({ isAdmin }: { isAdmin: boolean }) 
   const [log, setLog] = useState<LogLine[]>([]);
   const seenResp = useRef<Set<string>>(new Set());
 
+  const [licenses, setLicenses] = useState<License[]>([]);
+
   const push = useCallback((kind: LogLine["kind"], text: string) =>
     setLog((p) => [{ kind, text, at: now() }, ...p].slice(0, MAX_LOG)), []);
+
+  // ── Licenças de Diagnóstico (anti-clone por device_id) ──────────────────────
+  const loadLicenses = useCallback(async () => {
+    const { data } = await supabase.from("diag_licenses" as any)
+      .select("id, device_id, hostname, status, last_seen, activated_at, revoked_at")
+      .order("created_at", { ascending: false }).limit(50);
+    setLicenses((data ?? []) as any);
+  }, []);
+  useEffect(() => { if (isAdmin) void loadLicenses(); }, [isAdmin, loadLicenses]);
+
+  const setLicense = async (id: string, action: "authorize" | "revoke") => {
+    const { data: userRes } = await supabase.auth.getUser();
+    const patch = action === "authorize"
+      ? { status: "authorized", activated_at: new Date().toISOString(), activated_by: userRes?.user?.id ?? null, revoked_at: null }
+      : { status: "revoked", revoked_at: new Date().toISOString() };
+    const { error } = await supabase.from("diag_licenses" as any).update(patch as any).eq("id", id);
+    if (error) { push("err", `Licença: ${error.message}`); return; }
+    void loadLicenses();
+  };
 
   if (!isAdmin) {
     return (
@@ -131,6 +153,54 @@ export default function PlatformDiagTerminal({ isAdmin }: { isAdmin: boolean }) 
 
   return (
     <div className="space-y-4">
+      {/* Licenças de Diagnóstico (anti-clone) */}
+      <Card className="p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold flex items-center gap-2"><ShieldCheck className="w-4 h-4" /> Licenças de Diagnóstico</h3>
+          <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => void loadLicenses()}><RefreshCw className="w-3.5 h-3.5" /></Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Cada computador que abre o RENOV Diagnóstico aparece aqui. Autorize os PCs de confiança; revogue os copiados/desconhecidos.
+        </p>
+        {licenses.length === 0 ? (
+          <p className="text-xs text-muted-foreground">Nenhum computador registrado ainda.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-muted-foreground uppercase tracking-wide text-[10px]">
+                <tr><th className="text-left py-1">Computador</th><th className="text-left">Device ID</th><th className="text-left">Status</th><th className="text-left">Visto</th><th className="text-right">Ação</th></tr>
+              </thead>
+              <tbody>
+                {licenses.map((l) => {
+                  const st = l.revoked_at ? "revoked" : l.status;
+                  const badge = st === "authorized" ? "text-emerald-600" : st === "revoked" ? "text-destructive" : "text-amber-600";
+                  return (
+                    <tr key={l.id} className="border-t">
+                      <td className="py-1.5 font-medium">{l.hostname ?? "—"}</td>
+                      <td className="font-mono text-[10px] text-muted-foreground">{l.device_id.slice(0, 16)}…</td>
+                      <td className={`font-bold uppercase ${badge}`}>{st}</td>
+                      <td className="text-muted-foreground">{l.last_seen ? new Date(l.last_seen).toLocaleString("pt-BR") : "—"}</td>
+                      <td className="text-right whitespace-nowrap">
+                        {st !== "authorized" && (
+                          <Button size="sm" variant="outline" className="h-6 text-[11px] mr-1" onClick={() => void setLicense(l.id, "authorize")}>
+                            <Check className="w-3 h-3 mr-1" />Autorizar
+                          </Button>
+                        )}
+                        {st !== "revoked" && (
+                          <Button size="sm" variant="ghost" className="h-6 text-[11px] text-destructive hover:text-destructive" onClick={() => void setLicense(l.id, "revoke")}>
+                            <Ban className="w-3 h-3 mr-1" />Revogar
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
       {/* Gerar PIN */}
       <Card className="p-4 space-y-3">
         <h3 className="text-sm font-semibold flex items-center gap-2"><KeyRound className="w-4 h-4" /> Modo Técnico — gerar PIN</h3>

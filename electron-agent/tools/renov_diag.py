@@ -19,6 +19,9 @@ Compilar: pyinstaller --onefile --windowed --icon=renov_icon.ico --name "RENOV_D
 import os
 import sys
 import time
+import json
+import uuid
+import ctypes
 import hashlib
 import base64
 import random
@@ -84,21 +87,101 @@ def resource_path(rel):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, rel)
 
-def machine_id():
-    host = platform.node() or "unknown"
-    disk = ""
+def _wmic(query):
+    """Roda 'wmic <query> /value' e retorna o 1º valor não vazio."""
     try:
-        if platform.system() == "Windows":
-            out = subprocess.check_output("wmic diskdrive get SerialNumber /value",
-                                          timeout=5, shell=True).decode(errors="ignore")
-            for ln in out.splitlines():
-                if ln.strip().startswith("SerialNumber="):
-                    disk = ln.split("=", 1)[1].strip()
-                    if disk:
-                        break
+        out = subprocess.check_output(f"wmic {query} /value", timeout=5, shell=True).decode(errors="ignore")
+        for ln in out.splitlines():
+            if "=" in ln:
+                v = ln.split("=", 1)[1].strip()
+                if v:
+                    return v
     except Exception:
         pass
+    return ""
+
+
+def _hw_ids():
+    host = platform.node() or "unknown"
+    disk = mb = ""
+    if platform.system() == "Windows":
+        disk = _wmic("diskdrive get SerialNumber")
+        mb = _wmic("csproduct get UUID")
+    mac = f"{uuid.getnode():012x}"
+    return host, disk, mb, mac
+
+
+def machine_id():
+    """Identificador da MÁQUINA (usado nas sessões). Estável no Windows."""
+    host, disk, _mb, _mac = _hw_ids()
     return hashlib.sha256(f"{host}|{disk}".encode()).hexdigest()[:32]
+
+
+def device_id():
+    """Identidade ANTI-CLONE do PC: serial do HD + UUID da placa + hostname + MAC.
+    Se o .exe for copiado p/ outro PC, muda → o servidor rejeita a licença."""
+    host, disk, mb, mac = _hw_ids()
+    return hashlib.sha256(f"{disk}|{mb}|{host}|{mac}".encode()).hexdigest()
+
+
+# ── DPAPI (Windows Data Protection API) — cache local cifrado atrelado ao PC ──
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    if platform.system() != "Windows":
+        return data  # dev/fallback: sem DPAPI fora do Windows
+    class BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.POINTER(ctypes.c_char))]
+    buf = ctypes.create_string_buffer(data, len(data))
+    bin_ = BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    bout = BLOB()
+    fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
+    if not fn(ctypes.byref(bin_), None, None, None, None, 0, ctypes.byref(bout)):
+        raise OSError("DPAPI falhou")
+    out = ctypes.string_at(bout.pbData, bout.cbData)
+    ctypes.windll.kernel32.LocalFree(bout.pbData)
+    return out
+
+
+CFG_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "RENOV")
+CFG_FILE = os.path.join(CFG_DIR, "diag_cfg.dat")
+
+
+def load_cfg():
+    try:
+        with open(CFG_FILE, "rb") as f:
+            return json.loads(_dpapi(f.read(), protect=False).decode())
+    except Exception:
+        return {}
+
+
+def save_cfg(d):
+    try:
+        os.makedirs(CFG_DIR, exist_ok=True)
+        with open(CFG_FILE, "wb") as f:
+            f.write(_dpapi(json.dumps(d).encode(), protect=True))
+    except Exception:
+        pass
+
+
+GRACE_HOURS = 24  # offline: funciona 24h com cache DPAPI; depois bloqueia
+
+
+def check_license(did):
+    """(allowed, status, offline). Online: valida e atualiza cache. Offline: usa
+    cache DPAPI (mesmo device_id, autorizado, < 24h)."""
+    try:
+        _st, body = api_post("diag-license", {"action": "check", "device_id": did,
+            "device_info": {"hostname": platform.node(), "os": platform.platform()}}, timeout=8)
+        status = body.get("status", "unknown")
+        cfg = load_cfg()
+        cfg.update({"license_status": status, "checked_at": time.time(), "device_id": did})
+        save_cfg(cfg)
+        return (body.get("ok") is True and status == "authorized", status, False)
+    except requests.exceptions.RequestException:
+        cfg = load_cfg()
+        if (cfg.get("device_id") == did and cfg.get("license_status") == "authorized"
+                and (time.time() - cfg.get("checked_at", 0)) < GRACE_HOURS * 3600):
+            return (True, "authorized_cache", True)
+        return (False, "offline_sem_cache", True)
 
 
 # ── Camada serial (thread-safe via lock) ─────────────────────────────────────
@@ -167,12 +250,15 @@ def api_post(path, payload, timeout=10):
 def derive_key(pin, mid):
     return PBKDF2HMAC(algorithm=SHA256(), length=32, salt=mid.encode(), iterations=PBKDF2_ITERS).derive(pin.encode())
 
-def decrypt_password(enc_b64, pin, mid):
+def decrypt_password_bytes(enc_b64, pin, mid):
+    """Decifra a senha CFG em um bytearray MUTÁVEL (para poder zerar após o uso).
+    A senha nunca vira str literal persistente."""
     raw = base64.b64decode(enc_b64)
-    return AESGCM(derive_key(pin, mid)).decrypt(raw[:12], raw[12:], None).decode()
+    return bytearray(AESGCM(derive_key(pin, mid)).decrypt(raw[:12], raw[12:], None))
 
 def build_frame(addr, saida, bit):
-    return f"[{addr}_{saida}_]{{{bit}}}[{addr}_ETX_]\r"
+    # monta em BYTES (não deixa a frame como literal string concatenada em memória)
+    return bytes(f"[{addr}_{saida}_]{{{bit}}}[{addr}_ETX_]\r", "ascii")
 
 
 # ── App ──────────────────────────────────────────────────────────────────────
@@ -312,11 +398,25 @@ class RenovDiag(ctk.CTk):
         ctk.CTkLabel(card, text="Selecione a porta e conecte ao dispositivo.",
                      font=ctk.CTkFont("Inter", 13), text_color=TEXTO).pack(anchor="w", padx=16, pady=(14, 6))
         row = ctk.CTkFrame(card, fg_color="transparent"); row.pack(fill="x", padx=16, pady=(0, 14))
-        ports = [p.device for p in list_ports.comports()] or ["(nenhuma)"]
-        self.port_menu = ctk.CTkOptionMenu(row, values=ports, fg_color=NAVY, button_color=NAVY,
-                                           font=ctk.CTkFont("Inter", 13), width=180)
+        # portas com nome amigável: "COM1 — USB-SERIAL CH340"
+        self.port_map = {}
+        displays = []
+        for p in list_ports.comports():
+            desc = (p.description or "").strip()
+            d = f"{p.device} — {desc}" if desc and desc.lower() != "n/a" else p.device
+            self.port_map[d] = p.device
+            displays.append(d)
+        if not displays:
+            displays = ["(nenhuma porta)"]
+        self.port_menu = ctk.CTkOptionMenu(row, values=displays, fg_color=NAVY, button_color=NAVY,
+                                           font=ctk.CTkFont("Inter", 13), width=300)
+        last = load_cfg().get("last_com")
+        if last:
+            for d, dev in self.port_map.items():
+                if dev == last:
+                    self.port_menu.set(d); break
         self.port_menu.pack(side="left")
-        ctk.CTkButton(row, text="Atualizar", width=90, fg_color=CINZA, hover_color="#6B7785",
+        ctk.CTkButton(row, text="Atualizar lista", width=110, fg_color=CINZA, hover_color="#6B7785",
                       command=self.scr_conexao).pack(side="left", padx=8)
         ctk.CTkButton(row, text="Conectar", width=120, fg_color=VERDE, hover_color="#12833B",
                       command=self._do_connect).pack(side="left", padx=8)
@@ -326,14 +426,17 @@ class RenovDiag(ctk.CTk):
         self.conn_info.pack(anchor="w", pady=8)
 
     def _do_connect(self):
-        port = self.port_menu.get()
+        disp = self.port_menu.get()
+        port = self.port_map.get(disp, disp)
         if not port or port.startswith("("):
             messagebox.showwarning(APP_NAME, "Nenhuma porta selecionada."); return
         self.link.close()
         ok, err = self.link.open(port)
         if not ok:
-            messagebox.showerror(APP_NAME, f"Falha ao abrir {port}:\n{err}"); return
+            messagebox.showerror(APP_NAME, f"Porta {port} não disponível — verifique o cabo.\n\nDetalhe: {err}")
+            return
         self.port = port
+        cfg = load_cfg(); cfg["last_com"] = port; save_cfg(cfg)  # lembra a última COM usada
         self.conn_info.configure(text=f"Conectado em {port}. Identificando dispositivo...")
         self._set_conn()
         def ping():
@@ -449,8 +552,8 @@ class RenovDiag(ctk.CTk):
                 messagebox.showwarning(APP_NAME, "Endereço deve ter 4 dígitos."); return
             if label != "Consultar" and not messagebox.askyesno(APP_NAME, f"{label} equipamento {addr} (saída {saida})?"):
                 return
-            frame = build_frame(addr, saida, bit)
-            self._log_out(out, "tx", f"{label}: {frame.strip()}")
+            frame = build_frame(addr, saida, bit)  # bytes
+            self._log_out(out, "tx", f"{label}: {frame.decode('ascii', 'replace').strip()}")
             self.run_async(lambda: self.link.cmd(frame), lambda r: self._log_out(out, "rx", r))
         ctk.CTkButton(row, text="Ligar", width=90, fg_color=VERDE, hover_color="#12833B",
                       command=lambda: send("1", "Ligar")).pack(side="left", padx=4)
@@ -517,10 +620,15 @@ class RenovDiag(ctk.CTk):
             if st != 200 or not body.get("ok"):
                 return ("bad", body.get("reason", "PIN rejeitado"))
             try:
-                senha = decrypt_password(body["encrypted_password"], pin, self.mid)
+                senha = decrypt_password_bytes(body["encrypted_password"], pin, self.mid)  # bytearray volátil
             except Exception as e:
                 return ("dec", str(e))
-            self.link.cmd(f"CFG:LOGIN:{senha}\r")
+            # monta a frame de login em bytes, envia, e ZERA a senha imediatamente.
+            frame = bytearray(b"CFG:LOGIN:"); frame.extend(senha); frame.extend(b"\r")
+            self.link.cmd(bytes(frame))
+            for i in range(len(senha)): senha[i] = 0
+            for i in range(len(frame)): frame[i] = 0
+            del senha, frame
             return ("ok", int(body.get("expires_in", 600)))
         def done(res):
             kind, val = res
@@ -616,9 +724,56 @@ class RenovDiag(ctk.CTk):
         self.destroy()
 
 
+def show_block_window(did, status, offline):
+    """Janela de ativação/bloqueio quando a licença não está autorizada. 'Tentar
+    novamente' revalida; se autorizar, abre o app."""
+    result = {"open": False}
+    win = ctk.CTk()
+    win.title(APP_NAME + " — Ativação")
+    win.geometry("580x460"); win.configure(fg_color=FUNDO)
+    ctk.CTkLabel(win, text="RENOV Diagnóstico", font=ctk.CTkFont("Inter", 22, "bold"), text_color=VERDE).pack(pady=(24, 2))
+    ctk.CTkLabel(win, text="Ativação necessária", font=ctk.CTkFont("Inter", 13), text_color=NAVY).pack()
+    msgs = {
+        "pending": "Este computador ainda NÃO foi autorizado.\nPeça a liberação ao administrador RENOV (aba 'Licenças de Diagnóstico').",
+        "revoked": "A licença deste computador foi REVOGADA.\nContate o administrador RENOV.",
+        "offline_sem_cache": "Sem internet e sem licença válida no cache.\nConecte à internet para ativar (a 1ª ativação exige internet).",
+        "unknown": "Não foi possível validar a licença.\nTente novamente.",
+    }
+    ctk.CTkLabel(win, text=msgs.get(status, "Licença não autorizada."), font=ctk.CTkFont("Inter", 12),
+                 text_color=TEXTO, wraplength=520, justify="center").pack(pady=(14, 8), padx=20)
+    ctk.CTkLabel(win, text="Código deste computador:", font=ctk.CTkFont("Inter", 11), text_color=CINZA).pack()
+    idbox = ctk.CTkTextbox(win, height=48, width=520, font=ctk.CTkFont("Consolas", 11))
+    idbox.insert("0.0", did); idbox.configure(state="normal"); idbox.pack(pady=(2, 10))
+    st_lbl = ctk.CTkLabel(win, text=f"Status: {status}" + (" (offline)" if offline else ""),
+                          font=ctk.CTkFont("Inter", 12, "bold"), text_color=(VERM if status == "revoked" else NAVY))
+    st_lbl.pack(pady=(0, 8))
+
+    def retry():
+        a, s, off = check_license(did)
+        if a:
+            result["open"] = True; win.destroy()
+        else:
+            st_lbl.configure(text=f"Status: {s}" + (" (offline)" if off else ""))
+            messagebox.showinfo(APP_NAME, "Ainda não autorizado. Peça a liberação ao administrador." if s == "pending" else f"Status: {s}")
+
+    bar = ctk.CTkFrame(win, fg_color="transparent"); bar.pack(pady=6)
+    ctk.CTkButton(bar, text="Tentar novamente", fg_color=VERDE, hover_color="#12833B", command=retry).pack(side="left", padx=6)
+    ctk.CTkButton(bar, text="Sair", fg_color=CINZA, hover_color="#6B7785", command=win.destroy).pack(side="left", padx=6)
+    ctk.CTkLabel(win, text=RODAPE, font=ctk.CTkFont("Inter", 9), text_color=CINZA).pack(side="bottom", pady=8)
+    win.mainloop()
+    return result["open"]
+
+
 def main():
-    app = RenovDiag()
-    app.mainloop()
+    # ── Gate de licença ANTI-CLONE: valida o device_id online (24h de graça offline).
+    did = device_id()
+    allowed, status, offline = check_license(did)
+    log(f"license check: allowed={allowed} status={status} offline={offline} dev={did[:12]}")
+    if not allowed:
+        if show_block_window(did, status, offline):
+            RenovDiag().mainloop()
+        return
+    RenovDiag().mainloop()
 
 
 if __name__ == "__main__":
