@@ -63,6 +63,13 @@ verify_jwt = false
 [functions.agent-offline-watchdog]
 verify_jwt = false
 
+# renov_diag (Diagnóstico Remoto): chamadas pela ferramenta .exe (sem login de
+# usuário). O segredo é o PIN de uso único / o code+machine_id da sessao.
+[functions.validate-diag-pin]
+verify_jwt = false
+[functions.diag-session]
+verify_jwt = false
+
 
 
 

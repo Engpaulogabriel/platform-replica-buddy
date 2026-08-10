@@ -16,7 +16,7 @@ import { notify } from "@/lib/notify";
 import {
   Building2, Users, Cpu, Activity, Shield, Plus, RefreshCw, Search,
   CheckCircle2, XCircle, Eye, KeyRound, Pause, Play, Copy, ShieldCheck, Database, Bell, FileText, Power,
-  Download, FileJson, Rocket, Wrench, Timer, Plug, Crown, TerminalSquare,
+  Download, FileJson, Rocket, Wrench, Timer, Plug, Crown, TerminalSquare, Radio,
 } from "lucide-react";
 import PlatformMasterManagers from "@/components/platform/PlatformMasterManagers";
 import PlatformDevices from "@/components/platform/PlatformDevices";
@@ -27,6 +27,7 @@ import PlatformAlerts from "@/components/platform/PlatformAlerts";
 import PlatformReports from "@/components/platform/PlatformReports";
 import PlatformRemoteControl from "@/components/platform/PlatformRemoteControl";
 import PlatformSerialTerminal from "@/components/platform/PlatformSerialTerminal";
+import PlatformDiagTerminal from "@/components/platform/PlatformDiagTerminal";
 import PlatformDemoMenu from "@/components/platform/PlatformDemoMenu";
 import PlatformFarmSwitcher from "@/components/platform/PlatformFarmSwitcher";
 import PlatformUpdates from "@/components/platform/PlatformUpdates";
@@ -170,6 +171,7 @@ export default function PlatformAdmin() {
           <TabsTrigger value="reports"><FileText className="w-4 h-4 mr-1.5" />Relatórios</TabsTrigger>
           <TabsTrigger value="remote"><Power className="w-4 h-4 mr-1.5" />Controle remoto</TabsTrigger>
           <TabsTrigger value="serial"><TerminalSquare className="w-4 h-4 mr-1.5" />Terminal Serial</TabsTrigger>
+          <TabsTrigger value="diag"><Radio className="w-4 h-4 mr-1.5" />Diagnóstico Remoto</TabsTrigger>
           <TabsTrigger value="devices"><ShieldCheck className="w-4 h-4 mr-1.5" />Dispositivos &amp; Licenças</TabsTrigger>
           <TabsTrigger value="updates"><Rocket className="w-4 h-4 mr-1.5" />Atualizações</TabsTrigger>
           <TabsTrigger value="users"><Users className="w-4 h-4 mr-1.5" />Usuários</TabsTrigger>
@@ -360,6 +362,9 @@ export default function PlatformAdmin() {
           <PlatformRemoteControl isAdmin={isAdmin} />
         </TabsContent>
 
+        <TabsContent value="diag" className="mt-4">
+          <PlatformDiagTerminal isAdmin={isAdmin} />
+        </TabsContent>
         <TabsContent value="serial" className="mt-4">
           <PlatformSerialTerminal isAdmin={isAdmin} />
         </TabsContent>
