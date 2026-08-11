@@ -9,9 +9,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { notify } from "@/lib/notify";
-import { InemaCompliancePanel } from "@/components/inema/InemaCompliancePanel";
-import { InemaReport } from "@/components/inema/InemaReport";
-import { useEnvironmentalAgency } from "@/hooks/useEnvironmentalAgency";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
 import {
   TrendingUp, DollarSign, Droplets, Zap, AlertTriangle, FileText, Save, Download, Info, Settings, Truck, Lock,
@@ -42,7 +39,6 @@ export default function Produtividade() {
 
   const data = useProductivityData({ from, to });
   const inema = useInemaConfig();
-  const { agency } = useEnvironmentalAgency(inema.farmId ?? farmId); // órgão ambiental por estado
 
   // Módulo INEMA é opt-in por fazenda (farms.inema_enabled). A aba só aparece
   // quando ativado no Suporte Técnico → aba Fazenda.
@@ -114,12 +110,7 @@ export default function Produtividade() {
       <Tabs defaultValue="roi" className="w-full">
         <TabsList>
           <TabsTrigger value="roi"><DollarSign className="w-4 h-4 mr-1.5" />ROI & Energia</TabsTrigger>
-          {inemaEnabled && (
-            <TabsTrigger value="inema"><FileText className="w-4 h-4 mr-1.5" />Conformidade {agency.agency_acronym}</TabsTrigger>
-          )}
-          {inemaEnabled && (
-            <TabsTrigger value="inema_report"><FileText className="w-4 h-4 mr-1.5" />Relatório {agency.agency_acronym}</TabsTrigger>
-          )}
+          {/* Relatório/Conformidade INEMA movidos para Relatórios → aba do órgão (unificado). */}
           <TabsTrigger value="config"><Settings className="w-4 h-4 mr-1.5" />Configurações {!isPlatformAdmin && <Lock className="w-3 h-3 ml-1" />}</TabsTrigger>
         </TabsList>
 
@@ -245,97 +236,8 @@ export default function Produtividade() {
           )}
         </TabsContent>
 
-        {/* ============ ABA INEMA (opt-in por fazenda: farms.inema_enabled) ============ */}
-        {inemaEnabled && (
-        <TabsContent value="inema" className="space-y-4 mt-4">
-          {/* Compliance diário por poço (risco de multa) — outorgas por poço em inema_permits */}
-          <InemaCompliancePanel farmId={inema.farmId} />
-
-          <Card>
-            <CardHeader className="flex-row items-center justify-between">
-              <div>
-                <CardTitle className="text-base flex items-center gap-2"><FileText className="w-4 h-4" /> Relatório de Captação INEMA</CardTitle>
-                <p className="text-xs text-muted-foreground mt-1">Portaria INEMA 22.181/2021 — Medição indireta por horímetro.</p>
-              </div>
-              <Button size="sm" onClick={() => exportInemaPDF(data, inema.data, periodDays)} disabled={data.pumps.length === 0}>
-                <Download className="w-4 h-4 mr-1.5" />Gerar PDF Oficial
-              </Button>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {!inema.data?.outorga_numero && (
-                <Alert>
-                  <Info className="h-4 w-4" />
-                  <AlertDescription>Configure os dados da outorga na aba <strong>Configurações</strong> para gerar o relatório oficial.</AlertDescription>
-                </Alert>
-              )}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                <InfoBox label="Outorga Nº" value={inema.data?.outorga_numero ?? "—"} />
-                <InfoBox label="Vazão Outorgada" value={inema.data?.vazao_outorgada_m3h ? `${inema.data.vazao_outorgada_m3h} m³/h` : "—"} />
-                <InfoBox label="Validade" value={inema.data?.outorga_validade ? new Date(inema.data.outorga_validade).toLocaleDateString("pt-BR") : "—"} />
-                <InfoBox label="Volume Captado" value={`${fmtNum(data.totals.volume_m3, 0)} m³`} />
-              </div>
-
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Captação</TableHead>
-                      <TableHead className="text-right">Horas operadas</TableHead>
-                      <TableHead className="text-right">Vazão (m³/h)</TableHead>
-                      <TableHead className="text-right">Vazão (L/s)</TableHead>
-                      <TableHead className="text-right">Volume (m³)</TableHead>
-                      <TableHead className="text-right">Eficiência</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {data.pumps.map(p => {
-                      const flow = p.estimated_flow_m3h ?? 0;
-                      const flowLs = (flow * 1000) / 3600;
-                      const outorga = inema.data?.vazao_outorgada_m3h ?? 0;
-                      const eff = outorga > 0 && flow > 0 ? Math.min(100, (flow / outorga) * 100) : 0;
-                      return (
-                        <TableRow key={p.equipmentId}>
-                          <TableCell className="font-medium">{p.name}</TableCell>
-                          <TableCell className="text-right tabular-nums">{fmtNum(p.hours_total, 2)}</TableCell>
-                          <TableCell className="text-right tabular-nums">{flow || "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums">{flow ? fmtNum(flowLs, 2) : "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums">{fmtNum(p.volume_m3, 0)}</TableCell>
-                          <TableCell className="text-right tabular-nums">{eff > 0 ? `${eff.toFixed(0)}%` : "—"}</TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </div>
-
-              <Card>
-                <CardHeader className="pb-2"><CardTitle className="text-sm">Volume diário captado (m³)</CardTitle></CardHeader>
-                <CardContent>
-                  {data.dailyVolume.length > 0 ? (
-                    <ResponsiveContainer width="100%" height={220}>
-                      <BarChart data={data.dailyVolume}>
-                        <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-                        <XAxis dataKey="day" tick={{ fontSize: 10 }} tickFormatter={(d) => new Date(d).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} />
-                        <YAxis tick={{ fontSize: 10 }} />
-                        <Tooltip formatter={(v: any) => `${fmtNum(Number(v), 0)} m³`} />
-                        <Bar dataKey="volume_m3" fill="hsl(217 91% 60%)" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  ) : <div className="text-center text-muted-foreground py-8 text-sm">Sem dados no período.</div>}
-                </CardContent>
-              </Card>
-              <Disclaimer />
-            </CardContent>
-          </Card>
-        </TabsContent>
-        )}
-
-        {inemaEnabled && (
-        <TabsContent value="inema_report" className="space-y-4 mt-4">
-          {/* Relatório formato SEI BAHIA: outorgas (portaria/poços/condicionantes) + monitoramento */}
-          <InemaReport farmId={inema.farmId ?? farmId} />
-        </TabsContent>
-        )}
+        {/* Relatório/Conformidade INEMA foram UNIFICADOS em Relatórios → aba do órgão
+            (InemaReport: Outorgas / Monitoramento / Compliance). Removidos daqui. */}
 
         {/* ============ ABA CONFIG ============ */}
         <TabsContent value="config" className="space-y-4 mt-4">

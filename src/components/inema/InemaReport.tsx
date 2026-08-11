@@ -14,8 +14,10 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FileText, Printer, AlertTriangle, Droplets, MapPin, RefreshCw } from "lucide-react";
 import { useEnvironmentalAgency } from "@/hooks/useEnvironmentalAgency";
+import { InemaCompliancePanel } from "@/components/inema/InemaCompliancePanel";
 
 interface Well { id: string; well_name: string; latitude: string | null; longitude: string | null; flow_rate_m3_day: number; datum: string | null }
 interface Condition { id: string; condition_number: number | null; description: string; deadline_days: number | null; is_critical: boolean; status: string }
@@ -114,6 +116,14 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
   const authorizedPeriod = authorizedPerDay * range.days;
   const compliancePct = authorizedPeriod > 0 ? (totalCaptured / authorizedPeriod) * 100 : 0;
 
+  // Portaria principal = outorga vigente mais recente (fallback: a de validade mais longa).
+  const mainPortaria = useMemo(() => {
+    if (permits.length === 0) return null;
+    const vigentes = permits.filter((p) => daysToExpiry(p.validity_end) >= 0);
+    const pool = vigentes.length ? vigentes : permits;
+    return pool.slice().sort((a, b) => new Date(b.permit_date).getTime() - new Date(a.permit_date).getTime())[0];
+  }, [permits]);
+
   if (!farmId) return <Card><CardContent className="py-8 text-center text-muted-foreground">Selecione uma fazenda.</CardContent></Card>;
 
   return (
@@ -121,6 +131,9 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
       <div className="flex items-center justify-between gap-2 print:hidden">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <FileText className="w-4 h-4 text-primary" /> Relatório {agency.agency_acronym} — {agency.agency_name} ({agency.state_code})
+          {mainPortaria && (
+            <span className="ml-1 text-foreground font-medium">· Outorga {mainPortaria.permit_number}</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
@@ -137,8 +150,15 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
       ) : permits.length === 0 ? (
         <Card><CardContent className="py-8 text-center text-muted-foreground">Nenhuma outorga cadastrada para esta fazenda.</CardContent></Card>
       ) : (
-        <>
-          {/* ══ A) OUTORGAS (formato SEI) ══ */}
+        <Tabs defaultValue="outorgas" className="w-full">
+          <TabsList>
+            <TabsTrigger value="outorgas">Outorgas</TabsTrigger>
+            <TabsTrigger value="monitoramento">Monitoramento</TabsTrigger>
+            <TabsTrigger value="compliance">Compliance</TabsTrigger>
+          </TabsList>
+
+          {/* ══ OUTORGAS (formato SEI) ══ */}
+          <TabsContent value="outorgas" className="space-y-4 mt-4">
           {permits.map((p) => {
             const stt = permitStatus(p.validity_end);
             const d = daysToExpiry(p.validity_end);
@@ -229,8 +249,10 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
               </Card>
             );
           })}
+          </TabsContent>
 
-          {/* ══ B) MONITORAMENTO (telemetria) ══ */}
+          {/* ══ MONITORAMENTO (telemetria) ══ */}
+          <TabsContent value="monitoramento" className="space-y-4 mt-4">
           <Card className="border-border">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center justify-between gap-2 flex-wrap">
@@ -278,7 +300,17 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
                   </TableBody>
                 </Table>
               </div>
+            </CardContent>
+          </Card>
+          </TabsContent>
 
+          {/* ══ COMPLIANCE (captado vs autorizado) ══ */}
+          <TabsContent value="compliance" className="space-y-4 mt-4">
+          <Card className="border-border">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2"><Droplets className="w-4 h-4 text-primary" /> Compliance — captado vs autorizado</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
               {/* Compliance: captado vs autorizado */}
               <div className="rounded-md border border-border p-3 space-y-2">
                 <div className="flex items-center justify-between text-xs">
@@ -307,7 +339,10 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
               </p>
             </CardContent>
           </Card>
-        </>
+          {/* Compliance diário por poço (risco de multa) — inema_permits */}
+          <InemaCompliancePanel farmId={farmId} />
+          </TabsContent>
+        </Tabs>
       )}
     </div>
   );

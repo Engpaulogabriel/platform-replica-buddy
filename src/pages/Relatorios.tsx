@@ -8,13 +8,16 @@ import AuditoriaReportTab from "@/components/reports/AuditoriaReportTab";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { useFarmFeatures } from "@/hooks/useFarmFeatures";
 import { useAutomationLog } from "@/lib/automationLog";
+import { useEnvironmentalAgency } from "@/hooks/useEnvironmentalAgency";
+import { supabase } from "@/integrations/supabase/client";
 
 const NiveisReport = lazy(() => import("@/components/NiveisReport"));
 const HorimetroReportTab = lazy(() => import("@/components/reports/HorimetroReportTab"));
 const VazaoReportTab = lazy(() => import("@/components/reports/VazaoReportTab"));
 const AguaConsumoReportTab = lazy(() => import("@/components/reports/AguaConsumoReportTab"));
+const InemaReport = lazy(() => import("@/components/inema/InemaReport").then((m) => ({ default: m.InemaReport })));
 
-type ReportTab = "automacao" | "horimetro" | "niveis" | "vazao" | "agua" | "auditoria";
+type ReportTab = "automacao" | "horimetro" | "niveis" | "vazao" | "agua" | "auditoria" | "inema";
 
 function ReportLoading({ label = "Carregando relatório..." }: { label?: string }) {
   return (
@@ -51,6 +54,16 @@ const Relatorios = () => {
   const farmId = useDefaultFarmId();
   const features = useFarmFeatures();
   const automationEntries = useAutomationLog((s) => s.entries);
+  const { agency } = useEnvironmentalAgency(farmId); // nome do órgão por estado
+  // INEMA é opt-in por fazenda (farms.inema_enabled) — a aba só aparece se ligado.
+  const [inemaEnabled, setInemaEnabled] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    if (!farmId) { setInemaEnabled(false); return; }
+    void supabase.from("farms").select("inema_enabled" as any).eq("id", farmId).maybeSingle()
+      .then(({ data }) => { if (alive) setInemaEnabled(Boolean((data as any)?.inema_enabled)); });
+    return () => { alive = false; };
+  }, [farmId]);
 
   // Se a aba ativa pertence a um módulo desativado, cair para "automacao"
   useEffect(() => {
@@ -209,6 +222,11 @@ const Relatorios = () => {
           <button type="button" className={tabButtonClass("auditoria")} onClick={() => changeTab("auditoria")}>
             <FileText className="w-4 h-4" /> Auditoria
           </button>
+          {inemaEnabled && (
+            <button type="button" className={tabButtonClass("inema")} onClick={() => changeTab("inema")}>
+              <FileText className="w-4 h-4" /> {agency.agency_acronym}
+            </button>
+          )}
         </div>
 
         <Suspense fallback={<ReportLoading />}>
@@ -227,6 +245,8 @@ const Relatorios = () => {
             <AguaConsumoReportTab farmId={farmId} fromDate={fromDate} toDate={toDate} selectedPump={selectedPump} />
           ) : renderedTab === "auditoria" ? (
             <AuditoriaReportTab farmId={farmId} />
+          ) : renderedTab === "inema" && inemaEnabled ? (
+            <InemaReport farmId={farmId} />
           ) : null}
         </div>
         </Suspense>
