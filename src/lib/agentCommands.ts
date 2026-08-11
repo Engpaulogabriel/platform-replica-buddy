@@ -29,7 +29,8 @@ export type AgentCmdKind =
   | "stop_log_stream"
   // v3.25.43 — Terminal Serial Remoto (substitui o Hércules)
   | "serial_terminal"
-  | "serial_sniff";
+  | "serial_sniff"
+  | "update_bridge";
 
 /** Frame capturado da serial (terminal/sniff): frame + timestamp epoch (ms). */
 export interface SerialCapturedFrame {

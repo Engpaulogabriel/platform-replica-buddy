@@ -5605,6 +5605,7 @@ export type Database = {
         | "stop_log_stream"
         | "serial_terminal"
         | "serial_sniff"
+        | "update_bridge"
       agent_cmd_status:
         | "pending"
         | "ack"
@@ -5798,6 +5799,7 @@ export const Constants = {
         "stop_log_stream",
         "serial_terminal",
         "serial_sniff",
+        "update_bridge",
       ],
       agent_cmd_status: [
         "pending",

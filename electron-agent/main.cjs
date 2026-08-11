@@ -6713,6 +6713,111 @@ async function requestAgentReleaseSignedUrl(version, tag) {
   return res;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.25.60 — OTA da PASTA do serial_bridge (--onedir). Atualiza a pasta INTEIRA
+// (resources/serial_bridge/) baixando um .zip, parando a bridge, substituindo a
+// pasta e reiniciando o agente. ROLLBACK total: a pasta boa NUNCA é apagada antes
+// de a nova ser extraída e validada; se qualquer passo falhar, restaura a antiga.
+// Windows only (a bridge compilada é .exe). NÃO usa --onefile/_MEI.
+let isInstallingBridge = false;
+async function downloadAndInstallBridgeUpdate(cmdId, version, downloadUrl, expectedHash, expectedSize) {
+  if (isInstallingBridge) { try { await resolveAgentCommand(cmdId, "error", { error: "bridge OTA já em andamento" }); } catch (_) {} return; }
+  if (process.platform !== "win32") { await resolveAgentCommand(cmdId, "error", { error: "bridge OTA só no Windows" }); return; }
+  if (!downloadUrl) { await resolveAgentCommand(cmdId, "error", { error: "payload sem download_url (zip da pasta serial_bridge)" }); return; }
+  isInstallingBridge = true;
+
+  const fs = require("fs");
+  let ofs; try { ofs = require("original-fs"); } catch (_) { ofs = fs; }
+  const https = require("https"); const http = require("http");
+  const { execFile } = require("child_process");
+
+  const resourcesDir = process.resourcesPath || __dirname;
+  const targetDir = path.join(resourcesDir, "serial_bridge");
+  const stagingDir = path.join(resourcesDir, "serial_bridge.new");
+  const backupDir = path.join(resourcesDir, "serial_bridge.old");
+  const updatesDir = path.join(app.getPath("userData"), "updates");
+  try { ofs.mkdirSync(updatesDir, { recursive: true }); } catch (_) {}
+  const zipPath = path.join(updatesDir, `serial_bridge-${version || "new"}.zip`);
+  const rmrf = (p) => { try { ofs.rmSync(p, { recursive: true, force: true }); } catch (_) {} };
+
+  let bridgeStopped = false;
+  try {
+    pushLog("info", "update", `[BRIDGE-OTA] baixando pasta v${version || "?"}: ${String(downloadUrl).slice(0, 60)}...`);
+    // 1) download do zip
+    await new Promise((resolve, reject) => {
+      const lib = downloadUrl.startsWith("https:") ? https : http;
+      const doGet = (u, redirects) => {
+        lib.get(u, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) { res.resume(); return doGet(res.headers.location, redirects - 1); }
+          if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+          const file = fs.createWriteStream(zipPath);
+          res.pipe(file);
+          file.on("finish", () => file.close((e) => (e ? reject(e) : resolve())));
+          file.on("error", reject);
+        }).on("error", reject);
+      };
+      doGet(downloadUrl, 5);
+    });
+    const st = ofs.statSync(zipPath);
+    if (st.size < 100 * 1024) throw new Error(`zip muito pequeno (${st.size} B)`);
+    if (expectedSize && st.size !== Number(expectedSize)) throw new Error(`tamanho não bate (${st.size} != ${expectedSize})`);
+    if (expectedHash) {
+      const h = require("crypto").createHash("sha256").update(ofs.readFileSync(zipPath)).digest("hex");
+      if (h.toLowerCase() !== String(expectedHash).toLowerCase()) throw new Error("sha256 não bate");
+    }
+
+    // 2) extrai para staging (PowerShell Expand-Archive) e valida o exe ANTES de trocar
+    rmrf(stagingDir);
+    await new Promise((resolve, reject) => {
+      execFile("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${stagingDir}' -Force`],
+        { windowsHide: true, timeout: 120_000 }, (err) => (err ? reject(err) : resolve()));
+    });
+    let newRoot = stagingDir;
+    if (!ofs.existsSync(path.join(newRoot, "serial_bridge.exe")) &&
+        ofs.existsSync(path.join(stagingDir, "serial_bridge", "serial_bridge.exe"))) {
+      newRoot = path.join(stagingDir, "serial_bridge"); // zip continha a pasta serial_bridge/
+    }
+    if (!ofs.existsSync(path.join(newRoot, "serial_bridge.exe"))) throw new Error("serial_bridge.exe ausente no zip");
+
+    // 3) para a bridge e troca as pastas (rename = rápido; janela sem pasta ~ms)
+    await stopBridge();
+    bridgeStopped = true;
+    await new Promise((r) => setTimeout(r, 900)); // solta locks do .exe
+    rmrf(backupDir);
+    if (ofs.existsSync(targetDir)) ofs.renameSync(targetDir, backupDir);
+    try {
+      ofs.renameSync(newRoot, targetDir);
+    } catch (e) {
+      if (!ofs.existsSync(targetDir) && ofs.existsSync(backupDir)) { try { ofs.renameSync(backupDir, targetDir); } catch (_) {} }
+      throw e;
+    }
+    if (!ofs.existsSync(path.join(targetDir, "serial_bridge.exe"))) {
+      rmrf(targetDir);
+      if (ofs.existsSync(backupDir)) ofs.renameSync(backupDir, targetDir); // restaura a antiga
+      throw new Error("pós-troca sem serial_bridge.exe — revertido para a pasta anterior");
+    }
+
+    // sucesso → limpa e reinicia o agente (re-resolve o caminho e sobe a bridge nova)
+    rmrf(backupDir); rmrf(stagingDir);
+    try { ofs.unlinkSync(zipPath); } catch (_) {}
+    pushLog("info", "update", `[BRIDGE-OTA] pasta serial_bridge/ atualizada (v${version}) — reiniciando o agente`);
+    await resolveAgentCommand(cmdId, "done", { data: { version: version || null, restarted: true } });
+    isInstallingBridge = false;
+    setTimeout(() => { void relaunchAgent("update_bridge", 0); }, 1200);
+    return;
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    pushLog("error", "update", `[BRIDGE-OTA] falhou: ${msg} — pasta anterior preservada`);
+    rmrf(stagingDir);
+    try { await resolveAgentCommand(cmdId, "error", { error: `bridge OTA falhou: ${msg}` }); } catch (_) {}
+    isInstallingBridge = false;
+    // Se paramos a bridge, a pasta antiga já foi restaurada acima → reinicia para subir.
+    if (bridgeStopped) setTimeout(() => { void relaunchAgent("update_bridge_rollback", 0); }, 1200);
+    return;
+  }
+}
+
 async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize) {
   if (isInstallingUpdate) return;
   isInstallingUpdate = true;
@@ -8064,6 +8169,20 @@ async function handleAgentCommand(cmd) {
           pushLog("error", "update", `[OTA] Falha ao iniciar download: ${e.message}`);
           await resolveAgentCommand(cmd.id, "error", { error: e.message });
         }
+        break;
+      }
+
+      case "update_bridge": {
+        // OTA da PASTA do serial_bridge (--onedir). payload:
+        //   { version, download_url (zip da pasta), file_hash?, file_size_bytes? }
+        // O agente para a bridge, substitui resources/serial_bridge/ e reinicia.
+        // A própria função resolve o comando (done/error) e faz o relaunch.
+        const bv = cmd.payload && cmd.payload.version;
+        const burl = cmd.payload && cmd.payload.download_url;
+        const bhash = cmd.payload && (cmd.payload.file_hash || cmd.payload.sha256);
+        const bsize = cmd.payload && (cmd.payload.file_size_bytes || cmd.payload.size);
+        pushLog("info", "update", `[BRIDGE-OTA] comando recebido v${bv || "?"}`);
+        await downloadAndInstallBridgeUpdate(cmd.id, bv, burl, bhash || null, bsize || null);
         break;
       }
 
