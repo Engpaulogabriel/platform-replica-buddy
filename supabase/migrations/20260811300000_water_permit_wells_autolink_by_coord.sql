@@ -1,5 +1,5 @@
 -- ============================================================================
--- VÍNCULO AUTOMÁTICO DE POÇOS POR COORDENADA + VAZÃO POR OUTORGA
+-- VÍNCULO AUTOMÁTICO DE POÇOS POR COORDENADA (só o vínculo — NÃO altera vazão)
 -- ----------------------------------------------------------------------------
 -- Objetivo (pedido do usuário):
 --   1. Converter as coordenadas DMS (texto) de water_permit_wells → decimal.
@@ -9,9 +9,14 @@
 --      equipamento mais PRÓXIMO da mesma fazenda, SEM limite de distância — o
 --      GPS de campo da portaria pode divergir do GPS do sistema, mas é o mesmo
 --      poço; então o mais próximo é sempre o correto.
---   4. Definir equipments.estimated_flow_m3h = flow_rate_m3_day /
---      regime_hours_per_day da outorga vinculada (500 m³/h p/ 25.560/27.368,
---      300 m³/h p/ 33.285/33.281/33.737 — regime = 18 h/dia).
+--
+-- ⚠️ NÃO altera equipments.estimated_flow_m3h. Distinção importante:
+--   • estimated_flow_m3h = vazão OPERACIONAL da bomba instalada (300 m³/h em
+--     TODOS os poços). É o que entra no cálculo de VOLUME CAPTADO.
+--   • Vazão AUTORIZADA (ex.: 500 m³/h = 9000/18 nas portarias 25.560/27.368) NÃO
+--     é gravada em equipments — vem da outorga vinculada
+--     (water_permit_wells.flow_rate_m3_day) e aparece SÓ no Compliance como LIMITE.
+--   Por isso esta migration não toca em estimated_flow_m3h (permanece 300).
 --
 -- Idempotente. Genérico (roda p/ qualquer fazenda com water_permits). Vincula
 -- CADA poço ao equipamento mais próximo (sobrescreve vínculo anterior). Aplicar
@@ -19,12 +24,10 @@
 --
 -- Resultado validado offline (Semear, 2026-08-11) contra os equipamentos ao vivo:
 --   BIJEÇÃO PERFEITA: os 16 poços da Semear casam 1:1 com os 16 equipamentos,
---   ZERO colisões (cada equipamento recebe exatamente 1 poço):
---       500 m³/h → POÇO 01 R1, 02 R1, 03 R2, 04 R1/R4, 15 R3  (25.560 / 27.368)
---       300 m³/h → POÇO 05,06,07,08,09,10,11,12,13,14,16      (33.285 / 33.281 / 33.737)
---   POÇO 10 R4 ← Poço 10 (33.285, ~394 m) e POÇO 16 R4 ← Poço 16 (33.285, ~902 m)
---   agora TAMBÉM vinculados (imprecisão de GPS de campo — é o mesmo poço).
---   Agronave (28.608) tem farm_id próprio/NULL → não casa com a Semear. OK.
+--   ZERO colisões (cada equipamento recebe exatamente 1 poço). POÇO 10 R4 ←
+--   Poço 10 (33.285, ~394 m) e POÇO 16 R4 ← Poço 16 (33.285, ~902 m) também
+--   vinculados (imprecisão de GPS de campo — é o mesmo poço). Agronave (28.608)
+--   tem farm_id próprio/NULL → não casa com a Semear. OK.
 -- ============================================================================
 
 -- ── 1. DMS (texto) → decimal ────────────────────────────────────────────────
@@ -104,37 +107,14 @@ FROM nearest n
 WHERE w.id = n.well_id
   AND w.equipment_id IS DISTINCT FROM n.equipment_id;
 
--- ── 4. Vazão do equipamento = m³/dia da outorga ÷ regime (h/dia) ────────────
--- Se um equipamento (improvável aqui) ficar ligado a >1 poço, prevalece a MAIOR
--- vazão/h (mais conservador p/ compliance de outorga).
-WITH per_equip AS (
-  SELECT DISTINCT ON (w.equipment_id)
-         w.equipment_id,
-         ROUND(p.flow_rate_m3_day / NULLIF(COALESCE(p.regime_hours_per_day, 18), 0)) AS flow_h
-  FROM public.water_permit_wells w
-  JOIN public.water_permits p ON p.id = w.permit_id
-  WHERE w.equipment_id IS NOT NULL
-    AND p.flow_rate_m3_day IS NOT NULL
-  ORDER BY w.equipment_id,
-           (p.flow_rate_m3_day / NULLIF(COALESCE(p.regime_hours_per_day, 18), 0)) DESC
-)
-UPDATE public.equipments e
-SET estimated_flow_m3h = pe.flow_h
-FROM per_equip pe
-WHERE e.id = pe.equipment_id
-  AND pe.flow_h IS NOT NULL
-  AND e.estimated_flow_m3h IS DISTINCT FROM pe.flow_h;
-
--- ── 5. Relatório no log (não altera nada) ───────────────────────────────────
+-- ── 4. Relatório no log (não altera nada) ───────────────────────────────────
+-- NÃO existe UPDATE de estimated_flow_m3h aqui — de propósito. A vazão
+-- operacional (300) das bombas não é derivada da outorga; a vazão autorizada
+-- (500) sai da outorga só no Compliance. Ver cabeçalho.
 DO $$
 DECLARE
   v_linked int;
-  v_flow500 int;
-  v_flow300 int;
 BEGIN
   SELECT count(*) INTO v_linked FROM public.water_permit_wells WHERE equipment_id IS NOT NULL;
-  SELECT count(*) INTO v_flow500 FROM public.equipments WHERE estimated_flow_m3h = 500;
-  SELECT count(*) INTO v_flow300 FROM public.equipments WHERE estimated_flow_m3h = 300;
-  RAISE NOTICE 'Auto-vínculo por coordenada: % poços vinculados; equipamentos 500 m³/h=%, 300 m³/h=%',
-    v_linked, v_flow500, v_flow300;
+  RAISE NOTICE 'Auto-vínculo por coordenada: % poços vinculados (estimated_flow_m3h inalterado — 300 operacional).', v_linked;
 END $$;
