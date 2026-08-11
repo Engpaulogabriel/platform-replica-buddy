@@ -250,7 +250,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
             <RefreshCw className={`w-4 h-4 mr-1.5 ${loading ? "animate-spin" : ""}`} /> Atualizar
           </Button>
-          <Button variant="outline" size="sm" onClick={exportPDF} disabled={permits.length === 0}>
+          <Button variant="outline" size="sm" onClick={exportPDF} disabled={loading || !farmId}>
             <Download className="w-4 h-4 mr-1.5" /> Baixar PDF
           </Button>
           <Button size="sm" onClick={() => window.print()}>
