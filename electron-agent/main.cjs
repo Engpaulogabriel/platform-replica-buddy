@@ -611,7 +611,26 @@ function downloadFile(url, dest) {
 // baixa a pasta JÁ COMPILADA (zip) via signed URL — não expõe o .py, não precisa
 // de Python/PyInstaller. Path no bucket agent-releases.
 const BRIDGE_PY_URL = "https://raw.githubusercontent.com/Engpaulogabriel/platform-replica-buddy/main/electron-agent/app/serial_bridge_persistent.py";
-const BRIDGE_ZIP_STORAGE_PATH = "bridge/serial_bridge.zip";
+// Caminho no bucket agent-releases (assinado por agent-release-signed-url via `path`).
+const BRIDGE_ZIP_STORAGE_PATH = "bridge-releases/serial_bridge_onedir_win64.zip";
+let bridgeVersion = null; // versão da bridge (de version.txt no zip), se houver
+
+// Baixa um .zip de `url` e extrai em `destDir` (PowerShell Expand-Archive), apagando
+// o .zip ao final. Retorna o caminho onde ficou a pasta extraída (destDir).
+async function downloadAndExtractZip(url, destDir) {
+  const fs = require("fs");
+  const zipPath = path.join(app.getPath("userData"), "updates", "_bridge_dl.zip");
+  try { fs.mkdirSync(path.dirname(zipPath), { recursive: true }); } catch (_) {}
+  await withCloudTimeout(downloadFile(url, zipPath), "zip download", 120_000);
+  const st = fs.statSync(zipPath);
+  if (st.size < 200 * 1024) { try { fs.unlinkSync(zipPath); } catch (_) {} throw new Error(`zip pequeno (${st.size}B)`); }
+  try { fs.rmSync(destDir, { recursive: true, force: true }); } catch (_) {}
+  await execAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+    `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force`],
+    { windowsHide: true, timeout: 120_000 });
+  try { fs.unlinkSync(zipPath); } catch (_) {}
+  return destDir;
+}
 
 // Baixa o zip da pasta onedir (Storage, via signed URL) e extrai em
 // resources/serial_bridge/. Retorna true se ficou com serial_bridge.exe.
@@ -622,20 +641,9 @@ async function _downloadBridgeOnedir(resourcesDir, onedirExe) {
     pushLog("warn", "bridge", `[BRIDGE-DL] signed-url indisponível (${res.status}: ${res.text || "sem url"})`);
     return false;
   }
-  const zipPath = path.join(app.getPath("userData"), "updates", "serial_bridge.zip");
-  try { fs.mkdirSync(path.dirname(zipPath), { recursive: true }); } catch (_) {}
-  try { await withCloudTimeout(downloadFile(res.signed.url, zipPath), "bridge-zip download", 120_000); }
-  catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] download falhou: ${(e && e.message) || e}`); return false; }
-  try { const st = fs.statSync(zipPath); if (st.size < 200 * 1024) { pushLog("warn", "bridge", `[BRIDGE-DL] zip pequeno (${st.size}B)`); return false; } }
-  catch (_) { return false; }
-
   const staging = path.join(resourcesDir, "serial_bridge.dl");
-  try { fs.rmSync(staging, { recursive: true, force: true }); } catch (_) {}
-  try {
-    await execAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-      `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${staging}' -Force`],
-      { windowsHide: true, timeout: 120_000 });
-  } catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] extração falhou: ${(e && e.message) || e}`); return false; }
+  try { await downloadAndExtractZip(res.signed.url, staging); }
+  catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] download/extração falhou: ${(e && e.message) || e}`); try { fs.rmSync(staging, { recursive: true, force: true }); } catch (_) {} return false; }
 
   // o zip pode conter serial_bridge/ dentro ou os arquivos direto.
   let newRoot = staging;
@@ -653,7 +661,15 @@ async function _downloadBridgeOnedir(resourcesDir, onedirExe) {
   try { fs.renameSync(newRoot, targetDir); }
   catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] mover pasta falhou: ${(e && e.message) || e}`); return false; }
   try { fs.rmSync(staging, { recursive: true, force: true }); } catch (_) {}
-  try { fs.unlinkSync(zipPath); } catch (_) {}
+
+  // Versionamento (item 7): se o zip trouxe version.txt, registra a versão da bridge.
+  try {
+    const vf = path.join(targetDir, "version.txt");
+    if (fs.existsSync(vf)) {
+      const bv = String(fs.readFileSync(vf, "utf8")).trim().slice(0, 40);
+      if (bv) { bridgeVersion = bv; pushLog("info", "bridge", `[BRIDGE-DL] versão da bridge: ${bv}`); }
+    }
+  } catch (_) {}
   return fs.existsSync(onedirExe);
 }
 
