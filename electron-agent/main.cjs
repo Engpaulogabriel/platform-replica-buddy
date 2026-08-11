@@ -3792,6 +3792,10 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       originForRpc = _isTech
         ? "tech_terminal"
         : ((_isForcedOff || _isScheduledOff) ? "remote-desired" : "local");
+      // v3.25.63: desligamento REMOTO deliberado (forçado/programado) — o comando
+      // pendente que o dirige NÃO deve ser cancelado (senão o card pula LIGADO→
+      // DESLIGADO sem passar por "Desligando"). Deixa o comando concluir normalmente.
+      const _deliberateRemoteOff = _isForcedOff || _isScheduledOff;
       const reason = safetyArmedForFrame
         ? "safety cancelado"
         : pendingCommandActive
@@ -3831,45 +3835,49 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
           pushLog("warn", "cloud", `[LOCAL OVERRIDE] update desired falhou: ${e.message}`);
         }
 
-        // 3) Cancelar comandos pendentes/enviados para este equipamento
-        try {
-          await withCloudTimeout(
-            supabase
-              .from("commands")
-              .update({
-                status: "cancelled",
-                error_message: "Cancelado por acionamento local",
-                responded_at: new Date().toISOString(),
-              })
-              .eq("farm_id", farmId)
-              .eq("equipment_id", resolvedEqId)
-              .in("status", ["pending", "sent"]),
-            "local-override cancel commands",
-            CLOUD_WRITE_TIMEOUT_MS,
-          );
-        } catch (e) {
-          pushLog("warn", "cloud", `[LOCAL OVERRIDE] cancel commands falhou: ${e.message}`);
-        }
+        // 3) Cancelar comandos pendentes/enviados — MAS não num desligamento remoto
+        // deliberado (forçado/programado): esse comando pendente é justamente o que
+        // dirige o desligamento e precisa CONCLUIR (o card mostra "Desligando" até lá).
+        if (!_deliberateRemoteOff) {
+          try {
+            await withCloudTimeout(
+              supabase
+                .from("commands")
+                .update({
+                  status: "cancelled",
+                  error_message: "Cancelado por acionamento local",
+                  responded_at: new Date().toISOString(),
+                })
+                .eq("farm_id", farmId)
+                .eq("equipment_id", resolvedEqId)
+                .in("status", ["pending", "sent"]),
+              "local-override cancel commands",
+              CLOUD_WRITE_TIMEOUT_MS,
+            );
+          } catch (e) {
+            pushLog("warn", "cloud", `[LOCAL OVERRIDE] cancel commands falhou: ${e.message}`);
+          }
 
-        // 4) Cancelar pollings pendentes/enviados para este TSNN (frame stale com payload antigo)
-        try {
-          await withCloudTimeout(
-            supabase
-              .from("commands")
-              .update({
-                status: "cancelled",
-                error_message: "Polling cancelado: acionamento local alterou desired_running",
-                responded_at: new Date().toISOString(),
-              })
-              .eq("farm_id", farmId)
-              .eq("type", "polling")
-              .ilike("frame", `%${tsnn}%`)
-              .in("status", ["pending", "sent"]),
-            "local-override cancel stale polling",
-            CLOUD_WRITE_TIMEOUT_MS,
-          );
-        } catch (e) {
-          pushLog("warn", "cloud", `[LOCAL OVERRIDE] cancel polling falhou: ${e.message}`);
+          // 4) Cancelar pollings stale para este TSNN (frame com payload antigo)
+          try {
+            await withCloudTimeout(
+              supabase
+                .from("commands")
+                .update({
+                  status: "cancelled",
+                  error_message: "Polling cancelado: acionamento local alterou desired_running",
+                  responded_at: new Date().toISOString(),
+                })
+                .eq("farm_id", farmId)
+                .eq("type", "polling")
+                .ilike("frame", `%${tsnn}%`)
+                .in("status", ["pending", "sent"]),
+              "local-override cancel stale polling",
+              CLOUD_WRITE_TIMEOUT_MS,
+            );
+          } catch (e) {
+            pushLog("warn", "cloud", `[LOCAL OVERRIDE] cancel polling falhou: ${e.message}`);
+          }
         }
       }
     }
