@@ -15,8 +15,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { FileText, Printer, AlertTriangle, Droplets, MapPin, RefreshCw } from "lucide-react";
+import { FileText, Printer, AlertTriangle, Droplets, MapPin, RefreshCw, Download } from "lucide-react";
 import { useEnvironmentalAgency } from "@/hooks/useEnvironmentalAgency";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { notify } from "@/lib/notify";
 
 interface Well { id: string; well_name: string; latitude: string | null; longitude: string | null; flow_rate_m3_day: number; datum: string | null }
 interface Condition { id: string; condition_number: number | null; description: string; deadline_days: number | null; is_critical: boolean; status: string }
@@ -135,6 +138,82 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
     return { ...mo, authDaily, authPeriod, pct };
   }), [monitoring, authByPocoNumber, range.days]);
 
+  // PDF oficial — DADOS DA OUTORGA vindos de water_permits (não da inema_permits/config).
+  const exportPDF = () => {
+    try {
+      const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+      const w = doc.internal.pageSize.getWidth();
+      doc.setFillColor(66, 147, 80); doc.rect(0, 0, w, 50, "F");
+      doc.setTextColor(255, 255, 255); doc.setFontSize(16); doc.setFont("helvetica", "bold");
+      doc.text("Renov Tecnologia Agrícola", 30, 22);
+      doc.setFontSize(11); doc.setFont("helvetica", "normal");
+      doc.text(`Relatório ${agency.agency_acronym} — Captação de Água`, 30, 38);
+      doc.setFontSize(9);
+      doc.text(`${agency.agency_name} (${agency.state_code})`, w - 30, 38, { align: "right" });
+      doc.setTextColor(0, 0, 0);
+
+      const wellsSum = (p: Permit) => p.wells.reduce((a, wl) => a + Number(wl.flow_rate_m3_day || 0), 0);
+      const mp = mainPortaria;
+      let y = 70;
+      doc.setFontSize(11); doc.setFont("helvetica", "bold"); doc.text("Dados da outorga (principal)", 30, y); y += 15;
+      doc.setFontSize(10); doc.setFont("helvetica", "normal");
+      if (mp) {
+        const volDay = wellsSum(mp);
+        const hours = Number(mp.regime_hours_per_day ?? 18) || 18;
+        const flowM3h = hours > 0 ? volDay / hours : 0;
+        const rows: Array<[string, string]> = [
+          ["Nº da Portaria", mp.permit_number],
+          ["Nº do Processo", mp.process_number],
+          ["Titular", `${mp.holder_name}${mp.holder_cpf_cnpj ? ` — CPF ${mp.holder_cpf_cnpj}` : ""}`],
+          ["Finalidade de uso", mp.purpose ?? "—"],
+          ["Bacia / Aquífero", mp.basin ?? "—"],
+          ["Município", mp.municipality ?? "—"],
+          ["Validade", `${fmtDate(mp.validity_start)} a ${fmtDate(mp.validity_end)}`],
+          ["Vazão máx. outorgada", `${fmtNum(flowM3h, 1)} m³/h`],
+          ["Volume máx. diário", `${fmtNum(volDay)} m³/dia`],
+          ["Horas máx./dia", `${fmtNum(hours)} h`],
+        ];
+        for (const [k, v] of rows) { doc.text(`${k}: ${v}`, 30, y); y += 13; }
+      } else {
+        doc.text("Nenhuma outorga cadastrada.", 30, y); y += 13;
+      }
+      y += 6;
+
+      doc.setFont("helvetica", "bold"); doc.text("Outorgas da fazenda", 30, y);
+      autoTable(doc, {
+        startY: y + 6,
+        head: [["Portaria", "Processo", "Validade", "Área (ha)", "Poços", "Vazão total (m³/dia)"]],
+        body: permits.map((p) => [
+          p.permit_number, p.process_number,
+          `${fmtDate(p.validity_start)}–${fmtDate(p.validity_end)}`,
+          fmtNum(p.irrigated_area_ha, 2), String(p.wells.length), fmtNum(wellsSum(p)),
+        ]),
+        styles: { fontSize: 8, cellPadding: 3 },
+        headStyles: { fillColor: [66, 147, 80], textColor: 255 },
+      });
+      y = (doc as any).lastAutoTable.finalY + 18;
+
+      doc.setFont("helvetica", "bold");
+      doc.text(`Monitoramento (${fmtDate(range.from.toISOString())} a ${fmtDate(range.to.toISOString())})`, 30, y);
+      autoTable(doc, {
+        startY: y + 6,
+        head: [["Poço", "Horas operadas", "Vazão nominal (m³/h)", "Volume captado (m³)"]],
+        body: monitoring.map((m) => [m.name, fmtNum(m.hours, 1), fmtNum(m.flow, 1), fmtNum(m.volume)]),
+        styles: { fontSize: 9, cellPadding: 3 },
+        headStyles: { fillColor: [66, 147, 80], textColor: 255 },
+      });
+
+      const h = doc.internal.pageSize.getHeight();
+      doc.setFontSize(8); doc.setTextColor(120);
+      doc.text("Volume captado estimado por horas × vazão nominal (medição indireta). Nível estático/dinâmico não medido pela telemetria.", 30, h - 30);
+      doc.text(`Gerado em ${new Date().toLocaleString("pt-BR")} — Gestor de Bombas Renov.`, 30, h - 18);
+      doc.save(`renov-${agency.agency_acronym.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.pdf`);
+      notify.ok("Relatório", "PDF exportado.");
+    } catch (_) {
+      notify.fail("Relatório", "Falha ao gerar PDF.");
+    }
+  };
+
   // Portaria principal = outorga vigente mais recente (fallback: a de validade mais longa).
   const mainPortaria = useMemo(() => {
     if (permits.length === 0) return null;
@@ -158,8 +237,11 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
             <RefreshCw className={`w-4 h-4 mr-1.5 ${loading ? "animate-spin" : ""}`} /> Atualizar
           </Button>
+          <Button variant="outline" size="sm" onClick={exportPDF} disabled={permits.length === 0}>
+            <Download className="w-4 h-4 mr-1.5" /> Baixar PDF
+          </Button>
           <Button size="sm" onClick={() => window.print()}>
-            <Printer className="w-4 h-4 mr-1.5" /> Imprimir / PDF
+            <Printer className="w-4 h-4 mr-1.5" /> Imprimir
           </Button>
         </div>
       </div>
