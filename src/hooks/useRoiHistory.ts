@@ -1,14 +1,17 @@
 // Hook do histórico de ROI — agrega economia diária por categoria a partir de
-// pump_runtime (volume), automation_log (acionamentos remotos e ciclos) e
+// pump_runtime (sessões reais), automation_log (acionamentos remotos) e
 // farm_productivity_config (tarifas, custos). Mesmo modelo de fórmulas do
 // RoiTravelCard, porém distribuído por dia para permitir histórico real.
+// Energia = economia real por posto tarifário (tariff.ts); NÃO há mais o item
+// sintético "captação extra" (campo mantido em 0 só p/ compat. do painel).
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { splitSessionByPost } from "@/lib/tariff";
 import type { PeriodRange } from "@/components/indicadores/PeriodPicker";
 
 export interface RoiDailyRow {
   day: string;          // YYYY-MM-DD
-  captacao: number;     // R$
+  captacao: number;     // R$ — descontinuado (sempre 0); mantido p/ compat.
   energia: number;
   deslocamento: number;
   maoObra: number;
@@ -33,10 +36,6 @@ export interface RoiHistory {
   totals: Omit<RoiMonthlyRow, "month">;
   loading: boolean;
 }
-
-const WATER_VALUE_PER_M3 = 0.02;
-const PEAK_MIN_AVOIDED_PER_DAY = 5;
-const PUMPS_AFFECTED_FRACTION = 0.6;
 
 function eachDay(fromIso: string, toIso: string): string[] {
   const out: string[] = [];
@@ -68,9 +67,9 @@ export function useRoiHistory(farmId: string | null, range: PeriodRange): RoiHis
       const fromIso = `${range.fromIso}T00:00:00`;
       const toIso = `${range.toIso}T23:59:59.999`;
 
-      const [cfgRes, eqRes, runtimeRes, logRes] = await Promise.all([
+      const [cfgRes, eqRes, runtimeRes, logRes, holRes] = await Promise.all([
         supabase.from("farm_productivity_config")
-          .select("worker_cost_per_hour, vehicle_cost_per_km, travel_distance_km, travel_minutes_avg, manual_operation_time_minutes, remote_operation_time_minutes, cycles_per_day, tariff_peak, tariff_reserved, default_flow_m3h")
+          .select("worker_cost_per_hour, vehicle_cost_per_km, travel_distance_km, travel_minutes_avg, manual_operation_time_minutes, remote_operation_time_minutes, cycles_per_day, tariff_peak, tariff_reserved, tariff_off_peak, tariff_intermediate, default_flow_m3h")
           .eq("farm_id", farmId).maybeSingle(),
         supabase.from("equipments")
           .select("id, power_kw, estimated_flow_m3h, active, type")
@@ -89,6 +88,7 @@ export function useRoiHistory(farmId: string | null, range: PeriodRange): RoiHis
           .gte("occurred_at", fromIso)
           .lte("occurred_at", toIso)
           .limit(10000),
+        supabase.from("national_holidays" as any).select("holiday_date"),
       ]);
       if (cancelled) return;
 
@@ -102,48 +102,50 @@ export function useRoiHistory(farmId: string | null, range: PeriodRange): RoiHis
       const cyclesDay = Number(cfg.cycles_per_day ?? 2);
       const tariffPeak = Number(cfg.tariff_peak ?? 1.884);
       const tariffReserved = Number(cfg.tariff_reserved ?? 0.3878);
-      const defaultFlow = Number(cfg.default_flow_m3h ?? 80);
+      const tariffOffPeak = Number(cfg.tariff_off_peak ?? tariffReserved);
+      const tariffInter = Number(cfg.tariff_intermediate ?? tariffPeak);
 
       const eqs = (eqRes.data ?? []) as Array<{ id: string; power_kw: number | null; estimated_flow_m3h: number | null; active: boolean | null }>;
       const activeEqs = eqs.filter(e => e.active);
       const numPumps = activeEqs.length;
       const avgPowerKw = numPumps > 0 ? activeEqs.reduce((a, e) => a + Number(e.power_kw ?? 75), 0) / numPumps : 75;
-      // Vazão por equipamento: usa estimated_flow_m3h se >0, senão fallback no default_flow_m3h da fazenda.
-      // Inclui equipamentos inativos para não perder pump_runtime histórico.
-      const flowById = new Map(eqs.map(e => {
-        const f = Number(e.estimated_flow_m3h);
-        return [e.id, Number.isFinite(f) && f > 0 ? f : defaultFlow];
+      // Potência por equipamento (inclui inativos p/ não perder runtime histórico).
+      const powerById = new Map<string, number>(eqs.map(e => {
+        const p = Number(e.power_kw);
+        return [e.id, Number.isFinite(p) && p > 0 ? p : avgPowerKw];
       }));
-
+      const holidaySet = new Set<string>(((holRes.data as any[]) ?? []).map((h: any) => h.holiday_date));
 
       const costPerTrip = travelDistKm * 2 * 1.3 * vehicleCost + (travelMin / 60) * workerCost;
       const gainMinPerCycle = Math.max(0, manualMin - remoteMin);
       // Mão de obra constante diária
       const maoObraDay = (gainMinPerCycle * cyclesDay * workerCost) / 60;
-      // Energia conservadora diária (independente do log)
-      const energiaDay = (PEAK_MIN_AVOIDED_PER_DAY / 60)
-        * (numPumps * PUMPS_AFFECTED_FRACTION)
-        * avgPowerKw
-        * Math.max(0, tariffPeak - tariffReserved);
 
       const days = eachDay(range.fromIso, range.toIso);
       const map = new Map<string, RoiDailyRow>();
       for (const d of days) {
-        map.set(d, { day: d, captacao: 0, energia: energiaDay, deslocamento: 0, maoObra: maoObraDay, multas: 0, total: 0, cumulative: 0 });
+        map.set(d, { day: d, captacao: 0, energia: 0, deslocamento: 0, maoObra: maoObraDay, multas: 0, total: 0, cumulative: 0 });
       }
 
-      // Captação = horas operadas × vazão da bomba × valor/m³
-      // Fallback no default_flow_m3h da fazenda quando o equipamento não estiver mapeado.
+      // Energia REAL por dia = para cada sessão de pump_runtime, fatia por posto
+      // tarifário (tariff.ts) × potência real × diferença vs. ponta. Horas em
+      // ponta contribuem 0. Sem sessões no dia → energia = 0 (não inventa nada).
       for (const r of (runtimeRes.data ?? []) as any[]) {
         const day = ymd(r.started_at);
         const row = map.get(day);
         if (!row) continue;
-        const seconds = Number(r.duration_seconds) ||
-          (r.ended_at ? Math.max(0, (new Date(r.ended_at).getTime() - new Date(r.started_at).getTime()) / 1000) : 0);
-        const hours = seconds / 3600;
-        const flow = flowById.get(r.equipment_id) ?? defaultFlow;
-        const volume = hours * flow;
-        row.captacao += volume * WATER_VALUE_PER_M3;
+        const start = new Date(r.started_at);
+        const end = r.ended_at
+          ? new Date(r.ended_at)
+          : new Date(start.getTime() + (Number(r.duration_seconds) || 0) * 1000);
+        if (!(end.getTime() > start.getTime())) continue;
+        const power = powerById.get(r.equipment_id) ?? avgPowerKw;
+        const split = splitSessionByPost(start, end, holidaySet);
+        row.energia += power * (
+          split.off_peak * Math.max(0, tariffPeak - tariffOffPeak) +
+          split.reserved * Math.max(0, tariffPeak - tariffReserved) +
+          split.intermediate * Math.max(0, tariffPeak - tariffInter)
+        );
       }
 
 

@@ -1,20 +1,21 @@
-// Card "Retorno sobre Investimento" — VALOR TOTAL em R$ (5 componentes somados):
+// Card "Retorno sobre Investimento" — VALOR TOTAL em R$ (componentes somados):
 // Adapta automaticamente ao tempo de operação real (dias_com_dados < 30 → projeção).
-//   1. Captação extra garantida (vazão × tempo de antecipação × custo energético equiv.)
-//   2. Economia de energia (evitar ponta) — heurística por bomba/dia
-//   3. Economia de deslocamento (trips evitadas, clusters + janela 60 min)
-//   4. Economia de mão de obra (manual vs remoto × ciclos × dias)
-//   5. Multas de demanda evitadas (placeholder 0 quando sem ultrapassagem)
+//   1. Economia de energia (horário) — REAL: sessões pump_runtime fatiadas por
+//      posto tarifário (tariff.ts) × potência real × diferença vs. ponta.
+//   2. Economia de deslocamento (trips evitadas, clusters + janela 60 min)
+//   3. Economia de mão de obra (manual vs remoto × ciclos × dias)
+//   4. Multas de demanda evitadas (placeholder 0 quando sem ultrapassagem)
 import { useEffect, useState } from "react";
 import { TrendingUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { splitSessionByPost } from "@/lib/tariff";
 
 interface Roi {
   total: number;          // valor real nos dias de operação
   projecaoMensal: number | null;
   diasOperacao: number;
-  captacao: number;
-  energia: number;
+  energia: number | null; // null = dados insuficientes (sem sessões reais)
+  energiaHoras: number;   // horas reais fora de ponta que geraram economia
   deslocamento: number;
   maoObra: number;
   multas: number;
@@ -22,7 +23,8 @@ interface Roi {
   avgRoadKm: number;
   clusters: number;
   numPumps: number;
-  captacaoVolumeM3: number;
+  manualMin: number;
+  remoteMin: number;
 }
 
 const fmtBRL = (v: number) =>
@@ -53,11 +55,11 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
     const load = async () => {
       const thirtyAgo = new Date(Date.now() - 30 * 86400_000).toISOString();
       const [
-        farmRes, cfgRes, eqRes, logRes, firstLogRes, firstEqRes,
+        farmRes, cfgRes, eqRes, logRes, firstLogRes, firstEqRes, runtimeRes, holRes,
       ] = await Promise.all([
         supabase.from("farms").select("latitude, longitude").eq("id", farmId).maybeSingle(),
         supabase.from("farm_productivity_config" as any)
-          .select("worker_cost_per_hour, vehicle_cost_per_km, travel_minutes_avg, manual_operation_time_minutes, remote_operation_time_minutes, cycles_per_day, tariff_peak, tariff_reserved, demand_cost_per_kw")
+          .select("worker_cost_per_hour, vehicle_cost_per_km, travel_minutes_avg, manual_operation_time_minutes, remote_operation_time_minutes, cycles_per_day, tariff_peak, tariff_reserved, tariff_off_peak, tariff_intermediate, demand_cost_per_kw")
           .eq("farm_id", farmId).maybeSingle(),
         supabase.from("equipments")
           .select("id, latitude, longitude, power_kw, estimated_flow_m3h")
@@ -80,12 +82,23 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
           .eq("farm_id", farmId)
           .order("created_at", { ascending: true })
           .limit(1),
+        // Sessões reais de bombeamento (últimos 30 dias) → energia real por posto
+        supabase.from("pump_runtime")
+          .select("equipment_id, started_at, ended_at")
+          .eq("farm_id", farmId)
+          .gte("started_at", thirtyAgo)
+          .order("started_at", { ascending: true })
+          .limit(10000),
+        // Feriados nacionais para classificação tarifária correta
+        supabase.from("national_holidays" as any).select("holiday_date"),
       ]);
 
       const farm: any = farmRes.data ?? {};
       const cfg: any = cfgRes.data ?? {};
       const eqs: any[] = eqRes.data ?? [];
       const logs: any[] = logRes.data ?? [];
+      const runtimes: any[] = runtimeRes.data ?? [];
+      const holidaySet = new Set<string>(((holRes.data as any[]) ?? []).map((h: any) => h.holiday_date));
 
       // dias de operação real
       let firstDate: Date | null = null;
@@ -114,15 +127,17 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
       const cyclesDay = Number(cfg.cycles_per_day ?? 2);
       const tariffPeak = Number(cfg.tariff_peak ?? 1.884);
       const tariffReserved = Number(cfg.tariff_reserved ?? 0.3878);
+      const tariffOffPeak = Number(cfg.tariff_off_peak ?? tariffReserved);
+      const tariffInter = Number(cfg.tariff_intermediate ?? tariffPeak);
 
       // Estatísticas dos equipamentos
       const numPumps = eqs.length;
       const avgPowerKw = numPumps > 0
         ? eqs.reduce((a, e) => a + Number(e.power_kw ?? 75), 0) / numPumps
         : 75;
-      const avgFlow = numPumps > 0
-        ? eqs.reduce((a, e) => a + Number(e.estimated_flow_m3h ?? 300), 0) / numPumps
-        : 300;
+      const powerById = new Map<string, number>(
+        eqs.map((e) => [e.id, Number(e.power_kw) > 0 ? Number(e.power_kw) : avgPowerKw]),
+      );
 
       // Clusters geográficos
       type Cl = { ids: Set<string>; lat: number; lng: number; dist: number };
@@ -170,41 +185,44 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
       const maoObra30d = Math.max(0, horasManMo30d) * workerCost;
       const maoObra = maoObra30d * escala;
 
-      // 2) Energia (evitar ponta) — CONSERVADOR:
-      //    sistema evita ~5 min/dia de ponta para ~60% das bombas
-      //    (premissa: nem todas iriam atrasar todo dia).
-      const PEAK_MIN_AVOIDED_PER_DAY = 5;
-      const PUMPS_AFFECTED_FRACTION = 0.6;
-      const energia30d = (PEAK_MIN_AVOIDED_PER_DAY / 60)
-        * (numPumps * PUMPS_AFFECTED_FRACTION)
-        * 30
-        * avgPowerKw
-        * Math.max(0, tariffPeak - tariffReserved);
-      const energia = energia30d * escala;
+      // 2) Energia (horário) — REAL, sem constantes inventadas:
+      //    para cada sessão real de pump_runtime, fatiamos por posto tarifário
+      //    (tariff.ts) e, para cada hora que rodou FORA da ponta, a economia vs.
+      //    ponta = potência real × horas × (tarifa_ponta − tarifa_do_posto).
+      //    Horas que rodaram NA ponta contribuem 0. Se não há sessões reais,
+      //    marcamos "Dados insuficientes" (energia = null) em vez de inventar.
+      let energia: number | null = null;
+      let energiaHoras = 0;
+      if (runtimes.length > 0) {
+        energia = 0;
+        for (const s of runtimes) {
+          const start = new Date(s.started_at);
+          const end = s.ended_at ? new Date(s.ended_at) : new Date();
+          if (!(end.getTime() > start.getTime())) continue;
+          const power = powerById.get(s.equipment_id) ?? avgPowerKw;
+          const split = splitSessionByPost(start, end, holidaySet);
+          energiaHoras += split.off_peak + split.reserved + split.intermediate;
+          energia += power * (
+            split.off_peak * Math.max(0, tariffPeak - tariffOffPeak) +
+            split.reserved * Math.max(0, tariffPeak - tariffReserved) +
+            split.intermediate * Math.max(0, tariffPeak - tariffInter)
+          );
+        }
+      }
 
-      // 1) Captação extra: ganho de tempo × bombas × vazão = m³ extras.
-      //    Valor conservador: R$ 0,02/m³ (custo médio de água p/ irrigação)
-      //    — não é "economia financeira", é VALOR DA PRODUÇÃO extra captada.
-      const WATER_VALUE_PER_M3 = 0.02;
-      const gainMin = Math.max(0, manualMin - remoteMin);
-      const captacaoVolumeM3_30d = (gainMin / 60) * numPumps * cyclesDay * 30 * avgFlow;
-      const captacaoVolumeM3 = captacaoVolumeM3_30d * escala;
-      const captacao30d = captacaoVolumeM3_30d * WATER_VALUE_PER_M3;
-      const captacao = captacao30d * escala;
-
-      // 5) Multas de demanda evitadas
+      // 4) Multas de demanda evitadas
       const multas = 0;
 
-      const total = captacao + energia + deslocamento + maoObra + multas;
+      const total = (energia ?? 0) + deslocamento + maoObra + multas;
       const projecaoMensal = diasOperacao < 30 ? (total / Math.max(1, diasOperacao)) * 30 : null;
 
       if (!cancelled) {
         setHasCoords(true);
         setRoi({
           total, projecaoMensal, diasOperacao,
-          captacao, energia, deslocamento, maoObra, multas,
+          energia, energiaHoras, deslocamento, maoObra, multas,
           trips, avgRoadKm, clusters: clusters.length, numPumps,
-          captacaoVolumeM3,
+          manualMin, remoteMin,
         });
       }
     };
@@ -257,14 +275,14 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
 
           {/* Detalhamento */}
           <div className="space-y-1 text-xs">
-            <Row label="Captação extra garantida" value={roi.captacao}
-              hint={`+${roi.captacaoVolumeM3.toLocaleString("pt-BR", { maximumFractionDigits: 0 })} m³${isProjetado ? "" : "/mês"}`} />
             <Row label="Economia de energia (horário)" value={roi.energia}
-              hint={`~5 min/dia ponta evitada · ${Math.round(roi.numPumps * 0.6)} bombas`} />
+              hint={roi.energia == null
+                ? "sem sessões reais de bombeamento no período"
+                : `${roi.energiaHoras.toLocaleString("pt-BR", { maximumFractionDigits: 0 })} h fora de ponta · tarifa real`} />
             <Row label="Economia de deslocamento" value={roi.deslocamento}
               hint={`${roi.trips} viagens · ${roi.avgRoadKm.toFixed(1)} km · ${roi.clusters} regiões`} />
             <Row label="Economia de mão de obra" value={roi.maoObra}
-              hint="80 min → 5 min por ciclo" />
+              hint={`${Math.round(roi.manualMin)} min → ${Math.round(roi.remoteMin)} min por ciclo`} />
             <Row label="Multas de demanda evitadas" value={roi.multas}
               hint={roi.multas === 0 ? "0 ultrapassagens ✅" : undefined} />
           </div>
@@ -272,7 +290,7 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
           <div className="mt-3 text-[9px] text-muted-foreground italic leading-snug border-t border-emerald-500/20 pt-2">
             {isProjetado
               ? `Sistema ativo há ${roi.diasOperacao} dias. Projeção mensal baseada na média diária observada.`
-              : "Captação: ganho de tempo × vazão estimada × custo energético equivalente. Energia: 30 min/dia/bomba evitados na ponta × diferença tarifária. Deslocamento: clusters <2 km + janela 60 min. Mão de obra: ciclos diários × custo/hora."}
+              : "Energia: sessões reais de bombeamento fatiadas por posto tarifário × potência real × diferença vs. ponta (horas em ponta = 0). Deslocamento: clusters <2 km + janela 60 min. Mão de obra: ciclos diários × custo/hora."}
           </div>
         </>
       )}
@@ -280,14 +298,18 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
   );
 }
 
-function Row({ label, value, hint }: { label: string; value: number; hint?: string }) {
+function Row({ label, value, hint }: { label: string; value: number | null; hint?: string }) {
   return (
     <div className="flex items-center justify-between gap-2 border-b border-emerald-500/10 last:border-0 pb-1 last:pb-0">
       <div className="min-w-0 flex-1">
         <div className="text-foreground truncate">{label}</div>
         {hint && <div className="text-[10px] text-muted-foreground truncate">{hint}</div>}
       </div>
-      <div className="font-bold text-emerald-400 tabular-nums shrink-0">{fmtBRL0(value)}</div>
+      {value == null ? (
+        <div className="text-[10px] font-medium text-muted-foreground italic shrink-0">Dados insuficientes</div>
+      ) : (
+        <div className="font-bold text-emerald-400 tabular-nums shrink-0">{fmtBRL0(value)}</div>
+      )}
     </div>
   );
 }

@@ -5,8 +5,10 @@
 //   4. Modo de acionamento — % remoto/auto vs local
 //   5. Uptime de comunicação — equipamentos online
 //
-// Score final = média dos 5 sub-indicadores (0.0-10.0).
-// Base: últimos 7 DIAS ÚTEIS (is_free_demand = false).
+// Score final = SOMA PONDERADA dos sub-indicadores (0.0-10.0), pesos fixos
+//   0.50 / 0.25 / 0.15 / 0.09 / 0.01. Sub-indicador SEM DADOS é EXCLUÍDO da soma
+//   e os pesos dos restantes são RENORMALIZADOS (não inventamos 10.0).
+// Base: últimos 30 DIAS, apenas DIAS ÚTEIS (is_free_demand = false).
 import { useEffect, useState } from "react";
 import { Trophy } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
@@ -16,7 +18,8 @@ interface SubScore {
   value: number;         // 0-10
   displayValue: string;  // valor bruto formatado (ex: "37 min", "92%")
   hint: string;
-  weight: number;        // 0-1
+  weight: number;        // 0-1 (peso NOMINAL; renormalizado quando há sub sem dados)
+  noData?: boolean;      // true = sem amostra ⇒ excluído da soma ponderada
 }
 
 
@@ -33,8 +36,10 @@ interface ScoreData {
 }
 
 function tone(score: number) {
+  // Faixas coerentes com as cores: verde(alto) → laranja(médio) → vermelho(baixo).
   if (score >= 9.0) return { text: "text-emerald-500", bg: "bg-emerald-500/10", border: "border-emerald-500/40", glow: "shadow-emerald-500/20", label: "Excelente" };
-  if (score >= 8.0) return { text: "text-orange-500",  bg: "bg-orange-500/10",  border: "border-orange-500/40",  glow: "shadow-orange-500/20",  label: "Ruim" };
+  if (score >= 7.5) return { text: "text-green-500",   bg: "bg-green-500/10",   border: "border-green-500/40",   glow: "shadow-green-500/20",   label: "Bom" };
+  if (score >= 5.0) return { text: "text-orange-500",  bg: "bg-orange-500/10",  border: "border-orange-500/40",  glow: "shadow-orange-500/20",  label: "Regular" };
   return { text: "text-destructive", bg: "bg-destructive/10", border: "border-destructive/40", glow: "shadow-destructive/20", label: "Crítico" };
 }
 
@@ -63,13 +68,20 @@ function scorePre(avgAnticMin: number): number {
   if (avgAnticMin >= 105) return 0;
   return +(10 - ((avgAnticMin - 5) / 100) * 10).toFixed(1);
 }
-function scorePeak(totalPeakMin: number, pumpsWithPeak: number, maxPeak: number): number {
-  if (totalPeakMin === 0) return 10;
-  if (maxPeak > 30) return 0;
-  if (pumpsWithPeak >= 2) return 3;
-  if (pumpsWithPeak === 1 && totalPeakMin <= 5) return 7;
-  if (pumpsWithPeak === 1) return 5;
-  return 10;
+function scorePeak(totalPeakMin: number): number {
+  // A nota reflete a MAGNITUDE real (total de minutos de ponta somados em bomba×dia),
+  // não a mera contagem de eventos. Monotônica e conservadora: mais minutos ⇒ nota menor.
+  // A ponta é a tarifa mais cara (até ~6×), então penalizamos cedo e com teto.
+  //   0 min          => 10  (nenhuma infração)
+  //   1..15 min      => 10 → 7  (infração leve, tolerância pequena)
+  //   15..60 min     => 7  → 3
+  //   60..180 min    => 3  → 0
+  //   > 180 min      => 0  (teto de penalização)
+  if (totalPeakMin <= 0) return 10;
+  if (totalPeakMin <= 15)  return +(10 - (totalPeakMin / 15) * 3).toFixed(1);
+  if (totalPeakMin <= 60)  return +(7 - ((totalPeakMin - 15) / 45) * 4).toFixed(1);
+  if (totalPeakMin <= 180) return +(3 - ((totalPeakMin - 60) / 120) * 3).toFixed(1);
+  return 0;
 }
 function scoreRemote(pct: number): number {
   return Math.max(0, Math.min(10, +(pct / 10).toFixed(1)));
@@ -123,78 +135,99 @@ export function FarmScoreCard({ farmId }: { farmId: string | null }) {
       const workingCount = workingDates.size;
       const workingPumps = pumps.filter(p => workingDates.has(p.date));
 
-      // 1. Pós-ponta: média de late_min entre bombas que ligaram na janela (post_status not null)
-      const postRows = workingPumps.filter(p => p.post_status && p.late_min != null);
+      // 1. Pós-ponta: média de late_min APENAS das bombas que precisavam religar.
+      //    BUG corrigido: excluímos post_status === 'not_started' — essas linhas não
+      //    tinham religamento a fazer e o late_min vem capado em 540 (9h), o que
+      //    contaminava/inflava a média com bombas que nem precisavam rodar.
+      const postRows = workingPumps.filter(
+        p => p.post_status && p.post_status !== "not_started" && p.late_min != null
+      );
       const avgLate = postRows.length > 0
         ? postRows.reduce((s, r) => s + Math.max(0, Number(r.late_min)), 0) / postRows.length
         : 0;
       const post: SubScore = {
         label: "Pós-ponta (atraso)",
-        value: scorePost(avgLate),
-        displayValue: postRows.length > 0 ? `${Math.round(avgLate)} min` : "—",
+        value: postRows.length > 0 ? scorePost(avgLate) : 0,
+        displayValue: postRows.length > 0 ? `${Math.round(avgLate)} min` : "— / sem dados",
         hint: "Reduzir atraso no religamento após 21h",
         weight: 0.50,
+        noData: postRows.length === 0,
       };
 
-      // 2. Pré-ponta: antecipação = early_off_min (min antes das 18h)
-      const preRows = workingPumps.filter(p => p.pre_status && p.early_off_min != null);
+      // 2. Pré-ponta: antecipação = early_off_min (min antes das 18h).
+      //    Também excluímos 'not_started' (bombas sem desligamento a antecipar).
+      const preRows = workingPumps.filter(
+        p => p.pre_status && p.pre_status !== "not_started" && p.early_off_min != null
+      );
       const avgAntic = preRows.length > 0
         ? preRows.reduce((s, r) => s + Math.max(0, Number(r.early_off_min)), 0) / preRows.length
         : 0;
       const pre: SubScore = {
         label: "Pré-ponta (deslig.)",
-        value: scorePre(avgAntic),
-        displayValue: preRows.length > 0 ? `${Math.round(avgAntic)} min` : "—",
+        value: preRows.length > 0 ? scorePre(avgAntic) : 0,
+        displayValue: preRows.length > 0 ? `${Math.round(avgAntic)} min` : "— / sem dados",
         hint: "Desligar bombas próximo às 17:45",
         weight: 0.25,
+        noData: preRows.length === 0,
       };
 
-      // 3. Infração na ponta: bombas com peak_minutes > 0 na semana
+      // 3. Infração na ponta: soma de minutos de ponta em linhas bomba×dia.
+      //    peakRows.length é o nº de EVENTOS (bomba×dia), NÃO de bombas distintas.
+      //    0 min é dado real (nenhuma infração) ⇒ nota 10, não é "sem dados".
       const peakRows = workingPumps.filter(p => Number(p.peak_minutes ?? 0) > 0);
+      const peakEvents = peakRows.length; // eventos (bomba×dia), não bombas
       const totalPeak = peakRows.reduce((s, r) => s + Number(r.peak_minutes), 0);
-      const maxPeak = peakRows.reduce((m, r) => Math.max(m, Number(r.peak_minutes)), 0);
       const peak: SubScore = {
         label: "Infração na ponta",
-        value: scorePeak(totalPeak, peakRows.length, maxPeak),
-        displayValue: peakRows.length === 0 ? "0" : `${peakRows.length} · ${totalPeak}min`,
-        hint: "Evitar bombas ligadas entre 18h-21h",
+        value: scorePeak(totalPeak),
+        displayValue: peakEvents === 0
+          ? "0 eventos"
+          : `${peakEvents} ev.(bomba×dia)·${totalPeak}min`,
+        hint: "Minutos de bombas na ponta (18h-21h); contagem é bomba×dia, não bombas distintas",
         weight: 0.15,
       };
 
       // 4. Modo de acionamento
+      //    BUG corrigido: sem log de acionamento NÃO significa 100% remoto — é SEM DADOS.
       const remoteN = logs.filter(l => ["remote", "auto", "system"].includes(l.origin)).length;
       const localN = logs.filter(l => l.origin === "local").length;
       const total = remoteN + localN;
-      const pctRemote = total > 0 ? (remoteN / total) * 100 : 100;
+      const pctRemote = total > 0 ? (remoteN / total) * 100 : 0;
       const mode: SubScore = {
         label: "Modo de acionamento",
-        value: scoreRemote(pctRemote),
-        displayValue: total > 0 ? `${Math.round(pctRemote)}%` : "—",
+        value: total > 0 ? scoreRemote(pctRemote) : 0,
+        displayValue: total > 0 ? `${Math.round(pctRemote)}%` : "— / sem dados",
         hint: "Preferir acionamentos remotos/automáticos",
         weight: 0.09,
+        noData: total === 0,
       };
 
       // 5. Uptime
-      let uptimePct = 100;
-      if (eqs.length > 0) {
+      //    BUG corrigido: sem equipamentos monitorados NÃO é 100% — é SEM DADOS.
+      const hasEq = eqs.length > 0;
+      let uptimePct = 0;
+      if (hasEq) {
         const online = eqs.filter(e => e.last_communication && new Date(e.last_communication).toISOString() >= fiveMinAgo).length;
         uptimePct = (online / eqs.length) * 100;
       }
       const uptime: SubScore = {
         label: "Uptime comunicação",
-        value: scoreUptime(uptimePct),
-        displayValue: `${Math.round(uptimePct)}%`,
+        value: hasEq ? scoreUptime(uptimePct) : 0,
+        displayValue: hasEq ? `${Math.round(uptimePct)}%` : "— / sem dados",
         hint: "Verificar comunicação dos equipamentos",
         weight: 0.01,
+        noData: !hasEq,
       };
 
-      const totalScore = +(
-        post.value * post.weight +
-        pre.value * pre.weight +
-        peak.value * peak.weight +
-        mode.value * mode.weight +
-        uptime.value * uptime.weight
-      ).toFixed(1);
+      // Soma ponderada RENORMALIZADA: sub-métricas sem dados saem da conta e os pesos
+      // das restantes são reescalados por (peso / Σ pesos disponíveis). Assim não
+      // inflamos o score assumindo 10.0 para o que não temos como medir.
+      const allSubs = [post, pre, peak, mode, uptime];
+      const scored = allSubs.filter(s => !s.noData);
+      const availableWeight = scored.reduce((s, x) => s + x.weight, 0);
+      const totalScore = availableWeight > 0
+        ? +(scored.reduce((s, x) => s + x.value * x.weight, 0) / availableWeight).toFixed(1)
+        : 0;
 
 
       if (!cancelled) {
@@ -213,7 +246,9 @@ export function FarmScoreCard({ farmId }: { farmId: string | null }) {
   if (!farmId || !data) return null;
   const t = tone(data.total);
   const subs = [data.sub.post, data.sub.pre, data.sub.peak, data.sub.mode, data.sub.uptime];
-  const worst = [...subs].sort((a, b) => a.value - b.value)[0];
+  // "Pior" sub-métrica considera apenas as que TÊM dados (noData não conta como 0).
+  const rankable = subs.filter(s => !s.noData);
+  const worst = (rankable.length > 0 ? [...rankable] : [...subs]).sort((a, b) => a.value - b.value)[0];
 
   const buildStatus = () => {
     if (worst.value >= 9) return "Operação no padrão ouro 🏆";
@@ -225,7 +260,7 @@ export function FarmScoreCard({ farmId }: { farmId: string | null }) {
       case "Pré-ponta (deslig.)":
         return `${prefix}: Desligamento antecipado em ${v} antes das 18h — perda de janela produtiva.`;
       case "Infração na ponta":
-        return `${prefix}: Bombas ligadas na ponta (${v}) — tarifa até 6× mais cara.`;
+        return `${prefix}: ${v} de bombas ligadas na ponta — tarifa até 6× mais cara.`;
       case "Modo de acionamento":
         return `${prefix}: Apenas ${v} dos acionamentos são remotos/automáticos — deslocamentos evitáveis.`;
       case "Uptime comunicação":
@@ -259,12 +294,12 @@ export function FarmScoreCard({ farmId }: { farmId: string | null }) {
 
       <div className="space-y-2 text-[11px]">
         {subs.map((s) => (
-          <div key={s.label} className="space-y-0.5">
+          <div key={s.label} className={`space-y-0.5 ${s.noData ? "opacity-60" : ""}`}>
             <div className="flex items-center gap-2">
               <span className="flex-1 truncate text-muted-foreground">{s.label}</span>
               <span className="text-foreground tabular-nums w-14 text-right">{s.displayValue}</span>
-              <span className={`tabular-nums w-10 text-right font-semibold ${subTone(s.value)}`}>
-                {s.value.toFixed(1)}
+              <span className={`tabular-nums w-10 text-right font-semibold ${s.noData ? "text-muted-foreground" : subTone(s.value)}`}>
+                {s.noData ? "—" : s.value.toFixed(1)}
               </span>
               <span className="tabular-nums w-8 text-right text-[10px] text-muted-foreground">
                 {Math.round(s.weight * 100)}%
@@ -272,7 +307,9 @@ export function FarmScoreCard({ farmId }: { farmId: string | null }) {
             </div>
 
             <div className="h-1 rounded-full bg-muted overflow-hidden">
-              <div className={`h-full ${barColor(s.value)} transition-all`} style={{ width: `${(s.value / 10) * 100}%` }} />
+              {!s.noData && (
+                <div className={`h-full ${barColor(s.value)} transition-all`} style={{ width: `${(s.value / 10) * 100}%` }} />
+              )}
             </div>
           </div>
         ))}

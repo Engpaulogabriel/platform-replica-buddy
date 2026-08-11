@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { BarChart3, ChevronRight, Trophy, Zap, TrendingUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { splitSessionByPost } from "@/lib/tariff";
 
 interface Summary {
   efficiency: number | null;
@@ -41,7 +42,7 @@ export function IndicatorsMiniSummary({ farmId }: { farmId: string | null }) {
       const fiveMinAgo = new Date(Date.now() - 5 * 60_000).toISOString();
       const thirtyAgo = new Date(Date.now() - 30 * 86400_000).toISOString();
 
-      const [sumRes, peakRes, eqRes, farmRes, cfgRes, eqGeoRes, logRes, firstLogRes, firstEqRes] = await Promise.all([
+      const [sumRes, peakRes, eqRes, farmRes, cfgRes, eqGeoRes, logRes, firstLogRes, firstEqRes, runtimeRes, holRes] = await Promise.all([
         supabase.rpc("get_energy_efficiency_summary", { _farm_id: farmId }),
         supabase.from("energy_efficiency_daily" as any)
           .select("date, minutes_on_during_peak")
@@ -55,7 +56,7 @@ export function IndicatorsMiniSummary({ farmId }: { farmId: string | null }) {
           .eq("active", true),
         supabase.from("farms").select("latitude, longitude").eq("id", farmId).maybeSingle(),
         supabase.from("farm_productivity_config" as any)
-          .select("worker_cost_per_hour, vehicle_cost_per_km, travel_minutes_avg, travel_distance_km, manual_operation_time_minutes, remote_operation_time_minutes, cycles_per_day, tariff_peak, tariff_reserved")
+          .select("worker_cost_per_hour, vehicle_cost_per_km, travel_minutes_avg, travel_distance_km, manual_operation_time_minutes, remote_operation_time_minutes, cycles_per_day, tariff_peak, tariff_reserved, tariff_off_peak, tariff_intermediate")
           .eq("farm_id", farmId).maybeSingle(),
         supabase.from("equipments").select("id, latitude, longitude, power_kw, estimated_flow_m3h")
           .eq("farm_id", farmId).in("type", ["poco", "bombeamento"] as any).eq("active", true),
@@ -76,6 +77,14 @@ export function IndicatorsMiniSummary({ farmId }: { farmId: string | null }) {
           .eq("farm_id", farmId)
           .order("created_at", { ascending: true })
           .limit(1),
+        // Sessões reais de bombeamento (30d) + feriados → energia real por posto
+        supabase.from("pump_runtime")
+          .select("equipment_id, started_at, ended_at")
+          .eq("farm_id", farmId)
+          .gte("started_at", thirtyAgo)
+          .order("started_at", { ascending: true })
+          .limit(10000),
+        supabase.from("national_holidays" as any).select("holiday_date"),
       ]);
 
       const sum = (sumRes.data as any) ?? null;
@@ -166,6 +175,8 @@ export function IndicatorsMiniSummary({ farmId }: { farmId: string | null }) {
         const cyclesDay = Number(cfg.cycles_per_day ?? 2);
         const tariffPeak = Number(cfg.tariff_peak ?? 1.884);
         const tariffReserved = Number(cfg.tariff_reserved ?? 0.3878);
+        const tariffOffPeak = Number(cfg.tariff_off_peak ?? tariffReserved);
+        const tariffInter = Number(cfg.tariff_intermediate ?? tariffPeak);
         const costPerTrip = avgRoadKm * vehicleCost + (travelMin / 60) * workerCost;
         const deslocamento = trips * costPerTrip;
 
@@ -173,23 +184,32 @@ export function IndicatorsMiniSummary({ farmId }: { farmId: string | null }) {
         const avgPowerKw = numPumps > 0
           ? eqGeo.reduce((a: number, e: any) => a + Number(e.power_kw ?? 75), 0) / numPumps
           : 75;
-        const avgFlow = numPumps > 0
-          ? eqGeo.reduce((a: number, e: any) => a + Number(e.estimated_flow_m3h ?? 300), 0) / numPumps
-          : 300;
+        const powerById = new Map<string, number>(
+          eqGeo.map((e: any) => [e.id, Number(e.power_kw) > 0 ? Number(e.power_kw) : avgPowerKw]),
+        );
         const horasMo = ((manualMin - remoteMin) * cyclesDay * 30) / 60;
         const maoObra30d = Math.max(0, horasMo) * workerCost;
-        // Energia: 5 min/dia ponta evitada × 60% das bombas
-        const energia30d = (5 / 60) * (numPumps * 0.6) * 30 * avgPowerKw * Math.max(0, tariffPeak - tariffReserved);
-        // Captação: m³ extras × R$ 0,02/m³
-        const gainMin = Math.max(0, manualMin - remoteMin);
-        const volM3_30d = (gainMin / 60) * numPumps * cyclesDay * 30 * avgFlow;
-        const captacao30d = volM3_30d * 0.02;
-
         const maoObra = maoObra30d * escala;
-        const energia = energia30d * escala;
-        const captacao = captacao30d * escala;
 
-        savings = deslocamento + maoObra + energia + captacao;
+        // Energia REAL (sem captação): sessões pump_runtime fatiadas por posto
+        // tarifário × potência real × diferença vs. ponta (horas em ponta = 0).
+        const holidaySet = new Set<string>(((holRes.data as any[]) ?? []).map((h: any) => h.holiday_date));
+        const runtimes: any[] = (runtimeRes.data as any[]) ?? [];
+        let energia = 0;
+        for (const s of runtimes) {
+          const start = new Date(s.started_at);
+          const end = s.ended_at ? new Date(s.ended_at) : new Date();
+          if (!(end.getTime() > start.getTime())) continue;
+          const power = powerById.get(s.equipment_id) ?? avgPowerKw;
+          const split = splitSessionByPost(start, end, holidaySet);
+          energia += power * (
+            split.off_peak * Math.max(0, tariffPeak - tariffOffPeak) +
+            split.reserved * Math.max(0, tariffPeak - tariffReserved) +
+            split.intermediate * Math.max(0, tariffPeak - tariffInter)
+          );
+        }
+
+        savings = deslocamento + maoObra + energia;
         projecaoMensal = diasOperacao < 30 ? (savings / Math.max(1, diasOperacao)) * 30 : null;
       }
 

@@ -16,7 +16,6 @@ const fmtBRL = (v: number) =>
 const fmtBRL2 = (v: number) =>
   v.toLocaleString("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: 2 });
 
-const WATER_VALUE_PER_M3 = 0.02;
 // Janela diária em que as bombas PODERIAM operar sem custo de ponta (reservada
 // 21:30→06:00 = 8,5h + fora-ponta 06:00→17:00 = 11h ≈ 19,5h). Usamos 18h por
 // bomba como meta realista (descontando manutenção/segurança).
@@ -50,23 +49,21 @@ export function RoiProjectionPanel({ roi, productivity }: Props) {
     const prevMonthRow = roi.monthly.find(m => m.month === ymPrev);
     const realizedPrev = prevMonthRow?.total ?? 0;
 
-    // Produtividade: horas/dia médias e vazão média por bomba
+    // Produtividade: horas/dia médias operadas
     const prodDays = productivity.rows.length || 1;
     const avgHoursDayFarm = productivity.totals.hoursOn / prodDays;
-    const avgFlowPerPump =
-      productivity.totals.hoursOn > 0
-        ? productivity.totals.volumeM3 / productivity.totals.hoursOn
-        : 0;
     const numPumps = productivity.pumps.length || 0;
     const targetHoursDay = numPumps * TARGET_HOURS_PER_DAY_PER_PUMP;
     const idleHoursDay = Math.max(0, targetHoursDay - avgHoursDayFarm);
 
-    // Ganho extra por hora ociosa aproveitada: volume × R$/m³ + uma fração
-    // proporcional das outras economias (energia/deslocamento/mão-de-obra) que
-    // escalam com mais operação. Usamos o ratio captação/total atual como peso.
-    const captRatio = roi.totals.total > 0 ? roi.totals.captacao / roi.totals.total : 0.5;
+    // Ganho extra por hora ociosa aproveitada: cada hora adicional roda fora da
+    // ponta e economiza ~ a economia de energia REAL observada por hora operada
+    // (roi.totals.energia / horas operadas). Coerente com a metodologia do card
+    // (energia real por posto tarifário) — sem captação sintética.
     const extraPerHour =
-      avgFlowPerPump * WATER_VALUE_PER_M3 * (captRatio > 0 ? 1 / Math.max(0.25, captRatio) : 2);
+      productivity.totals.hoursOn > 0
+        ? roi.totals.energia / productivity.totals.hoursOn
+        : 0;
 
     const scenario = (pct: number) => {
       const extraHoursDay = idleHoursDay * pct;

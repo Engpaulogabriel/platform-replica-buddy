@@ -27,7 +27,6 @@ interface Props {
 }
 
 const CAT_COLORS = {
-  captacao: "hsl(199 89% 48%)",
   energia: "hsl(142 71% 45%)",
   deslocamento: "hsl(38 92% 50%)",
   maoObra: "hsl(280 65% 60%)",
@@ -51,10 +50,9 @@ export function RoiHistoryPanel({ history }: Props) {
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Totais */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 text-xs">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 text-xs">
           <TotalCell label="Total" value={fmtBRL(totals.total)} highlight />
-          <TotalCell label="Captação extra" value={fmtBRL(totals.captacao)} />
-          <TotalCell label="Energia" value={fmtBRL(totals.energia)} />
+          <TotalCell label="Energia (ponta evitada)" value={fmtBRL(totals.energia)} />
           <TotalCell label="Deslocamento" value={fmtBRL(totals.deslocamento)} />
           <TotalCell label="Mão de obra" value={fmtBRL(totals.maoObra)} />
           <TotalCell label="Multas evitadas" value={fmtBRL(totals.multas)} />
@@ -90,7 +88,6 @@ export function RoiHistoryPanel({ history }: Props) {
                 formatter={(v: number, n: string) => [fmtBRL2(v), labelFor(n)]}
               />
               <Legend wrapperStyle={{ fontSize: 11 }} formatter={labelFor} />
-              <Bar dataKey="captacao" stackId="d" fill={CAT_COLORS.captacao} />
               <Bar dataKey="energia" stackId="d" fill={CAT_COLORS.energia} />
               <Bar dataKey="deslocamento" stackId="d" fill={CAT_COLORS.deslocamento} />
               <Bar dataKey="maoObra" stackId="d" fill={CAT_COLORS.maoObra} />
@@ -111,7 +108,6 @@ export function RoiHistoryPanel({ history }: Props) {
               <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} tickFormatter={fmtBRL} />
               <Tooltip contentStyle={tooltipStyle} labelFormatter={fmtMonth} formatter={(v: number, n: string) => [fmtBRL2(v), labelFor(n)]} />
               <Legend wrapperStyle={{ fontSize: 11 }} formatter={labelFor} />
-              <Bar dataKey="captacao" stackId="a" fill={CAT_COLORS.captacao} />
               <Bar dataKey="energia" stackId="a" fill={CAT_COLORS.energia} />
               <Bar dataKey="deslocamento" stackId="a" fill={CAT_COLORS.deslocamento} />
               <Bar dataKey="maoObra" stackId="a" fill={CAT_COLORS.maoObra} />
@@ -127,7 +123,6 @@ export function RoiHistoryPanel({ history }: Props) {
             <TableHeader>
               <TableRow className="border-border">
                 <TableHead>Mês</TableHead>
-                <TableHead className="text-right">Captação</TableHead>
                 <TableHead className="text-right">Energia</TableHead>
                 <TableHead className="text-right">Deslocamento</TableHead>
                 <TableHead className="text-right">Mão de obra</TableHead>
@@ -139,7 +134,6 @@ export function RoiHistoryPanel({ history }: Props) {
               {monthly.map((m) => (
                 <TableRow key={m.month} className="border-border">
                   <TableCell className="font-medium text-foreground">{fmtMonth(m.month)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{fmtBRL(m.captacao)}</TableCell>
                   <TableCell className="text-right tabular-nums">{fmtBRL(m.energia)}</TableCell>
                   <TableCell className="text-right tabular-nums">{fmtBRL(m.deslocamento)}</TableCell>
                   <TableCell className="text-right tabular-nums">{fmtBRL(m.maoObra)}</TableCell>
@@ -148,7 +142,7 @@ export function RoiHistoryPanel({ history }: Props) {
                 </TableRow>
               ))}
               {monthly.length === 0 && (
-                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground text-xs py-6">
+                <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground text-xs py-6">
                   {loading ? "Carregando…" : "Sem economia computada no período."}
                 </TableCell></TableRow>
               )}
@@ -168,7 +162,6 @@ export function RoiHistoryPanel({ history }: Props) {
 
 function labelFor(k: string): string {
   switch (k) {
-    case "captacao": return "Captação extra";
     case "energia": return "Energia (ponta evitada)";
     case "deslocamento": return "Deslocamento";
     case "maoObra": return "Mão de obra";
