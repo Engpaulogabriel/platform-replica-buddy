@@ -6621,61 +6621,63 @@ async function reportUpdateStatus(patch) {
 // Removido o self-heal de icacls (o INSTALAR.bat não tranca mais nada, então a
 // pasta é gravável e o copy funciona direto). Sem permissões locais, sem icacls.
 
-// v3.25.57 — JWT fresco antes de pedir a signed URL + retry em 401.
-// CAUSA do "signed-url HTTP 401: invalid_or_expired_token" da Sykue: o agente
-// usava o access_token de getSession() (que podia já estar vencido/vencendo);
-// em Starlink lenta o JWT expirava ANTES da resposta da edge function. A signed
-// URL em si já é 24h — o 401 era na CHAMADA da function, não no download.
-// Fix: refreshSession() imediatamente antes (TTL cheio) e, se ainda vier 401/403,
-// força novo refresh e tenta mais uma vez.
-async function getFreshAccessToken() {
+// v3.25.58 — signed URL via ANON KEY + AGENT TOKEN (device_license), NÃO o JWT
+// do operador. O 401 "invalid_or_expired_token" da Sykue vinha do gateway barrando
+// o access_token do getSession() vencido em Starlink lenta. A edge function
+// agent-release-signed-url exige apenas a apikey anon e valida o token de agente
+// (device_license) como fallback — então o OTA passa a independer TOTALMENTE da
+// sessão do operador. O agent token é o JWT rotativo do agent-auth (amarrado ao
+// hardware/licença); se estiver momentaneamente indisponível, cai na própria anon
+// key no Bearer (a função tolera o Bearer e só obriga a apikey).
+async function getFreshAgentBearer(cfg, force) {
   try {
-    const r = await withCloudTimeout(supabase.auth.refreshSession(), "auth.refreshSession", 20_000);
-    const t = r && r.data && r.data.session && r.data.session.access_token;
-    if (t && !r.error) return t;
-  } catch (_) { /* rede — cai no fallback abaixo */ }
-  try {
-    const s = await withCloudTimeout(supabase.auth.getSession(), "auth.getSession", 15_000);
-    return (s && s.data && s.data.session && s.data.session.access_token) || null;
-  } catch (_) { return null; }
+    const t = await withCloudTimeout(refreshAgentToken(cfg, { force: !!force }), "refreshAgentToken", 20_000);
+    if (t) return { token: t, isAgentToken: true };
+  } catch (_) { /* rede/licença — usa o que houver em memória, senão anon */ }
+  if (agentToken) return { token: agentToken, isAgentToken: true };
+  return { token: null, isAgentToken: false };
 }
 
-// Retorna { ok, status, text, signed }. Renova o token a cada tentativa (o refresh
-// devolve JWT com TTL cheio) e retenta 1× quando o 401/403 for de token.
+// Retorna { ok, status, text, signed }. Usa agent token no Bearer; em 401/403
+// força novo agent token e retenta 1×.
 async function requestAgentReleaseSignedUrl(version, tag) {
-  const baseUrl = (typeof activeSupabaseUrl !== "undefined" && activeSupabaseUrl) || SUPABASE_URL_DEFAULT;
-  const baseAnon = (typeof activeSupabaseAnonKey !== "undefined" && activeSupabaseAnonKey) || SUPABASE_ANON_DEFAULT;
+  const cfg = (typeof loadConfig === "function") ? loadConfig() : null;
+  const baseUrl = _activeBaseUrl(cfg) || (typeof activeSupabaseUrl !== "undefined" && activeSupabaseUrl) || SUPABASE_URL_DEFAULT;
+  const baseAnon = _activeAnon(cfg) || (typeof activeSupabaseAnonKey !== "undefined" && activeSupabaseAnonKey) || SUPABASE_ANON_DEFAULT;
 
-  const attempt = async () => {
-    const accessToken = await getFreshAccessToken();
-    if (!accessToken) return { ok: false, status: 0, text: "sem sessão autenticada", signed: null };
+  const attempt = async (force) => {
+    const { token, isAgentToken } = await getFreshAgentBearer(cfg, force);
+    // Bearer = agent token (device_license); sem ele, cai na anon (a função exige
+    // só a apikey). Nunca usa o JWT do operador → independe da sessão do usuário.
+    const bearer = token || baseAnon;
     const fnRes = await withCloudTimeout(
       fetch(`${baseUrl}/functions/v1/agent-release-signed-url`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken}`,
+          "Authorization": `Bearer ${bearer}`,
           "apikey": baseAnon,
         },
-        body: JSON.stringify({ version }),
+        // agent_token também no corpo p/ a validação de device_license da função.
+        body: JSON.stringify(token ? { version, agent_token: token } : { version }),
       }),
       `${tag} signed-url`, 30_000,
     );
     if (!fnRes.ok) {
       const txt = await fnRes.text().catch(() => "");
-      return { ok: false, status: fnRes.status, text: txt.slice(0, 200), signed: null };
+      return { ok: false, status: fnRes.status, text: txt.slice(0, 200), signed: null, isAgentToken };
     }
     const signed = await fnRes.json().catch(() => null);
-    return { ok: true, status: 200, text: "", signed };
+    return { ok: true, status: 200, text: "", signed, isAgentToken };
   };
 
   let res;
-  try { res = await attempt(); }
+  try { res = await attempt(false); }
   catch (e) { return { ok: false, status: 0, text: `rede: ${e && e.message ? e.message : e}`, signed: null }; }
 
   if (!res.ok && (res.status === 401 || res.status === 403)) {
-    pushLog("warn", "update", `[${tag}] signed-url ${res.status} (${res.text}) — renovando JWT e tentando novamente`);
-    try { res = await attempt(); }
+    pushLog("warn", "update", `[${tag}] signed-url ${res.status} (${res.text}) — forçando novo agent token e tentando novamente`);
+    try { res = await attempt(true); }
     catch (e) { return { ok: false, status: 0, text: `rede no retry: ${e && e.message ? e.message : e}`, signed: null }; }
   }
   return res;
