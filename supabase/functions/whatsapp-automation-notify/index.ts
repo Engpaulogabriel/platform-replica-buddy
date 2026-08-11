@@ -574,25 +574,30 @@ Deno.serve(async (req) => {
   const phoneNumberId = config.phone_number_id;
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // KILL-SWITCH DE POLÍTICA (por decisão do dono): o WhatsApp SÓ envia 2 alertas
-  // CRÍTICOS de sistema — AGENTE OFFLINE e BRIDGE MORTA — ambos vindos do
-  // agent-offline-watchdog. TODO o resto é DESCARTADO: acionamento de bomba
-  // (liga/desliga), acionamento local, com_missing, recovery, agent_dying (agente
-  // reiniciou), TX travada, schedule, manutenção, etc. NINGUÉM recebe alerta de
-  // bomba por ora. (No futuro: configurável por fazenda — flag/tabela.)
+  // POLÍTICA POR DESTINATÁRIO (não mais blanket):
+  //  • ADMINS de sistema (SYSTEM_ALERT_RECIPIENTS): SÓ agente offline / bridge
+  //    morta (via watchdog). Nunca liga/desliga, com_missing, recovery — o filtro
+  //    fica em loadFarmOperators (remove os tails de admin) + no gate abaixo.
+  //  • OPERADORES: recebem acionamento de bomba (equipment_state = liga/desliga)
+  //    normalmente. O kill-switch NÃO se aplica a eles.
+  //  • Técnico não-crítico (com_missing, recovery, agent_dying, TX travada, etc.)
+  //    → DESCARTADO para todos.
   const ALLOWED_SYSTEM_ALERTS = new Set(["agent_offline", "bridge_down"]);
-  const _isAllowed = directBody?.immediate === true
-    && String(directBody?.source ?? "") === "agent_offline_watchdog"
-    && ALLOWED_SYSTEM_ALERTS.has(String(directBody?.alert_type ?? ""));
-  if (!_isAllowed) {
-    if (directBody?.immediate !== true) {
-      // Chamada do cron (drain/schedule): esvazia as filas SEM enviar nada,
-      // para não acumular indefinidamente.
-      const nowIso2 = new Date().toISOString();
-      try { await supabase.from("pending_notifications").update({ processed: true, processed_at: nowIso2 }).eq("processed", false); } catch (_) {}
-      try { await supabase.from("automation_execution_log").update({ notified_at: nowIso2 }).is("notified_at", null); } catch (_) {}
-    }
-    console.log(`[POLICY] WhatsApp desativado (exceto sistema) — DESCARTADO: source=${directBody?.source} alert_type=${directBody?.alert_type} immediate=${directBody?.immediate}`);
+  const _b: any = directBody ?? {};
+  const _isWatchdogSystem = _b.immediate === true
+    && String(_b.source ?? "") === "agent_offline_watchdog"
+    && ALLOWED_SYSTEM_ALERTS.has(String(_b.alert_type ?? ""));
+  // Acionamento de bomba (liga/desliga) para OPERADORES.
+  const _isEquipmentState = _b.immediate === true
+    && (_b.type === "equipment_state" || _b.change_type === "equipment_state"
+        || (!!(_b.equipment_name || _b.equipment_id)
+            && (typeof _b.new_state !== "undefined" || _b.action === "turn_on" || _b.action === "turn_off")));
+  // Chamada do cron (immediate!=true): segue para o drain, que ENVIA os
+  // equipment_state pendentes aos operadores (admins já filtrados).
+  const _isCronDrain = _b.immediate !== true;
+
+  if (!_isWatchdogSystem && !_isEquipmentState && !_isCronDrain) {
+    console.log(`[POLICY] técnico não-crítico DESCARTADO: source=${_b.source} alert_type=${_b.alert_type} type=${_b.type} immediate=${_b.immediate}`);
     return new Response(JSON.stringify({ ok: true, sent: 0, skipped: "alerts_disabled_policy" }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
@@ -1522,6 +1527,11 @@ async function loadFarmOperators(supabase: any, farmId: string) {
     // Super admin sempre recebe. Para os demais, só bloqueia se receive_alerts
     // estiver explicitamente false; NULL/herança não pode matar notificação.
     if (!isSuper && o.receive_alerts === false) continue;
+    // Os ADMINS DE SISTEMA (SYSTEM_ALERT_RECIPIENTS) NÃO recebem acionamento de
+    // bomba (liga/desliga) — só recebem os 2 críticos (agente offline / bridge
+    // morta) via watchdog. Removidos aqui mesmo se cadastrados como operador.
+    const _tail8 = String(o.phone ?? "").replace(/\D/g, "").slice(-8);
+    if (SYSTEM_ALERT_RECIPIENTS.some((ph) => ph.slice(-8) === _tail8)) continue;
     const key = normalizePhoneKey(o.phone);
     if (!key || seen.has(key)) continue;
     seen.add(key);
