@@ -44,6 +44,7 @@ import { useAutomationActiveEquipments } from "@/hooks/useAutomationActiveEquipm
 import { useFarmFeatures } from "@/hooks/useFarmFeatures";
 import { triggerAutomationGuard, wasScheduledOffRecently } from "@/lib/automationGuard";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
+import { OpenMaintenanceProvider } from "@/contexts/MaintenanceContext";
 import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { useMasterManager } from "@/contexts/MasterManagerContext";
 import { useNavigate } from "react-router-dom";
@@ -980,6 +981,7 @@ const Dashboard = () => {
   const fitScreen = true;
 
   return (
+    <OpenMaintenanceProvider farmId={farmId}>
     <div className={fitScreen ? "flex flex-col gap-2 min-h-full" : "space-y-3"}>
 
 
@@ -1340,6 +1342,7 @@ const Dashboard = () => {
         </DialogContent>
       </Dialog>
     </div>
+    </OpenMaintenanceProvider>
   );
 };
 

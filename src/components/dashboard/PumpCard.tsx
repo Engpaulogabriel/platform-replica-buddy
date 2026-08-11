@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 
 import { formatLastSeen } from "@/hooks/useDashboardEquipment";
+import { useOpenMaintenance } from "@/contexts/MaintenanceContext";
+import { problemLabel } from "@/lib/maintenanceTypes";
 import { clearAutomationGuard } from "@/lib/automationGuard";
 import { derivePumpState } from "@/lib/pumpStateMachine";
 import { findSectorForEquipment, type Farm, type Sector } from "@/lib/sectors";
@@ -80,6 +82,9 @@ function PumpCardImpl(props: PumpCardProps) {
   const isOffline = pump.communicationStatus === "offline";
   const isUnstable = pump.communicationStatus === "unstable";
   const isCommFail = stateInfo.isCommFail;
+  // Ordem de manutenção ABERTA para este equipamento → badge automático (não bloqueia).
+  const { getForEquipment } = useOpenMaintenance();
+  const maint = getForEquipment(pump.id);
   // Minutos desde a última comunicação real — alimenta o indicador discreto "⏱ Xmin"
   // (instável, sem alarme) e o tooltip de offline. null quando nunca comunicou.
   const minutesSinceComm = pump.lastCommunication
@@ -208,6 +213,18 @@ function PumpCardImpl(props: PumpCardProps) {
               title={`Último estado conhecido — sem nova comunicação há ${minutesSinceComm} min (ainda dentro do tempo de proteção). Última: ${formatLastSeen(pump.lastCommunication)}`}
             >
               ⏱ {minutesSinceComm}min
+            </span>
+          )}
+          {maint && (
+            <span
+              className={`text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0 flex items-center gap-0.5 border ${
+                maint.priority === "alta"
+                  ? "bg-destructive/20 text-destructive border-destructive/50"
+                  : "bg-warning/20 text-warning border-warning/50"
+              }`}
+              title={`Manutenção pendente: ${problemLabel(maint.problem_type)}${maint.description ? ` — ${maint.description}` : ""} (prioridade ${maint.priority}). Equipamento pode não estar confiável.`}
+            >
+              <Wrench className="w-2.5 h-2.5" /> Manutenção
             </span>
           )}
           {/* Badges LOCAL/AUTO/MANUTENÇÃO ficam na LINHA 2 (abaixo), nunca na linha do nome. */}

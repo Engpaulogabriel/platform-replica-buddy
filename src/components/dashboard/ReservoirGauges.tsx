@@ -1,5 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import { Activity, Bell, Volume2, VolumeX, RefreshCw, TrendingDown } from "lucide-react";
+import { Activity, Bell, Volume2, VolumeX, RefreshCw, TrendingDown, Wrench } from "lucide-react";
+import { useOpenMaintenance } from "@/contexts/MaintenanceContext";
+import { problemLabel } from "@/lib/maintenanceTypes";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useAlarmSound } from "@/hooks/useAlarmSound";
 import { useLanguage } from "@/contexts/LanguageContext";
@@ -52,6 +54,7 @@ export function ReservoirGauges({ reservoirs, onRefreshStatus }: ReservoirGauges
   const refreshTimers = useRef<Record<string, NodeJS.Timeout>>({});
   const prevReservoirs = useRef(reservoirs);
   const reservoirIds = useMemo(() => reservoirs.map((r) => r.id), [reservoirs]);
+  const { getForEquipment } = useOpenMaintenance();
   const drainEta = useReservoirDrainEta(reservoirIds);
 
   const handleRefresh = useCallback((id: string) => {
@@ -129,6 +132,9 @@ export function ReservoirGauges({ reservoirs, onRefreshStatus }: ReservoirGauges
           const isLow = !isOffline && res.percent < 25;
           const isFull = !isOffline && res.percent >= 95;
           const eta = !isOffline ? drainEta[res.id] : null;
+          const maint = getForEquipment(res.id);
+          // Nível não confiável: manutenção de nível/sensor aberta → avisa que o % pode mentir.
+          const levelUnreliable = maint && (maint.problem_type === "nivel_zerado" || maint.problem_type === "sensor_defeito");
           return (
             <div
               key={res.id}
@@ -146,6 +152,17 @@ export function ReservoirGauges({ reservoirs, onRefreshStatus }: ReservoirGauges
                 <div className="flex items-center gap-1">
                   <span className={`text-xs font-semibold truncate ${isOffline ? "text-muted-foreground" : "text-foreground"}`}>{res.name}</span>
                   {!isOffline && res.alarm && <Bell className="w-3 h-3 text-warning animate-pulse-alert shrink-0" />}
+                  {maint && (
+                    <span
+                      className={`text-[10px] font-extrabold uppercase tracking-wider shrink-0 px-1.5 py-0.5 rounded flex items-center gap-0.5 border ${
+                        maint.priority === "alta" ? "bg-destructive/20 text-destructive border-destructive/50" : "bg-warning/20 text-warning border-warning/50"
+                      }`}
+                      title={`Manutenção pendente: ${problemLabel(maint.problem_type)}${maint.description ? ` — ${maint.description}` : ""} (prioridade ${maint.priority}).`}
+                    >
+                      <Wrench className="w-2.5 h-2.5" />
+                      {levelUnreliable ? "⚠️ Nível não confiável" : "Manutenção"}
+                    </span>
+                  )}
                   {isOffline && (
                     <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider shrink-0 px-1.5 py-0.5 rounded bg-muted/50 border border-border">
                       Offline

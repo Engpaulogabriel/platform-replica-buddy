@@ -2917,6 +2917,91 @@ async function dispatchMaintenanceNotify(args: {
 //  3. Usa template `alerta_equipamento` com mensagem específica.
 //  4. Quem enviou o comando NÃO recebe o broadcast.
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Setor Técnico — CRIAÇÃO de ordem de manutenção pelo WhatsApp.
+//   "Manutenção Poço 07 Fazenda Semear Nível zerado"
+// Detecta o TIPO por palavra-chave; sem tipo reconhecido → não intercepta (deixa
+// o roteador normal seguir). NÃO colide com "manutenção concluída" (checada antes)
+// nem com "colocar modo manutenção"/"bloquear" (comandos próprios).
+const MAINT_PROBLEM_PATTERNS: Array<{ type: string; label: string; re: RegExp; priority: "alta" | "media" | "baixa" }> = [
+  { type: "nivel_zerado", label: "Nível zerado", re: /(nivel zerado|nivel zero|sem nivel|nivel nao confiavel|zerou o nivel)/, priority: "alta" },
+  { type: "sem_comunicacao", label: "Sem comunicação", re: /(sem comunica|nao comunica|nao responde|sem resposta|offline)/, priority: "alta" },
+  { type: "vazamento", label: "Vazamento", re: /(vazamento|vazando|vaza\b|furo|furou)/, priority: "alta" },
+  { type: "sensor_defeito", label: "Sensor com defeito", re: /(sensor|boia|defeito no sensor|sensor com defeito)/, priority: "media" },
+  { type: "bomba_ruido", label: "Bomba com ruído", re: /(ruido|barulho|rangendo|rangido|vibrando|vibra[cç]ao)/, priority: "media" },
+  { type: "preventiva", label: "Manutenção preventiva", re: /(preventiva|preventivo|revisao|revisar|inspe[cç]ao)/, priority: "baixa" },
+];
+
+function parseMaintenanceOrder(text: string): { type: string; label: string; priority: "alta" | "media" | "baixa"; target: string } | null {
+  if (!text) return null;
+  const s = stripAccents(text.toLowerCase()).replace(/[.!?]+$/g, "").replace(/\s+/g, " ").trim();
+  // Precisa começar com "manutenção/manutencao" e NÃO ser modo/bloqueio/conclusão.
+  if (!/^(manuten[cç]?[aã]o|reparo)\b/.test(s)) return null;
+  if (/\b(modo|colocar|bloquear|bloqueio|concluida|conclu[ií]da|resolvida|finalizada|liberar|pronto|pronta)\b/.test(s)) return null;
+  const hit = MAINT_PROBLEM_PATTERNS.find((p) => p.re.test(s));
+  if (!hit) return null; // sem tipo reconhecido → não intercepta
+  // target = texto sem "manutenção/reparo" e sem as palavras do problema → alimenta o resolver.
+  const target = s
+    .replace(/^(manuten[cç]?[aã]o|reparo)\b/, " ")
+    .replace(hit.re, " ")
+    .replace(/\b(fazenda|com|de|do|da|no|na|o|a|problema|defeito)\b/g, " ")
+    .replace(/\s+/g, " ").trim();
+  return { type: hit.type, label: hit.label, priority: hit.priority, target };
+}
+
+async function handleMaintenanceOrderCreate(
+  from: string,
+  phone: string,
+  op: any,
+  text: string,
+  farmIdHint: string | null,
+): Promise<boolean> {
+  const parsed = parseMaintenanceOrder(text);
+  if (!parsed) return false;
+
+  const role = String(op?.role ?? "").toLowerCase();
+  const allowed = role === "super_admin" || role === "admin" || op?.is_super_admin === true;
+  if (!allowed) {
+    await sendWhatsAppText(from, "🚫 Apenas administradores podem registrar manutenção.", farmIdHint);
+    return true;
+  }
+
+  const { equipment, farm } = await resolveEquipmentFromText(parsed.target || text, farmIdHint || "");
+  if (!farm) {
+    await sendWhatsAppText(from, "❓ Não identifiquei a fazenda. Ex.: 'Manutenção Poço 07 Fazenda Semear Nível zerado'.", farmIdHint);
+    return true;
+  }
+  if (!equipment) {
+    await sendWhatsAppText(from, `❓ Não identifiquei o equipamento em ${farm.name}. Ex.: 'Manutenção poço 07 ${farm.name.toLowerCase()} nível zerado'.`, farm.id);
+    return true;
+  }
+
+  const { error } = await supabase.from("maintenance_orders").insert({
+    farm_id: farm.id,
+    equipment_id: equipment.id,
+    equipment_name: equipment.name,
+    problem_type: parsed.type,
+    description: null,
+    priority: parsed.priority,
+    status: "aberto",
+    created_by: (op as any)?.user_id ?? null,
+    created_by_name: op?.name ?? `WhatsApp ${phone.slice(-4)}`,
+  });
+  if (error) {
+    console.error("[maintenance_order] insert failed", error.message);
+    await sendWhatsAppText(from, "❌ Falha ao registrar a manutenção. Tente novamente.", farm.id);
+    return true;
+  }
+
+  const prioLabel = parsed.priority === "alta" ? "Alta" : parsed.priority === "media" ? "Média" : "Baixa";
+  await sendWhatsAppText(
+    from,
+    `✅ Manutenção registrada: ${equipment.name} (${farm.name}) — ${parsed.label}. Prioridade: ${prioLabel}.\n\nO equipamento segue operando; um alerta ficará visível no dashboard até a conclusão.`,
+    farm.id,
+  );
+  return true;
+}
+
 function isMaintenanceCompletedText(text: string): boolean {
   if (!text) return false;
   const s = stripAccents(text.toLowerCase()).replace(/[.!?]+$/g, "").replace(/\s+/g, " ").trim();
@@ -8546,6 +8631,13 @@ async function processMessage(from: string, text: string, location: WaLocation =
     if (text && isMaintenanceCompletedText(text)) {
       console.log("[maintenance_completed] detected", { phone_tail: phone.slice(-4), text: text.slice(0, 80) });
       if (await handleMaintenanceCompleted(from, phone, op, text, farmIdM)) return;
+    }
+
+    // 0b) NOVA INTENÇÃO: "Manutenção <equip> <fazenda> <tipo>" → cria ORDEM de
+    // manutenção (Setor Técnico). Só intercepta se reconhecer o tipo de problema.
+    if (text && parseMaintenanceOrder(text)) {
+      console.log("[maintenance_order] detected", { phone_tail: phone.slice(-4), text: text.slice(0, 80) });
+      if (await handleMaintenanceOrderCreate(from, phone, op, text, farmIdM)) return;
     }
 
 
