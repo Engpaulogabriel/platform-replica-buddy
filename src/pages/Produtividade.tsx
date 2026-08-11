@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { notify } from "@/lib/notify";
 import { InemaCompliancePanel } from "@/components/inema/InemaCompliancePanel";
+import { InemaReport } from "@/components/inema/InemaReport";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
 import {
   TrendingUp, DollarSign, Droplets, Zap, AlertTriangle, FileText, Save, Download, Info, Settings, Truck, Lock,
@@ -113,6 +114,9 @@ export default function Produtividade() {
           <TabsTrigger value="roi"><DollarSign className="w-4 h-4 mr-1.5" />ROI & Energia</TabsTrigger>
           {inemaEnabled && (
             <TabsTrigger value="inema"><FileText className="w-4 h-4 mr-1.5" />Conformidade INEMA</TabsTrigger>
+          )}
+          {inemaEnabled && (
+            <TabsTrigger value="inema_report"><FileText className="w-4 h-4 mr-1.5" />Relatório INEMA</TabsTrigger>
           )}
           <TabsTrigger value="config"><Settings className="w-4 h-4 mr-1.5" />Configurações {!isPlatformAdmin && <Lock className="w-3 h-3 ml-1" />}</TabsTrigger>
         </TabsList>
@@ -321,6 +325,13 @@ export default function Produtividade() {
               <Disclaimer />
             </CardContent>
           </Card>
+        </TabsContent>
+        )}
+
+        {inemaEnabled && (
+        <TabsContent value="inema_report" className="space-y-4 mt-4">
+          {/* Relatório formato SEI BAHIA: outorgas (portaria/poços/condicionantes) + monitoramento */}
+          <InemaReport farmId={inema.farmId ?? farmId} />
         </TabsContent>
         )}
 
