@@ -2315,18 +2315,42 @@ function refreshDiskFree() {
 
 // CAUSA-RAIZ do disco cheio: a bridge compilada (PyInstaller --onefile) extrai
 // ~8MB em %TEMP%\_MEIxxxxx a cada execução. Se morre por taskkill/crash, a pasta
-// NÃO é limpa e acumula GBs. Aqui apagamos as _MEI* ÓRFÃS. O 'rd /s /q ... 2>nul'
-// pula automaticamente as pastas EM USO (arquivos travados pela bridge viva), então
-// a bridge rodando NÃO é afetada — só os resíduos de kills/crashes somem.
-function cleanupMeiFolders() {
-  if (process.platform !== "win32") return;
+// NÃO é limpa e acumula GBs. Aqui apagamos as _MEI* ÓRFÃS.
+//
+// BUG corrigido (v3.25.59): o 'rd /s /q ... 2>nul' NÃO pula de forma confiável a
+// _MEI* EM USO — em alguns casos apagava a pasta que a serial_bridge.exe VIVA
+// precisa (a bridge mapeia libs de dentro da _MEI dela), derrubando a bridge.
+// Guarda absoluta: se serial_bridge.exe estiver RODANDO, NÃO apaga NENHUMA _MEI*.
+// Só limpamos quando a bridge está parada (aí toda _MEI* é resíduo órfão seguro).
+function isSerialBridgeRunning(cb) {
+  if (process.platform !== "win32") return cb(false);
   try {
     require("child_process").exec(
-      'for /d %i in ("%TEMP%\\_MEI*") do @rd /s /q "%i" 2>nul',
-      { windowsHide: true, timeout: 60_000 },
-      () => {},
+      'tasklist /FI "IMAGENAME eq serial_bridge.exe" /NH',
+      { windowsHide: true, timeout: 15_000 },
+      (err, stdout) => {
+        if (err) { cb(true); return; } // na dúvida (erro ao consultar) → assume rodando e NÃO limpa
+        cb(/serial_bridge\.exe/i.test(String(stdout || "")));
+      },
     );
-  } catch (_) {}
+  } catch (_) { cb(true); } // exceção → conservador: assume rodando
+}
+
+function cleanupMeiFolders() {
+  if (process.platform !== "win32") return;
+  isSerialBridgeRunning((running) => {
+    if (running) {
+      try { pushLog("debug", "system", "[DISK] serial_bridge.exe rodando — pulando limpeza de _MEI* (proteção)"); } catch (_) {}
+      return;
+    }
+    try {
+      require("child_process").exec(
+        'for /d %i in ("%TEMP%\\_MEI*") do @rd /s /q "%i" 2>nul',
+        { windowsHide: true, timeout: 60_000 },
+        () => {},
+      );
+    } catch (_) {}
+  });
 }
 let meiCleanupTimer = null;
 
