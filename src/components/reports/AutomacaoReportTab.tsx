@@ -274,7 +274,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                 })}
               </div>
               <div className="hidden sm:block w-full max-w-full overflow-x-auto">
-                <Table>
+                <Table className="md:[&_th]:px-2 md:[&_td]:px-2 md:[&_td]:py-1.5 xl:[&_th]:px-4 xl:[&_td]:p-4">
                   <TableHeader>
                     <TableRow className="border-border hover:bg-secondary/50">
                       <TableHead className="text-muted-foreground">Data</TableHead>

@@ -401,7 +401,7 @@ export default function PlatformUpdates() {
   return (
     <div className="space-y-6">
       {/* Header KPIs */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
         <Card>
           <CardContent className="p-4">
             <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Versão atual</div>
@@ -586,7 +586,7 @@ export default function PlatformUpdates() {
             <>
             <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
             <div className="overflow-x-auto -mx-2 px-2">
-            <Table>
+            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
               <TableHeader>
                 <TableRow>
                   <TableHead>Versão</TableHead>
@@ -768,7 +768,7 @@ export default function PlatformUpdates() {
             <>
             <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
             <div className="overflow-x-auto -mx-2 px-2">
-            <Table>
+            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
               <TableHeader>
                 <TableRow>
                   <TableHead>Fazenda</TableHead>

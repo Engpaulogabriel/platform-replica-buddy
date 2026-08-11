@@ -224,7 +224,7 @@ export default function Ajuda() {
       {/* Quick overview */}
       <div className="bg-card border border-border rounded-lg p-3 space-y-2">
         <p className="text-xs font-semibold text-foreground">🚀 Primeiros passos</p>
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
           {[
             { step: "1", text: "Cadastre PLCs e equipamentos em Suporte Técnico", icon: Cpu },
             { step: "2", text: "Acompanhe bombas e níveis no Início", icon: Droplets },

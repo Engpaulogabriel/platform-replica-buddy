@@ -240,7 +240,7 @@ export default function PlatformReports({ isAdmin: _isAdmin }: { isAdmin: boolea
           {/* Tabela */}
           <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
           <div className="overflow-x-auto border rounded-md">
-            <Table>
+            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
               <TableHeader>
                 <TableRow>
                   <TableHead>Fazenda</TableHead>
@@ -292,7 +292,7 @@ export default function PlatformReports({ isAdmin: _isAdmin }: { isAdmin: boolea
           </div>
 
           {/* Rankings */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             <RankingCard title="Top 5 — Horas operação" rows={topRuntime} dataKey="runtime_hours" suffix="h" color="hsl(142 71% 45%)" />
             <RankingCard title="Top 5 — Comandos" rows={topCommands} dataKey="commands_total" color="hsl(var(--primary))" />
             <RankingCard title="Top 5 — Alertas críticos" rows={topCritical} dataKey="alerts_critical" color="hsl(var(--destructive))" empty="Nenhuma fazenda com críticos 🎉" />

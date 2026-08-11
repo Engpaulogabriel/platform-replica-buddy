@@ -347,7 +347,7 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
             </div>
             <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
             <div className="overflow-x-auto -mx-2 px-2 max-h-[500px]">
-              <Table>
+              <Table className="md:[&_th]:px-2 md:[&_td]:px-2 md:[&_td]:py-1.5 xl:[&_th]:px-4 xl:[&_td]:p-4">
                 <TableHeader>
                   <TableRow>
                     <TableHead>Data</TableHead>

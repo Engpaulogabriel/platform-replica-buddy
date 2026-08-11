@@ -202,7 +202,7 @@ export default function ConsumoReportTab({ farmId, fromDate, toDate, selectedPum
         <CardContent className="p-0">
           <p className="text-[10px] text-muted-foreground mb-1 px-4 sm:hidden">← deslize para ver todas as colunas →</p>
           <div className="overflow-x-auto -mx-2 px-2">
-          <Table>
+          <Table className="md:[&_th]:px-2 md:[&_td]:px-2 md:[&_td]:py-1.5 xl:[&_th]:px-4 xl:[&_td]:p-4">
             <TableHeader>
               <TableRow className="border-border hover:bg-secondary/50">
                 <TableHead className="text-muted-foreground">Data</TableHead>

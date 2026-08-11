@@ -453,7 +453,7 @@ export default function HistoricoWhatsApp() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-[280px_1fr]">
+      <div className="grid gap-4 md:grid-cols-[240px_1fr] lg:grid-cols-[280px_1fr]">
         {/* Contacts sidebar (desktop) */}
         <Card className="hidden md:block h-[calc(100vh-180px)] min-h-[500px] overflow-hidden">
           {ContactsPanel}
@@ -462,8 +462,8 @@ export default function HistoricoWhatsApp() {
         {/* Conversation area */}
         <div className="space-y-4 min-w-0">
           <Card>
-            <CardContent className="pt-4 grid gap-3 md:grid-cols-5">
-              <div className="md:col-span-2">
+            <CardContent className="pt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="sm:col-span-2">
                 <Label className="text-xs">Buscar (mensagem, operador, telefone)</Label>
                 <div className="relative">
                   <Search className="w-4 h-4 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -490,7 +490,7 @@ export default function HistoricoWhatsApp() {
                 </Select>
               </div>
               {isPlatformAdmin && farms.length > 1 && (
-                <div className="md:col-span-2">
+                <div className="sm:col-span-2">
                   <Label className="text-xs">Fazenda</Label>
                   <Select value={farmFilter} onValueChange={setFarmFilter}>
                     <SelectTrigger><SelectValue /></SelectTrigger>

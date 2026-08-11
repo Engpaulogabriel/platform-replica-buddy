@@ -275,17 +275,17 @@ export function EnergyEfficiencyHistoryPanel({ farmId, range: rangeProp, onRange
       {hasData && (
         <div className="overflow-x-auto -mx-2 px-2">
           <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-          <table className="w-full text-sm">
+          <table className="w-full text-sm md:text-xs xl:text-sm">
             <thead className="bg-muted/40 text-xs uppercase text-muted-foreground">
               <tr>
-                <th className="text-left px-3 py-2 w-8"></th>
-                <th className="text-left px-3 py-2">Data</th>
-                <th className="text-right px-3 py-2">Eficiência</th>
-                <th className="text-left  px-3 py-2">1ª bomba ligou</th>
-                <th className="text-left  px-3 py-2">Últ. desligada</th>
-                <th className="text-right px-3 py-2">Atrasadas</th>
-                <th className="text-right px-3 py-2">Tempo perdido</th>
-                <th className="text-right px-3 py-2">Ponta (18–21h)</th>
+                <th className="text-left px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 w-8"></th>
+                <th className="text-left px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2">Data</th>
+                <th className="text-right px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2">Eficiência</th>
+                <th className="text-left  px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2">1ª bomba ligou</th>
+                <th className="text-left  px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2">Últ. desligada</th>
+                <th className="text-right px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2">Atrasadas</th>
+                <th className="text-right px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2">Tempo perdido</th>
+                <th className="text-right px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2">Ponta (18–21h)</th>
               </tr>
             </thead>
             <tbody>
@@ -311,14 +311,14 @@ export function EnergyEfficiencyHistoryPanel({ farmId, range: rangeProp, onRange
                       className={`border-t border-border cursor-pointer hover:bg-muted/30 ${isFree ? "bg-muted/20" : ""}`}
                       onClick={() => toggle(d.cycle_date)}
                     >
-                      <td className="px-3 py-2">
+                      <td className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2">
                         {isOpen ? (
                           <ChevronDown className="w-4 h-4 text-muted-foreground" />
                         ) : (
                           <ChevronRight className="w-4 h-4 text-muted-foreground" />
                         )}
                       </td>
-                      <td className="px-3 py-2 font-medium text-foreground">
+                      <td className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 font-medium text-foreground">
                         <div className="flex items-center gap-2">
                           <span>{fmtDate(d.cycle_date)}</span>
                           {isFree && (
@@ -331,21 +331,21 @@ export function EnergyEfficiencyHistoryPanel({ farmId, range: rangeProp, onRange
                           )}
                         </div>
                       </td>
-                      <td className={`px-3 py-2 text-right font-semibold ${effTone(d.efficiency_percent)}`}>
+                      <td className={`px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 text-right font-semibold ${effTone(d.efficiency_percent)}`}>
                         {d.efficiency_percent != null ? `${Number(d.efficiency_percent).toFixed(1)}%` : "—"}
                       </td>
-                      <td className="px-3 py-2 text-foreground">{fmtTime(d.post_peak_startup_time)}</td>
-                      <td className="px-3 py-2 text-foreground">
+                      <td className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 text-foreground">{fmtTime(d.post_peak_startup_time)}</td>
+                      <td className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 text-foreground">
                         {isFree ? <span className="text-muted-foreground">—</span> : fmtTime(d.pre_peak_shutdown_time)}
                       </td>
-                      <td className="px-3 py-2 text-right">
+                      <td className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 text-right">
                         <span className={`font-medium ${lateColor}`}>
                           {displayLate}/{denom}
                         </span>
                       </td>
 
-                      <td className="px-3 py-2 text-right text-foreground">{fmtMin(d.lost_minutes)}</td>
-                      <td className="px-3 py-2 text-right">
+                      <td className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 text-right text-foreground">{fmtMin(d.lost_minutes)}</td>
+                      <td className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 text-right">
                         {isFree ? (
                           <span className="text-muted-foreground text-xs" title="Demanda livre — sem horário de ponta">N/A</span>
                         ) : d.pumps_on_during_peak > 0 ? (
@@ -455,7 +455,7 @@ function DayDetail({ farmId, date, loading, rows }: { farmId: string; date: stri
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
       {/* Religamento tardio */}
       <div className="rounded-lg border border-border bg-background/50 overflow-hidden">
-        <div className="px-3 py-2 border-b border-border flex items-center gap-2 bg-amber-500/5">
+        <div className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 border-b border-border flex items-center gap-2 bg-amber-500/5">
           <Clock className="w-4 h-4 text-amber-500" />
           <h3 className="text-xs font-semibold uppercase text-amber-600 dark:text-amber-400">
             Religamento tardio · pós-ponta
@@ -499,7 +499,7 @@ function DayDetail({ farmId, date, loading, rows }: { farmId: string; date: stri
 
       {/* Pré-ponta — janela 16:00–18:00, referência 17:45 */}
       <div className="rounded-lg border border-border bg-background/50 overflow-hidden">
-        <div className="px-3 py-2 border-b border-border flex items-center gap-2 bg-orange-500/5">
+        <div className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 border-b border-border flex items-center gap-2 bg-orange-500/5">
           <AlertTriangle className="w-4 h-4 text-orange-500" />
           <h3 className="text-xs font-semibold uppercase text-orange-600 dark:text-orange-400">
             Pré-ponta · desligamento 16:00–18:00
@@ -563,7 +563,7 @@ function DayDetail({ farmId, date, loading, rows }: { farmId: string; date: stri
 
       {/* Infrações na ponta */}
       <div className="rounded-lg border border-border bg-background/50 overflow-hidden">
-        <div className="px-3 py-2 border-b border-border flex items-center gap-2 bg-destructive/5">
+        <div className="px-3 py-2 md:px-2 md:py-1.5 xl:px-3 xl:py-2 border-b border-border flex items-center gap-2 bg-destructive/5">
           <Zap className="w-4 h-4 text-destructive" />
           <h3 className="text-xs font-semibold uppercase text-destructive">
             Infrações na ponta · 18h–21h

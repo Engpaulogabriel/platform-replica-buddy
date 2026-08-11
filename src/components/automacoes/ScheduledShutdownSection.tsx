@@ -80,7 +80,7 @@ export function ScheduledShutdownSection({ farmId, equipments, canEdit }: Props)
           Nenhuma regra de desligamento programado. Clique em "Nova regra" para criar.
         </Card>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {items.map((a) => (
             <RuleCard
               key={a.id}

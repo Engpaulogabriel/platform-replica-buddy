@@ -39,7 +39,7 @@ const Alarmes = () => {
         </TabsList>
 
         <TabsContent value="reservoirs" className="space-y-4 mt-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {data.map((res) => {
               const isLowAlert = res.lowActive && res.level <= res.alarmLow;
               const isHighAlert = res.highActive && res.level >= res.alarmHigh;

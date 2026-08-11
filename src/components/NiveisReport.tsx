@@ -172,7 +172,7 @@ const NiveisReport = ({ fromDate, toDate }: Props) => {
         </div>
       )}
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Card className="bg-card border-border"><CardContent className="p-3">
           <p className="text-[11px] text-muted-foreground">Atual</p>
           <p className="text-xl font-bold text-primary">{summary.current?.toFixed(1) ?? "—"}%</p>

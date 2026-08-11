@@ -33,7 +33,7 @@ export function ProductivityCharts({ history }: Props) {
         <Kpi icon={<Zap className="w-4 h-4 text-emerald-500" />} label="Eficiência média" value={totals.avgEfficiency == null ? "—" : `${totals.avgEfficiency.toFixed(1)}%`} />
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <ChartCard title="Volume captado por dia (m³)" icon={<Droplets className="w-4 h-4 text-sky-500" />}>
           <ResponsiveContainer width="100%" height={240}>
             <LineChart data={rows}>

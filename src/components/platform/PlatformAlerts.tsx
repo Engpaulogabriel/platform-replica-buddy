@@ -174,7 +174,7 @@ export default function PlatformAlerts({ isAdmin: _isAdmin }: { isAdmin: boolean
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
             <Select value={farmId} onValueChange={setFarmId}>
               <SelectTrigger><SelectValue placeholder="Fazenda" /></SelectTrigger>
               <SelectContent>
@@ -220,7 +220,7 @@ export default function PlatformAlerts({ isAdmin: _isAdmin }: { isAdmin: boolean
           </div>
 
           <div className="overflow-x-auto border rounded-md">
-            <Table>
+            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-[100px]">Severidade</TableHead>

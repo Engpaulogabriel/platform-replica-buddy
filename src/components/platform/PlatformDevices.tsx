@@ -391,7 +391,7 @@ export default function PlatformDevices({ isAdmin }: Props) {
         <CardContent className="p-0">
           <p className="text-[10px] text-muted-foreground mb-1 sm:hidden px-3 pt-2">← deslize para ver todas as colunas →</p>
           <div className="overflow-x-auto -mx-2 px-2">
-            <Table>
+            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
               <TableHeader>
                 <TableRow>
                   <TableHead>Fazenda</TableHead>

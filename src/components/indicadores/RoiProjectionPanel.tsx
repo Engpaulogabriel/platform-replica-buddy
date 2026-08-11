@@ -123,7 +123,7 @@ export function RoiProjectionPanel({ roi, productivity }: Props) {
       </CardHeader>
       <CardContent className="space-y-5">
         {/* Realizado + projeção */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
             <div className="text-[10px] uppercase text-muted-foreground tracking-wide flex items-center gap-1">
               <TrendingUp className="w-3 h-3" /> Economia realizada

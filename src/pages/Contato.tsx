@@ -68,7 +68,7 @@ const Contato = () => {
             Canais de Atendimento
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="grid gap-3 sm:grid-cols-2">
           {contactItems.map((item) => (
             <a
               key={item.label}

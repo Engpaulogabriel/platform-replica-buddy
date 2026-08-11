@@ -51,7 +51,7 @@ export function RoiHistoryPanel({ history }: Props) {
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Totais */}
-        <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 text-xs">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 text-xs">
           <TotalCell label="Total" value={fmtBRL(totals.total)} highlight />
           <TotalCell label="Captação extra" value={fmtBRL(totals.captacao)} />
           <TotalCell label="Energia" value={fmtBRL(totals.energia)} />
@@ -123,7 +123,7 @@ export function RoiHistoryPanel({ history }: Props) {
         {/* Tabela mensal */}
         <div className="overflow-x-auto -mx-2 px-2">
           <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-          <Table>
+          <Table className="md:text-xs xl:text-sm [&_th]:md:!h-9 [&_th]:md:!px-2 [&_td]:md:!px-2 [&_td]:md:!py-1.5 [&_th]:xl:!h-12 [&_th]:xl:!px-4 [&_td]:xl:!p-4">
             <TableHeader>
               <TableRow className="border-border">
                 <TableHead>Mês</TableHead>

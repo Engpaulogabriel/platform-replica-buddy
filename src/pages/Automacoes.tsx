@@ -110,7 +110,7 @@ export default function Automacoes() {
             Nenhuma automação ativa. Clique em "Nova Automação" para criar a primeira.
           </Card>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {active.map((a) => (
               <AutomacaoCard
                 key={a.id}
@@ -130,7 +130,7 @@ export default function Automacoes() {
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
             Inativas ({inactive.length})
           </h2>
-          <div className="grid gap-3 sm:grid-cols-2 opacity-70">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 opacity-70">
             {inactive.map((a) => (
               <AutomacaoCard
                 key={a.id}

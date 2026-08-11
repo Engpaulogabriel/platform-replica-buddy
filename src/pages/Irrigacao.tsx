@@ -302,7 +302,7 @@ function PivoDetalhe() {
         </div>
 
         {/* PAINEL DIREITO */}
-        <aside className="w-full lg:w-[340px] xl:w-[360px] shrink-0 rounded-xl border border-slate-800 bg-slate-900 p-2.5 space-y-2 overflow-hidden flex flex-col">
+        <aside className="w-full lg:w-[340px] xl:w-[360px] shrink-0 rounded-xl border border-slate-800 bg-slate-900 p-2.5 space-y-2 overflow-hidden lg:overflow-y-auto lg:min-h-0 flex flex-col">
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-sm font-bold tracking-tight text-white truncate">{pivo.nome}</h2>
