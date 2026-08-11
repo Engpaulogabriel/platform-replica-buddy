@@ -11,6 +11,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { notify } from "@/lib/notify";
 import { InemaCompliancePanel } from "@/components/inema/InemaCompliancePanel";
 import { InemaReport } from "@/components/inema/InemaReport";
+import { useEnvironmentalAgency } from "@/hooks/useEnvironmentalAgency";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
 import {
   TrendingUp, DollarSign, Droplets, Zap, AlertTriangle, FileText, Save, Download, Info, Settings, Truck, Lock,
@@ -41,6 +42,7 @@ export default function Produtividade() {
 
   const data = useProductivityData({ from, to });
   const inema = useInemaConfig();
+  const { agency } = useEnvironmentalAgency(inema.farmId ?? farmId); // órgão ambiental por estado
 
   // Módulo INEMA é opt-in por fazenda (farms.inema_enabled). A aba só aparece
   // quando ativado no Suporte Técnico → aba Fazenda.
@@ -113,10 +115,10 @@ export default function Produtividade() {
         <TabsList>
           <TabsTrigger value="roi"><DollarSign className="w-4 h-4 mr-1.5" />ROI & Energia</TabsTrigger>
           {inemaEnabled && (
-            <TabsTrigger value="inema"><FileText className="w-4 h-4 mr-1.5" />Conformidade INEMA</TabsTrigger>
+            <TabsTrigger value="inema"><FileText className="w-4 h-4 mr-1.5" />Conformidade {agency.agency_acronym}</TabsTrigger>
           )}
           {inemaEnabled && (
-            <TabsTrigger value="inema_report"><FileText className="w-4 h-4 mr-1.5" />Relatório INEMA</TabsTrigger>
+            <TabsTrigger value="inema_report"><FileText className="w-4 h-4 mr-1.5" />Relatório {agency.agency_acronym}</TabsTrigger>
           )}
           <TabsTrigger value="config"><Settings className="w-4 h-4 mr-1.5" />Configurações {!isPlatformAdmin && <Lock className="w-3 h-3 ml-1" />}</TabsTrigger>
         </TabsList>

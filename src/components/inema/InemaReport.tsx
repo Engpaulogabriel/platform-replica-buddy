@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { FileText, Printer, AlertTriangle, Droplets, MapPin, RefreshCw } from "lucide-react";
+import { useEnvironmentalAgency } from "@/hooks/useEnvironmentalAgency";
 
 interface Well { id: string; well_name: string; latitude: string | null; longitude: string | null; flow_rate_m3_day: number; datum: string | null }
 interface Condition { id: string; condition_number: number | null; description: string; deadline_days: number | null; is_critical: boolean; status: string }
@@ -54,6 +55,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
   const [hoursByEq, setHoursByEq] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<string>("month"); // month | 7 | 30
+  const { agency } = useEnvironmentalAgency(farmId); // órgão ambiental por estado
 
   const range = useMemo(() => {
     const to = new Date();
@@ -118,7 +120,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-2 print:hidden">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <FileText className="w-4 h-4 text-primary" /> Relatório para protocolo no SEI BAHIA
+          <FileText className="w-4 h-4 text-primary" /> Relatório {agency.agency_acronym} — {agency.agency_name} ({agency.state_code})
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
@@ -232,7 +234,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
           <Card className="border-border">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center justify-between gap-2 flex-wrap">
-                <span className="flex items-center gap-2"><Droplets className="w-4 h-4 text-primary" /> Relatório de monitoramento</span>
+                <span className="flex items-center gap-2"><Droplets className="w-4 h-4 text-primary" /> Relatório de Monitoramento — {agency.agency_name} ({agency.agency_acronym})</span>
                 <div className="print:hidden">
                   <Select value={period} onValueChange={setPeriod}>
                     <SelectTrigger className="h-8 w-[170px] text-xs"><SelectValue /></SelectTrigger>
