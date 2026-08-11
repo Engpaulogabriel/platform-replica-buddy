@@ -196,9 +196,9 @@ export default function PlatformReports({ isAdmin: _isAdmin }: { isAdmin: boolea
             <CardTitle className="text-base flex items-center gap-2">
               <FileText className="w-4 h-4" /> Relatório consolidado
             </CardTitle>
-            <div className="flex gap-2 flex-wrap">
+            <div className="flex gap-2 flex-wrap w-full sm:w-auto">
               <Select value={periodDays} onValueChange={setPeriodDays}>
-                <SelectTrigger className="w-[180px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="w-full sm:w-[180px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="7">Últimos 7 dias</SelectItem>
                   <SelectItem value="30">Últimos 30 dias</SelectItem>
@@ -238,6 +238,7 @@ export default function PlatformReports({ isAdmin: _isAdmin }: { isAdmin: boolea
           </div>
 
           {/* Tabela */}
+          <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
           <div className="overflow-x-auto border rounded-md">
             <Table>
               <TableHeader>

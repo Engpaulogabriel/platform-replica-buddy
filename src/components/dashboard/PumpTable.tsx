@@ -387,7 +387,7 @@ export function PumpTable({ pumps, onToggle, onReset, onModeChange, onRefreshSta
 
       {/* Dialog de programações do poço */}
       <Dialog open={!!selectedPump} onOpenChange={(open) => !open && setSelectedPump(null)}>
-        <DialogContent className="sm:max-w-lg p-0 overflow-hidden">
+        <DialogContent className="max-w-[95vw] sm:max-w-lg p-0 overflow-hidden">
           {selectedPump && (() => {
             const total = pumpSchedules.length;
             const activeCount = pumpSchedules.filter((s) => s.active).length;

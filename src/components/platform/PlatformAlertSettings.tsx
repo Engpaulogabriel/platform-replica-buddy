@@ -189,10 +189,10 @@ export default function PlatformAlertSettings({ isAdmin: _isAdmin }: { isAdmin: 
                     </label>
                   ))}
                 </div>
-                <div className={`mt-2 flex items-center gap-2 ${master ? "" : "opacity-50 pointer-events-none"}`}>
+                <div className={`mt-2 flex flex-col sm:flex-row sm:items-center gap-2 ${master ? "" : "opacity-50 pointer-events-none"}`}>
                   <span className="text-xs text-muted-foreground">Quem recebe:</span>
                   <Select value={s.alert_recipients} onValueChange={(v) => update(f.id, { alert_recipients: v })}>
-                    <SelectTrigger className="h-8 w-[160px] text-xs"><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="h-8 w-full sm:w-[160px] text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="admin">Só admin</SelectItem>
                       <SelectItem value="operators">Operadores</SelectItem>

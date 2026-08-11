@@ -60,24 +60,24 @@ export function PeriodPicker({ farmId, value, onChange, pumpFilter, onPumpChange
   };
 
   return (
-    <div className="flex flex-wrap items-end gap-3 p-3 rounded-lg border border-border bg-card/60">
+    <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-3 p-3 rounded-lg border border-border bg-card/60">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <CalendarRange className="w-4 h-4 text-primary" />
         Período
       </div>
-      <div>
+      <div className="w-full sm:w-auto">
         <label className="text-[10px] uppercase text-muted-foreground block">Início</label>
         <Input type="date" value={value.fromIso} max={value.toIso}
           onChange={(e) => onChange({ ...value, fromIso: e.target.value })}
-          className="bg-secondary border-border w-40" />
+          className="bg-secondary border-border w-full sm:w-40" />
       </div>
-      <div>
+      <div className="w-full sm:w-auto">
         <label className="text-[10px] uppercase text-muted-foreground block">Fim</label>
         <Input type="date" value={value.toIso} min={value.fromIso} max={todayIso()}
           onChange={(e) => onChange({ ...value, toIso: e.target.value })}
-          className="bg-secondary border-border w-40" />
+          className="bg-secondary border-border w-full sm:w-40" />
       </div>
-      <div className="flex gap-1">
+      <div className="flex flex-wrap gap-1 w-full sm:w-auto">
         <Button variant="outline" size="sm" className="h-9" onClick={() => setPreset(7)}>7d</Button>
         <Button variant="outline" size="sm" className="h-9" onClick={() => setPreset(30)}>30d</Button>
         <Button variant="outline" size="sm" className="h-9" onClick={() => setPreset(90)}>90d</Button>
@@ -87,7 +87,7 @@ export function PeriodPicker({ farmId, value, onChange, pumpFilter, onPumpChange
         </Button>
       </div>
       {pumps.length > 0 && (
-        <div className="min-w-[180px]">
+        <div className="w-full sm:min-w-[180px] sm:w-auto">
           <label className="text-[10px] uppercase text-muted-foreground block">Equipamento</label>
           <Select value={pumpFilter} onValueChange={onPumpChange}>
             <SelectTrigger className="bg-secondary border-border h-9"><SelectValue /></SelectTrigger>

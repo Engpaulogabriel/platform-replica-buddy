@@ -87,11 +87,11 @@ const Contato = () => {
                   className={`w-5 h-5 ${item.iconClass ?? "text-primary"}`}
                 />
               </div>
-              <div>
+              <div className="min-w-0">
                 <p className="text-xs text-muted-foreground font-medium">
                   {item.label}
                 </p>
-                <p className="text-sm font-semibold text-foreground">
+                <p className="text-sm font-semibold text-foreground break-words">
                   {item.value}
                 </p>
               </div>

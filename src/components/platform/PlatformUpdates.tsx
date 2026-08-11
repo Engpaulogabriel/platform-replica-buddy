@@ -436,12 +436,12 @@ export default function PlatformUpdates() {
 
       {/* Releases */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <CardTitle className="flex items-center gap-2">
             <Rocket className="w-5 h-5 text-primary" />
             Versões publicadas
           </CardTitle>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <Button variant="outline" size="sm" onClick={load}>
               <RefreshCw className="w-4 h-4 mr-1.5" />Atualizar
             </Button>
@@ -451,7 +451,7 @@ export default function PlatformUpdates() {
                   <Plus className="w-4 h-4 mr-1.5" />Nova release
                 </Button>
               </DialogTrigger>
-              <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
+              <DialogContent className="max-w-[95vw] sm:max-w-xl max-h-[90vh] overflow-y-auto">
                 <DialogHeader>
                   <DialogTitle>Publicar nova versão do agente</DialogTitle>
                   <DialogDescription>
@@ -583,6 +583,9 @@ export default function PlatformUpdates() {
               Nenhuma release publicada ainda. Crie a primeira após gerar o .exe no GitHub.
             </div>
           ) : (
+            <>
+            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
+            <div className="overflow-x-auto -mx-2 px-2">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -714,13 +717,15 @@ export default function PlatformUpdates() {
                 ))}
               </TableBody>
             </Table>
+            </div>
+            </>
           )}
         </CardContent>
       </Card>
 
       {/* Agents per farm */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <CardTitle className="flex items-center gap-2">
             <Download className="w-5 h-5 text-primary" />
             Versão instalada por fazenda
@@ -760,6 +765,9 @@ export default function PlatformUpdates() {
           {agents.length === 0 ? (
             <div className="text-sm text-muted-foreground py-6 text-center">Nenhuma fazenda encontrada.</div>
           ) : (
+            <>
+            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
+            <div className="overflow-x-auto -mx-2 px-2">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -813,7 +821,7 @@ export default function PlatformUpdates() {
                               handlePinVersion(a.farm_id, v === "__latest__" ? null : v)
                             }
                           >
-                            <SelectTrigger className="h-8 w-[180px] text-xs">
+                            <SelectTrigger className="h-8 w-full sm:w-[180px] text-xs">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -950,6 +958,8 @@ export default function PlatformUpdates() {
                 })}
               </TableBody>
             </Table>
+            </div>
+            </>
           )}
         </CardContent>
       </Card>

@@ -243,7 +243,7 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
                 ? `Economia em ${roi.diasOperacao} dias de operação`
                 : "Economia total estimada"}
             </div>
-            <div className="text-4xl font-black text-emerald-400 tabular-nums leading-none mt-1">
+            <div className="text-3xl sm:text-4xl font-black text-emerald-400 tabular-nums leading-none mt-1">
               {fmtBRL(roi.total)}
             </div>
             {isProjetado ? (

@@ -248,7 +248,8 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
               </div>
             </div>
 
-            <div className="overflow-x-auto">
+            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
+            <div className="overflow-x-auto -mx-2 px-2">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -333,9 +334,9 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
 
         {/* SECTION 4 - Histórico */}
         <Card className="bg-card border-border">
-          <CardHeader className="flex flex-row items-center justify-between gap-2">
+          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="text-base">Histórico Detalhado ({ymdToBR(fromDate)} → {ymdToBR(toDate)})</CardTitle>
-            <Button variant="outline" size="sm" onClick={exportCSV} className="gap-2">
+            <Button variant="outline" size="sm" onClick={exportCSV} className="gap-2 w-full sm:w-auto">
               <Download className="w-4 h-4" /> CSV
             </Button>
           </CardHeader>
@@ -344,7 +345,8 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
               Total no período: <strong className="text-foreground">{fmtM3(historyTotalM3)} m³</strong>
               {" · "}{historyRows.length} registros
             </div>
-            <div className="overflow-x-auto max-h-[500px]">
+            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
+            <div className="overflow-x-auto -mx-2 px-2 max-h-[500px]">
               <Table>
                 <TableHeader>
                   <TableRow>

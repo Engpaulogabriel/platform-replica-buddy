@@ -121,7 +121,8 @@ export function RoiHistoryPanel({ history }: Props) {
         </div>
 
         {/* Tabela mensal */}
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto -mx-2 px-2">
+          <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
           <Table>
             <TableHeader>
               <TableRow className="border-border">

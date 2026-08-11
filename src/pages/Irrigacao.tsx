@@ -92,7 +92,7 @@ function MiniPivo({ angulo }: { angulo: number }) {
 function PivoPainel() {
   const navigate = useNavigate();
   return (
-    <div className="min-h-[calc(100vh-4rem)] bg-slate-950 text-slate-100 p-6">
+    <div className="min-h-[calc(100vh-4rem)] bg-slate-950 text-slate-100 p-4 sm:p-6">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-white">Irrigação · Painel de Pivôs</h1>
         <p className="text-sm text-slate-400 mt-1">Clique em um pivô para visualizar controle e sensores em tempo real</p>
@@ -240,13 +240,13 @@ function PivoDetalhe() {
   const [aguaLigada, setAguaLigada] = useState(pivo.percentimetro_atual > 0);
 
   return (
-    <div className="h-[calc(100vh-4rem)] overflow-hidden bg-slate-950 text-slate-100 flex flex-col">
+    <div className="min-h-[calc(100vh-4rem)] lg:h-[calc(100vh-4rem)] lg:overflow-hidden bg-slate-950 text-slate-100 flex flex-col">
       <PivoHeader id={id} nome={pivo.nome} aba="controle" />
 
-      <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-2 p-2 overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-2 p-2 lg:overflow-hidden">
         {/* MAPA */}
         <div
-          className="relative flex-1 min-h-0 lg:max-w-[60%] rounded-xl overflow-hidden border border-slate-800"
+          className="relative flex-1 min-h-[300px] lg:min-h-0 lg:max-w-[60%] rounded-xl overflow-hidden border border-slate-800"
           style={{
             background:
               "radial-gradient(ellipse at center, #1a2e1a 0%, #0f1a0f 55%, #0a0f0a 100%)",

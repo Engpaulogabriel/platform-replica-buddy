@@ -125,7 +125,7 @@ export function AutomacaoFormDialog({ open, onOpenChange, equipments, onSubmit }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Nova Automação</DialogTitle>
         </DialogHeader>
@@ -140,7 +140,7 @@ export function AutomacaoFormDialog({ open, onOpenChange, equipments, onSubmit }
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Ação</Label>
               <Select value={action} onValueChange={(v) => setAction(v as AutomacaoAction)}>
@@ -181,9 +181,9 @@ export function AutomacaoFormDialog({ open, onOpenChange, equipments, onSubmit }
             <Label>Tipo de gatilho</Label>
             <Tabs value={triggerType} onValueChange={(v) => setTriggerType(v as TriggerType)}>
               <TabsList className="grid grid-cols-3 w-full">
-                <TabsTrigger value="time"><Clock className="w-3.5 h-3.5 mr-1" />Horário fixo</TabsTrigger>
-                <TabsTrigger value="condition"><ListChecks className="w-3.5 h-3.5 mr-1" />Condição</TabsTrigger>
-                <TabsTrigger value="delay"><Timer className="w-3.5 h-3.5 mr-1" />Daqui X min</TabsTrigger>
+                <TabsTrigger value="time" className="text-[11px] sm:text-sm px-1 sm:px-3"><Clock className="w-3.5 h-3.5 mr-1 shrink-0" />Horário fixo</TabsTrigger>
+                <TabsTrigger value="condition" className="text-[11px] sm:text-sm px-1 sm:px-3"><ListChecks className="w-3.5 h-3.5 mr-1 shrink-0" />Condição</TabsTrigger>
+                <TabsTrigger value="delay" className="text-[11px] sm:text-sm px-1 sm:px-3"><Timer className="w-3.5 h-3.5 mr-1 shrink-0" />Daqui X min</TabsTrigger>
               </TabsList>
 
               <TabsContent value="time" className="space-y-3 pt-3">

@@ -257,7 +257,8 @@ export default function PlatformDevices({ isAdmin }: Props) {
           </p>
         </CardHeader>
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
+          <p className="text-[10px] text-muted-foreground mb-1 sm:hidden px-3 pt-2">← deslize para ver todas as colunas →</p>
+          <div className="overflow-x-auto -mx-2 px-2">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -388,7 +389,8 @@ export default function PlatformDevices({ isAdmin }: Props) {
           </p>
         </CardHeader>
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
+          <p className="text-[10px] text-muted-foreground mb-1 sm:hidden px-3 pt-2">← deslize para ver todas as colunas →</p>
+          <div className="overflow-x-auto -mx-2 px-2">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -480,7 +482,7 @@ export default function PlatformDevices({ isAdmin }: Props) {
       </Card>
 
       <Dialog open={!!detail} onOpenChange={() => setDetail(null)}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-[95vw] sm:max-w-lg">
           <DialogHeader><DialogTitle>Detalhes do dispositivo</DialogTitle></DialogHeader>
           {detail && (
             <div className="space-y-2 text-sm">
@@ -508,14 +510,14 @@ export default function PlatformDevices({ isAdmin }: Props) {
       </Dialog>
 
       <Dialog open={!!historyFarm} onOpenChange={() => setHistoryFarm(null)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-[95vw] sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <History className="w-4 h-4" />
               Histórico de Segurança — {historyFarm?.farm_name}
             </DialogTitle>
           </DialogHeader>
-          <div className="max-h-[60vh] overflow-y-auto">
+          <div className="max-h-[60vh] overflow-y-auto overflow-x-auto">
             {farmHistory.length === 0 ? (
               <div className="text-sm text-muted-foreground py-6 text-center">
                 Nenhum evento de segurança registrado.

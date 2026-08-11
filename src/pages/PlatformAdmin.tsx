@@ -232,7 +232,8 @@ export default function PlatformAdmin() {
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
+          <p className="text-[10px] text-muted-foreground mb-1 sm:hidden px-3 pt-2">← deslize para ver todas as colunas →</p>
+          <div className="overflow-x-auto -mx-2 px-2">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -561,7 +562,7 @@ function CreateFarmDialog({ open, onClose, onCreated }: any) {
   if (created) {
     return (
       <Dialog open={open} onOpenChange={close}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-[95vw] sm:max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5 text-green-600" />
@@ -650,7 +651,7 @@ function CreateFarmDialog({ open, onClose, onCreated }: any) {
   // Tela 1: formulário
   return (
     <Dialog open={open} onOpenChange={close}>
-      <DialogContent>
+      <DialogContent className="max-w-[95vw] sm:max-w-lg">
         <DialogHeader><DialogTitle>Cadastrar nova fazenda</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div>
@@ -839,7 +840,7 @@ function EditFarmDialog({ farm, onClose, onSaved }: { farm: FarmRow | null; onCl
 
   return (
     <Dialog open={!!farm} onOpenChange={onClose}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-[95vw] sm:max-w-lg max-h-[90vh] overflow-y-auto">
 
         <DialogHeader><DialogTitle>Editar fazenda</DialogTitle></DialogHeader>
         <div className="space-y-3">
@@ -954,7 +955,7 @@ function FarmDetailDialog({ farm, detail, onClose }: any) {
   if (!farm) return null;
   return (
     <Dialog open={!!farm} onOpenChange={onClose}>
-      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-[95vw] sm:max-w-3xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{farm.name}</DialogTitle>
           <p className="text-xs text-muted-foreground">{farm.city ?? "—"}{farm.state ? "/" + farm.state : ""} · Plano {farm.plan.toUpperCase()}</p>
@@ -970,6 +971,7 @@ function FarmDetailDialog({ farm, detail, onClose }: any) {
               <TabsTrigger value="health" className="flex-1">Agente</TabsTrigger>
             </TabsList>
             <TabsContent value="equipments">
+              <div className="overflow-x-auto -mx-2 px-2">
               <Table>
                 <TableHeader><TableRow><TableHead>Nome</TableHead><TableHead>Tipo</TableHead><TableHead>HW ID</TableHead><TableHead>Última com.</TableHead></TableRow></TableHeader>
                 <TableBody>
@@ -983,8 +985,10 @@ function FarmDetailDialog({ farm, detail, onClose }: any) {
                   ))}
                 </TableBody>
               </Table>
+              </div>
             </TabsContent>
             <TabsContent value="users">
+              <div className="overflow-x-auto -mx-2 px-2">
               <Table>
                 <TableHeader><TableRow><TableHead>Nome</TableHead><TableHead>Email</TableHead><TableHead>Papel</TableHead></TableRow></TableHeader>
                 <TableBody>
@@ -997,6 +1001,7 @@ function FarmDetailDialog({ farm, detail, onClose }: any) {
                   ))}
                 </TableBody>
               </Table>
+              </div>
             </TabsContent>
             <TabsContent value="logs">
               <div className="space-y-1 text-xs font-mono max-h-96 overflow-y-auto">
@@ -1069,7 +1074,7 @@ function ProvisioningDialog({ farm, onClose }: { farm: { farm_id: string; name: 
 
   return (
     <Dialog open={!!farm} onOpenChange={(o) => !o && reset()}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-[95vw] sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FileJson className="w-5 h-5 text-emerald-500" />

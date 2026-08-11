@@ -241,7 +241,7 @@ function RuleFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-[95vw] sm:max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{editing ? "Editar regra" : "Nova regra de desligamento"}</DialogTitle>
         </DialogHeader>
@@ -252,7 +252,7 @@ function RuleFormDialog({
             <Input placeholder="Ex: Desligamento 17h Semear" value={name} onChange={(e) => setName(e.target.value)} />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Horário (BRT)</Label>
               <Input type="time" value={timeBrt} onChange={(e) => setTimeBrt(e.target.value)} />
@@ -301,7 +301,7 @@ function RuleFormDialog({
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Tentativas</Label>
               <Input type="number" min={1} max={10} value={maxRetries} onChange={(e) => setMaxRetries(Number(e.target.value))} />

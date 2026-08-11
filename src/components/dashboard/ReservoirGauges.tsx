@@ -121,10 +121,10 @@ export function ReservoirGauges({ reservoirs, onRefreshStatus }: ReservoirGauges
           reservoirs.length === 1
             ? "grid-cols-1"
             : reservoirs.length === 2
-              ? "grid-cols-2"
+              ? "grid-cols-1 sm:grid-cols-2"
               : reservoirs.length === 3
-                ? "grid-cols-2 sm:grid-cols-3"
-                : "grid-cols-2 sm:grid-cols-4"
+                ? "grid-cols-1 sm:grid-cols-3"
+                : "grid-cols-1 sm:grid-cols-4"
         }`}
       >
         {reservoirs.map((res) => {

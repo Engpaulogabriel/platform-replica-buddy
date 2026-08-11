@@ -187,19 +187,21 @@ export default function ConsumoReportTab({ farmId, fromDate, toDate, selectedPum
 
       <Card className="bg-card border-border">
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="text-base text-foreground">Detalhamento por Bomba</CardTitle>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={() => { exportDemandaCSV(demandDailyData, demandSummary); notifyReport.exported("CSV", "Consumo"); }}>
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+              <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1 w-full sm:w-auto" onClick={() => { exportDemandaCSV(demandDailyData, demandSummary); notifyReport.exported("CSV", "Consumo"); }}>
                 <Download className="w-3.5 h-3.5" /> CSV
               </Button>
-              <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={() => { exportDemandaPDF(demandDailyData, demandSummary, farmHeader); notifyReport.exported("PDF", "Consumo"); }}>
+              <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1 w-full sm:w-auto" onClick={() => { exportDemandaPDF(demandDailyData, demandSummary, farmHeader); notifyReport.exported("PDF", "Consumo"); }}>
                 <FileText className="w-3.5 h-3.5" /> PDF
               </Button>
             </div>
           </div>
         </CardHeader>
         <CardContent className="p-0">
+          <p className="text-[10px] text-muted-foreground mb-1 px-4 sm:hidden">← deslize para ver todas as colunas →</p>
+          <div className="overflow-x-auto -mx-2 px-2">
           <Table>
             <TableHeader>
               <TableRow className="border-border hover:bg-secondary/50">
@@ -236,6 +238,7 @@ export default function ConsumoReportTab({ farmId, fromDate, toDate, selectedPum
               )}
             </TableBody>
           </Table>
+          </div>
         </CardContent>
       </Card>
     </div>

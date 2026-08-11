@@ -736,7 +736,9 @@ function FarmPanel({ diagram }: { diagram: FarmDiagram }) {
       <Card className="relative overflow-hidden border-border bg-card p-4">
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-info/[0.03] via-transparent to-primary/[0.03]" />
 
-        <div ref={gridRef} className="relative grid gap-4" style={{ gridTemplateColumns: "180px minmax(0,1fr) 240px 200px" }}>
+        <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver o diagrama completo →</p>
+        <div className="overflow-x-auto -mx-4 px-4">
+        <div ref={gridRef} className="relative grid gap-4 min-w-[900px]" style={{ gridTemplateColumns: "180px minmax(0,1fr) 240px 200px" }}>
           {/* === Overlay de conexões === */}
           {edges.length > 0 && (
             <svg
@@ -960,6 +962,7 @@ function FarmPanel({ diagram }: { diagram: FarmDiagram }) {
               <div className="text-center text-[10px] italic text-muted-foreground">Consumo não monitorado</div>
             </div>
           </div>
+        </div>
         </div>
       </Card>
     </div>

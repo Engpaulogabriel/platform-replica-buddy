@@ -59,13 +59,13 @@ const Integracoes = () => {
         <TabsContent value="integracoes" className="space-y-6 mt-6">
           {/* WhatsApp */}
           <Card className="border-2 border-[#25D366]/30 bg-gradient-to-br from-[#25D366]/5 to-transparent">
-            <CardHeader className="flex flex-row items-start justify-between gap-4">
-              <div className="flex items-start gap-4">
-                <div className="rounded-2xl bg-[#25D366]/15 p-3 border border-[#25D366]/30">
+            <CardHeader className="flex flex-col sm:flex-row items-start sm:justify-between gap-4">
+              <div className="flex items-start gap-4 min-w-0">
+                <div className="rounded-2xl bg-[#25D366]/15 p-3 border border-[#25D366]/30 shrink-0">
                   <MessageCircle className="w-8 h-8 text-[#25D366]" />
                 </div>
-                <div>
-                  <CardTitle className="flex items-center gap-2">
+                <div className="min-w-0">
+                  <CardTitle className="flex flex-wrap items-center gap-2">
                     WhatsApp — Assistente Renov
                     {connected ? (
                       <Badge className="bg-[#25D366]/15 text-[#1ea952] border border-[#25D366]/40">
@@ -80,7 +80,7 @@ const Integracoes = () => {
                   </CardDescription>
                 </div>
               </div>
-              <Button onClick={() => setOpen(true)} disabled={!farmId}>
+              <Button onClick={() => setOpen(true)} disabled={!farmId} className="w-full sm:w-auto shrink-0">
                 <Settings2 className="w-4 h-4 mr-2" /> Configurar
               </Button>
             </CardHeader>

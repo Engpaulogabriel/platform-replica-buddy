@@ -202,9 +202,9 @@ export default function PlatformRemoteControl({ isAdmin }: { isAdmin: boolean })
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <CardTitle className="text-base flex items-center gap-2"><Power className="w-4 h-4" />Controle remoto</CardTitle>
-            <div className="flex gap-2">
+            <div className="flex gap-2 w-full sm:w-auto">
               <Select value={farmId} onValueChange={setFarmId}>
-                <SelectTrigger className="w-[260px]"><SelectValue placeholder="Selecione a fazenda" /></SelectTrigger>
+                <SelectTrigger className="w-full sm:w-[260px]"><SelectValue placeholder="Selecione a fazenda" /></SelectTrigger>
                 <SelectContent>
                   {farms.map(f => <SelectItem key={f.farm_id} value={f.farm_id}>{f.name}</SelectItem>)}
                 </SelectContent>

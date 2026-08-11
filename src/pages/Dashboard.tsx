@@ -1138,7 +1138,7 @@ const Dashboard = () => {
 
       {/* Layout Config Dialog */}
       <Dialog open={configOpen} onOpenChange={setConfigOpen}>
-        <DialogContent className="sm:max-w-md max-h-[85vh] flex flex-col p-0">
+        <DialogContent className="max-w-[95vw] sm:max-w-md max-h-[85vh] flex flex-col p-0">
           <DialogHeader className="px-6 pt-6 pb-2 shrink-0">
             <DialogTitle className="flex items-center gap-2 text-foreground">
               <Settings2 className="w-5 h-5 text-primary" />

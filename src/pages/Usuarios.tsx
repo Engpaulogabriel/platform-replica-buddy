@@ -286,6 +286,8 @@ const Usuarios = () => {
 
       <Card className="bg-card border-border">
         <CardContent className="p-0">
+          <p className="text-[10px] text-muted-foreground mb-1 px-2 pt-2 sm:hidden">← deslize para ver todas as colunas →</p>
+          <div className="overflow-x-auto -mx-2 px-2">
           <Table>
             <TableHeader>
               <TableRow className="border-border hover:bg-secondary/50">
@@ -354,12 +356,13 @@ const Usuarios = () => {
               )}
             </TableBody>
           </Table>
+          </div>
         </CardContent>
       </Card>
 
       {/* Edit dialog */}
       <Dialog open={!!editTarget} onOpenChange={(o) => !o && setEditTarget(null)}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-w-[95vw] sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Pencil className="w-5 h-5 text-primary" /> Editar Usuário
@@ -444,7 +447,7 @@ const Usuarios = () => {
 
       {/* New user dialog */}
       <Dialog open={newOpen} onOpenChange={setNewOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-w-[95vw] sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Plus className="w-5 h-5 text-primary" /> Novo Usuário

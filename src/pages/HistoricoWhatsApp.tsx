@@ -430,7 +430,7 @@ export default function HistoricoWhatsApp() {
             Trilha de auditoria imutável. Mensagens armazenadas por 5 anos conforme boas práticas de auditoria.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Sheet>
             <SheetTrigger asChild>
               <Button variant="outline" size="sm" className="md:hidden">

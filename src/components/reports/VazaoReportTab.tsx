@@ -306,16 +306,16 @@ export default function VazaoReportTab({ farmId, fromDate, toDate }: VazaoReport
   return (
     <div className="space-y-4">
       {equips.length > 1 && (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <span className="text-xs text-muted-foreground">Equipamento:</span>
           <Select value={selectedEquip} onValueChange={setSelectedEquip}>
-            <SelectTrigger className="h-8 w-56 bg-secondary border-border text-xs"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-8 w-full sm:w-56 bg-secondary border-border text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Todos</SelectItem>
               {equips.map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
             </SelectContent>
           </Select>
-          <span className="text-xs text-muted-foreground ml-auto">
+          <span className="text-xs text-muted-foreground sm:ml-auto">
             Total no período: <span className="font-bold text-foreground">{fmt(totalPeriodo)} m³</span>
           </span>
         </div>
@@ -405,6 +405,8 @@ export default function VazaoReportTab({ farmId, fromDate, toDate }: VazaoReport
           <CardTitle className="text-base text-foreground">Histórico Diário</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
+          <p className="text-[10px] text-muted-foreground mb-1 px-4 sm:hidden">← deslize para ver todas as colunas →</p>
+          <div className="overflow-x-auto -mx-2 px-2">
           <Table>
             <TableHeader>
               <TableRow className="border-border hover:bg-secondary/50">
@@ -438,6 +440,7 @@ export default function VazaoReportTab({ farmId, fromDate, toDate }: VazaoReport
               )}
             </TableBody>
           </Table>
+          </div>
         </CardContent>
       </Card>
     </div>

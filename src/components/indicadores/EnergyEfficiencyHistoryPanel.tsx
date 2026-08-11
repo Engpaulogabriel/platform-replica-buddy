@@ -236,7 +236,7 @@ export function EnergyEfficiencyHistoryPanel({ farmId, range: rangeProp, onRange
           {quickBtn(60, "60d")}
           {quickBtn(90, "90d")}
         </div>
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
           <label className="text-muted-foreground">Início:</label>
           <input
             type="date"
@@ -273,7 +273,8 @@ export function EnergyEfficiencyHistoryPanel({ farmId, range: rangeProp, onRange
       )}
 
       {hasData && (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto -mx-2 px-2">
+          <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
           <table className="w-full text-sm">
             <thead className="bg-muted/40 text-xs uppercase text-muted-foreground">
               <tr>

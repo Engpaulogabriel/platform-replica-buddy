@@ -103,7 +103,7 @@ export default function HorimetroReportTab({ farmId, fromDate, toDate, selectedP
     <div className="space-y-4">
       <Card className="bg-card border-border">
         <CardHeader className="pb-2">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="text-base text-foreground">Horas por dia (período selecionado)</CardTitle>
             <p className="text-[11px] text-muted-foreground">
               {horimetro.loading
@@ -185,13 +185,13 @@ export default function HorimetroReportTab({ farmId, fromDate, toDate, selectedP
         </CardContent>
       </Card>
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h3 className="text-base font-semibold text-foreground">Detalhamento por Bomba (período selecionado)</h3>
-        <div className="flex gap-2">
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
           <Button
             variant="outline"
             size="sm"
-            className="border-border text-muted-foreground gap-1"
+            className="border-border text-muted-foreground gap-1 w-full sm:w-auto"
             disabled={filteredHorimetro.length === 0}
             onClick={() => {
               exportHorimetroCSV(filteredHorimetro);
@@ -203,7 +203,7 @@ export default function HorimetroReportTab({ farmId, fromDate, toDate, selectedP
           <Button
             variant="outline"
             size="sm"
-            className="border-border text-muted-foreground gap-1"
+            className="border-border text-muted-foreground gap-1 w-full sm:w-auto"
             disabled={filteredHorimetro.length === 0}
             onClick={() => {
               exportHorimetroPDF(filteredHorimetro, farmHeader);
@@ -260,24 +260,26 @@ export default function HorimetroReportTab({ farmId, fromDate, toDate, selectedP
                     Sem registros no período selecionado.
                   </div>
                 ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow className="border-border hover:bg-secondary/50">
-                        <TableHead className="text-muted-foreground">Dia</TableHead>
-                        <TableHead className="text-muted-foreground text-right">Tempo Ligada</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {pump.days.map((d, i) => (
-                        <TableRow key={i} className="border-border hover:bg-secondary/50">
-                          <TableCell className="text-foreground text-sm">{d.day}</TableCell>
-                          <TableCell className="text-foreground text-sm font-medium text-right">
-                            {formatHM(d.hours)}
-                          </TableCell>
+                  <div className="overflow-x-auto -mx-2 px-2">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-border hover:bg-secondary/50">
+                          <TableHead className="text-muted-foreground">Dia</TableHead>
+                          <TableHead className="text-muted-foreground text-right">Tempo Ligada</TableHead>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                      </TableHeader>
+                      <TableBody>
+                        {pump.days.map((d, i) => (
+                          <TableRow key={i} className="border-border hover:bg-secondary/50">
+                            <TableCell className="text-foreground text-sm">{d.day}</TableCell>
+                            <TableCell className="text-foreground text-sm font-medium text-right">
+                              {formatHM(d.hours)}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
                 )}
                 <div className="px-4 py-2 border-t border-border bg-secondary/30">
                   <div className="flex items-center justify-between text-xs">
