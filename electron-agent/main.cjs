@@ -7821,7 +7821,9 @@ async function handleSerialSniff(cmd, startedAt) {
     return;
   }
   const p = cmd.payload || {};
-  const durationMs = Math.max(1_000, Math.min(30_000, Number(p.duration_ms) || 10_000));
+  // v3.25.60: teto elevado 30s → 60s (captura passiva, não pausa o polling). O Log
+  // ao Vivo do Terminal Serial reenfileira chunks de 60s → menos "furos" entre eles.
+  const durationMs = Math.max(1_000, Math.min(60_000, Number(p.duration_ms) || 10_000));
   serialSniffBuf = { frames: [], startedAt: Date.now() };
   pushLog("info", "remote", `[SERIAL-SNIFF] captura passiva por ${durationMs}ms (polling segue normal)`);
   const endAt = Date.now() + durationMs;

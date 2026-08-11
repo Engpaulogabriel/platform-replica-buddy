@@ -39,10 +39,11 @@ const QUICK = ["PING", "STATUS", "RESET", "RESET_B", "REP:R3:PING", "REP:R3:STAT
 const DANGEROUS = /(^|:)RESET|CFG:FACTORY_RESET/i;
 const MAX_LOG = 300;
 const MAX_TIMEOUT_MS = 30_000;
-// Log ao vivo: reenfileira chunks de sniff (o agente limita cada sniff a 30s) até
-// o usuário parar ou atingir o teto de 10 min de segurança.
+// Log ao vivo: reenfileira chunks de sniff de 60s (teto do agente, v3.25.60) até
+// o usuário parar ou atingir o teto de 10 min de segurança. Agentes antigos
+// (clamp 30s) reduzem o chunk para 30s automaticamente — degrada sem quebrar.
 const LIVE_MAX_MS = 10 * 60_000;
-const SNIFF_CHUNK_MS = 30_000;
+const SNIFF_CHUNK_MS = 60_000;
 
 function fmtElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -263,7 +264,7 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
     }
   };
 
-  // ▶ Log ao Vivo — captura CONTÍNUA. O agente limita cada serial_sniff a 30s, então
+  // ▶ Log ao Vivo — captura CONTÍNUA. O agente limita cada serial_sniff a 60s, então
   // reenfileiramos chunks em sequência até o usuário parar (⏹) ou atingir 10 min.
   const stopLive = () => { liveStopRef.current = true; };
 
