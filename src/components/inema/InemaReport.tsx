@@ -17,7 +17,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FileText, Printer, AlertTriangle, Droplets, MapPin, RefreshCw } from "lucide-react";
 import { useEnvironmentalAgency } from "@/hooks/useEnvironmentalAgency";
-import { InemaCompliancePanel } from "@/components/inema/InemaCompliancePanel";
 
 interface Well { id: string; well_name: string; latitude: string | null; longitude: string | null; flow_rate_m3_day: number; datum: string | null }
 interface Condition { id: string; condition_number: number | null; description: string; deadline_days: number | null; is_critical: boolean; status: string }
@@ -115,6 +114,26 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
   const totalCaptured = monitoring.reduce((s, m) => s + m.volume, 0);
   const authorizedPeriod = authorizedPerDay * range.days;
   const compliancePct = authorizedPeriod > 0 ? (totalCaptured / authorizedPeriod) * 100 : 0;
+
+  // Vazão autorizada por Nº de poço (das water_permits). Match best-effort pelo
+  // número no nome do poço/equipamento; se o mesmo nº está em várias outorgas,
+  // usa a MAIOR vazão autorizada.
+  const authByPocoNumber = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const p of permits) for (const w of p.wells) {
+      const n = parseInt(String(w.well_name).replace(/\D+/g, ""), 10);
+      if (!Number.isFinite(n)) continue;
+      m.set(n, Math.max(m.get(n) ?? 0, Number(w.flow_rate_m3_day || 0)));
+    }
+    return m;
+  }, [permits]);
+  const perPoco = useMemo(() => monitoring.map((mo) => {
+    const n = parseInt(String(mo.name).replace(/\D+/g, ""), 10);
+    const authDaily = Number.isFinite(n) ? (authByPocoNumber.get(n) ?? null) : null;
+    const authPeriod = authDaily != null ? authDaily * range.days : null;
+    const pct = authPeriod && authPeriod > 0 ? (mo.volume / authPeriod) * 100 : null;
+    return { ...mo, authDaily, authPeriod, pct };
+  }), [monitoring, authByPocoNumber, range.days]);
 
   // Portaria principal = outorga vigente mais recente (fallback: a de validade mais longa).
   const mainPortaria = useMemo(() => {
@@ -231,17 +250,21 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
                   <div>
                     <div className="text-xs font-semibold text-muted-foreground mt-2 mb-1">Condicionantes</div>
                     <ol className="space-y-1">
-                      {p.conditions.map((c) => (
-                        <li key={c.id} className={`text-xs flex items-start gap-2 rounded px-2 py-1 ${c.is_critical ? "bg-destructive/5 border border-destructive/30" : "bg-muted/40"}`}>
+                      {p.conditions.map((c) => {
+                        // "Crítica" só faz sentido enquanto PENDENTE — cumprida não é mais risco.
+                        const showCritical = c.is_critical && c.status !== "cumprida";
+                        return (
+                        <li key={c.id} className={`text-xs flex items-start gap-2 rounded px-2 py-1 ${showCritical ? "bg-destructive/5 border border-destructive/30" : "bg-muted/40"}`}>
                           <span className="font-bold shrink-0">{c.condition_number ?? "•"}.</span>
                           <span className="flex-1">
-                            {c.is_critical && <span className="text-destructive font-bold">CRÍTICO — </span>}
+                            {showCritical && <span className="text-destructive font-bold">CRÍTICO — </span>}
                             {c.description}
-                            {c.deadline_days ? <span className="text-muted-foreground"> (prazo {c.deadline_days} dias)</span> : null}
+                            {c.deadline_days && c.status !== "cumprida" ? <span className="text-muted-foreground"> (prazo {c.deadline_days} dias)</span> : null}
                           </span>
                           <Badge variant="outline" className={`${condTone(c.status)} shrink-0`}>{c.status}</Badge>
                         </li>
-                      ))}
+                        );
+                      })}
                       {p.conditions.length === 0 && <li className="text-xs text-muted-foreground">Sem condicionantes.</li>}
                     </ol>
                   </div>
@@ -304,43 +327,65 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
           </Card>
           </TabsContent>
 
-          {/* ══ COMPLIANCE (captado vs autorizado) ══ */}
+          {/* ══ COMPLIANCE — comparativo simples autorizado vs captado (water_permits) ══ */}
           <TabsContent value="compliance" className="space-y-4 mt-4">
           <Card className="border-border">
             <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2"><Droplets className="w-4 h-4 text-primary" /> Compliance — captado vs autorizado</CardTitle>
+              <CardTitle className="text-base flex items-center gap-2"><Droplets className="w-4 h-4 text-primary" /> Autorizado vs captado — por poço</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
-              {/* Compliance: captado vs autorizado */}
+              <div className="text-xs text-muted-foreground">
+                Período: {fmtDate(range.from.toISOString())} a {fmtDate(range.to.toISOString())} ({range.days} dia(s))
+              </div>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Poço</TableHead>
+                      <TableHead className="text-right">Autorizado (m³/dia)</TableHead>
+                      <TableHead className="text-right">Autorizado no período (m³)</TableHead>
+                      <TableHead className="text-right">Captado (m³)</TableHead>
+                      <TableHead className="text-right">% do autorizado</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {perPoco.map((m) => (
+                      <TableRow key={m.id}>
+                        <TableCell className="font-medium">{m.name}</TableCell>
+                        <TableCell className="text-right">{m.authDaily != null ? fmtNum(m.authDaily) : "—"}</TableCell>
+                        <TableCell className="text-right">{m.authPeriod != null ? fmtNum(m.authPeriod) : "—"}</TableCell>
+                        <TableCell className="text-right">{fmtNum(m.volume)}</TableCell>
+                        <TableCell className={`text-right font-medium ${m.pct == null ? "text-muted-foreground" : m.pct >= 100 ? "text-destructive" : m.pct >= 80 ? "text-warning" : "text-primary"}`}>
+                          {m.pct != null ? `${fmtNum(m.pct, 1)}%` : "—"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {perPoco.length === 0 && <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground text-xs">Sem poços com telemetria.</TableCell></TableRow>}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Total da fazenda */}
               <div className="rounded-md border border-border p-3 space-y-2">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-muted-foreground">Vazão autorizada (soma das outorgas)</span>
+                  <span className="text-muted-foreground">Autorizado total (soma das outorgas)</span>
                   <span className="font-medium">{fmtNum(authorizedPerDay)} m³/dia · {fmtNum(authorizedPeriod)} m³ no período</span>
                 </div>
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-muted-foreground">Volume captado (estimado)</span>
-                  <span className="font-medium">{fmtNum(totalCaptured)} m³</span>
+                  <span className="text-muted-foreground">Captado total (estimado)</span>
+                  <span className="font-medium">{fmtNum(totalCaptured)} m³ · {fmtNum(compliancePct, 1)}% do autorizado</span>
                 </div>
                 <div className="h-2 rounded-full bg-secondary overflow-hidden">
                   <div className={`h-full rounded-full ${compliancePct >= 100 ? "bg-destructive" : compliancePct >= 80 ? "bg-warning" : "bg-primary"}`}
                        style={{ width: `${Math.min(100, compliancePct)}%` }} />
                 </div>
-                <div className="text-xs font-semibold flex items-center justify-between">
-                  <span>Compliance do período</span>
-                  <span className={compliancePct >= 100 ? "text-destructive" : compliancePct >= 80 ? "text-warning" : "text-primary"}>
-                    {fmtNum(compliancePct, 1)}% do autorizado
-                  </span>
-                </div>
               </div>
               <p className="text-[10px] text-muted-foreground leading-relaxed">
-                * Volume captado estimado por horas operadas × vazão nominal do poço (o sistema não historiza vazão real por dia).
-                Nível estático/dinâmico não é medido pela telemetria atual — informar manualmente no protocolo quando exigido.
-                Os nºs de poço das portarias não são vinculados 1:1 aos equipamentos físicos (numeração por portaria).
+                Captado estimado por horas operadas × vazão nominal (o sistema não historiza vazão real por dia).
+                Vazão autorizada casada por número do poço com as outorgas (water_permits).
               </p>
             </CardContent>
           </Card>
-          {/* Compliance diário por poço (risco de multa) — inema_permits */}
-          <InemaCompliancePanel farmId={farmId} />
           </TabsContent>
         </Tabs>
       )}
