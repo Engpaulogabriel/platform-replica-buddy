@@ -551,8 +551,123 @@ function resolveCompiledBridgePath() {
   return null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.25.61 — AUTO-COMPILAÇÃO da bridge (--onedir) no boot, sem AnyDesk.
+// Fazendas que atualizaram de versões antigas têm só o serial_bridge.exe --onefile
+// (depende de %TEMP%\_MEI e falha). Se a pasta onedir não existir, o agente
+// RECOMPILA sozinho com o Python da máquina. Best-effort: qualquer falha (sem
+// Python, sem internet, timeout) NÃO trava — cai no fallback do .exe antigo.
+function findPython() {
+  return new Promise((resolve) => {
+    const { execFile } = require("child_process");
+    const cands = process.platform === "win32"
+      ? [["py", ["-3"]], ["python", []], ["python3", []]]
+      : [["python3", []], ["python", []]];
+    let i = 0;
+    const tryNext = () => {
+      if (i >= cands.length) return resolve(null);
+      const [cmd, prefix] = cands[i++];
+      execFile(cmd, [...prefix, "--version"], { windowsHide: true, timeout: 8_000 }, (err) => {
+        if (!err) resolve({ cmd, prefix });
+        else tryNext();
+      });
+    };
+    tryNext();
+  });
+}
+function execAsync(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const { execFile } = require("child_process");
+    execFile(cmd, args, { windowsHide: true, ...opts }, (err, stdout, stderr) => {
+      if (err) { err.stdout = stdout; err.stderr = stderr; return reject(err); }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+async function checkCommand(cmd, args) {
+  try { await execAsync(cmd, args, { timeout: 20_000 }); return true; } catch (_) { return false; }
+}
+function downloadFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const https = require("https"); const http = require("http"); const fs = require("fs");
+    const doGet = (u, redirects) => {
+      const lib = u.startsWith("https:") ? https : http;
+      lib.get(u, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) {
+          res.resume(); return doGet(res.headers.location, redirects - 1);
+        }
+        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+        const f = fs.createWriteStream(dest);
+        res.pipe(f);
+        f.on("finish", () => f.close((e) => (e ? reject(e) : resolve())));
+        f.on("error", reject);
+      }).on("error", reject);
+    };
+    doGet(url, 5);
+  });
+}
+
+const BRIDGE_PY_URL = "https://raw.githubusercontent.com/Engpaulogabriel/platform-replica-buddy/main/electron-agent/app/serial_bridge_persistent.py";
+
+async function ensureBridgeOnedir() {
+  if (process.platform !== "win32") return;
+  const fs = require("fs");
+  const resourcesDir = process.resourcesPath || __dirname;
+  const onedirExe = path.join(resourcesDir, "serial_bridge", "serial_bridge.exe");
+  if (fs.existsSync(onedirExe)) return; // já tem onedir → nada a fazer
+
+  let py;
+  try { py = await findPython(); } catch (_) { py = null; }
+  if (!py) {
+    pushLog("warn", "bridge", "[BRIDGE-AUTOCOMPILE] Python não encontrado — mantém fallback do .exe antigo");
+    return;
+  }
+  const run = (extra, opts) => execAsync(py.cmd, [...py.prefix, ...extra], opts);
+
+  try {
+    // PyInstaller instalado?
+    if (!(await checkCommand(py.cmd, [...py.prefix, "-m", "PyInstaller", "--version"]))) {
+      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Instalando pyserial + pyinstaller...");
+      await run(["-m", "pip", "install", "--user", "pyserial", "pyinstaller"], { timeout: 120_000 });
+    }
+
+    // Fonte do .py: prefere o bundle local (se o install não o apagou); senão baixa do GitHub.
+    let pyFile = (typeof PYTHON_BRIDGE === "string" && PYTHON_BRIDGE && fs.existsSync(PYTHON_BRIDGE)) ? PYTHON_BRIDGE : null;
+    let downloaded = null;
+    if (!pyFile) {
+      downloaded = path.join(resourcesDir, "_bridge_build.py");
+      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Baixando fonte da bridge...");
+      await downloadFile(BRIDGE_PY_URL, downloaded);
+      pyFile = downloaded;
+    }
+
+    pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Compilando serial_bridge (--onedir)...");
+    await run(
+      ["-m", "PyInstaller", "--onedir", "--noconsole", "--name", "serial_bridge",
+       "--clean", "--distpath", resourcesDir, "--workpath", path.join(resourcesDir, "build"),
+       "--specpath", resourcesDir, pyFile],
+      { timeout: 180_000, cwd: resourcesDir },
+    );
+
+    // limpa resíduos (build/, .spec, .py baixado)
+    try { fs.rmSync(path.join(resourcesDir, "build"), { recursive: true, force: true }); } catch (_) {}
+    try { fs.unlinkSync(path.join(resourcesDir, "serial_bridge.spec")); } catch (_) {}
+    if (downloaded) { try { fs.unlinkSync(downloaded); } catch (_) {} }
+
+    if (fs.existsSync(onedirExe)) {
+      COMPILED_BRIDGE = onedirExe; // re-resolve para o boot atual usar a bridge nova
+      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] ✅ Compilação concluída — usando serial_bridge/ (--onedir)");
+    } else {
+      pushLog("error", "bridge", "[BRIDGE-AUTOCOMPILE] ❌ Falha na compilação — usando fallback do .exe antigo");
+    }
+  } catch (e) {
+    pushLog("error", "bridge", `[BRIDGE-AUTOCOMPILE] erro: ${(e && e.message) || e} — usando fallback do .exe antigo`);
+    try { fs.rmSync(path.join(resourcesDir, "build"), { recursive: true, force: true }); } catch (_) {}
+  }
+}
+
 const PYTHON_BRIDGE = resolvePythonBridgePath();
-const COMPILED_BRIDGE = resolveCompiledBridgePath();
+let COMPILED_BRIDGE = resolveCompiledBridgePath();
 const AGENT_VERSION = require("./package.json").version;
 const LOG_RETENTION_DAYS = 7;
 const LOG_FILE_MAX_BYTES = 50 * 1024 * 1024; // 50MB por arquivo
@@ -8755,6 +8870,12 @@ async function startAgent(cfg) {
     // internet as bombas operam imediatamente. A nuvem (login + anti-clone + agent_config)
     // roda DEPOIS, best-effort. Se a porta remota (agent_config) diferir do cache, o
     // applyAgentConfig(initial:false) mais abaixo reabre; e o hot-reload (60s) cobre o resto.
+    // v3.25.61: garante a bridge --onedir (auto-compila se a pasta não existir).
+    // Best-effort e com teto de tempo próprio — NUNCA trava o boot.
+    startupStep = "garantir bridge onedir (auto-compile)";
+    try { await ensureBridgeOnedir(); }
+    catch (e) { pushLog("warn", "bridge", `[BRIDGE-AUTOCOMPILE] exceção ignorada: ${(e && e.message) || e}`); }
+
     pushLog("info", "system", `[COM-FIRST] Abrindo bridge serial em ${comPort} ANTES da nuvem...`);
     try {
       startupStep = `abrir bridge serial (COM-first) em ${comPort}`;
