@@ -1,5 +1,11 @@
 project_id = "vabguxllyguztneumahq"
 
+# PDF INEMA gerado no servidor (independe do deploy do frontend/Lovable).
+# verify_jwt=false no gateway; a própria função valida o Bearer do usuário e
+# aplica RLS com esse token.
+[functions.generate-inema-pdf]
+verify_jwt = false
+
 [functions.cleanup-agent-logs]
 verify_jwt = false
 
