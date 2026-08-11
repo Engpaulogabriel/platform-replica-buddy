@@ -432,7 +432,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
           <TabsContent value="compliance" className="space-y-4 mt-4">
           <Card className="border-border">
             <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2"><Droplets className="w-4 h-4 text-primary" /> Autorizado vs captado — por poço</CardTitle>
+              <CardTitle className="text-base flex items-center gap-2"><Droplets className="w-4 h-4 text-primary" /> Compliance — Captação vs Autorizado</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <div className="text-xs text-muted-foreground">
@@ -453,7 +453,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
                     {perPoco.map((m) => (
                       <TableRow key={m.id}>
                         <TableCell className="font-medium">{m.name}</TableCell>
-                        <TableCell className="text-right">{m.authDaily != null ? fmtNum(m.authDaily) : "—"}</TableCell>
+                        <TableCell className="text-right">{m.authDaily != null ? fmtNum(m.authDaily) : <span className="text-muted-foreground text-xs">Sem vínculo</span>}</TableCell>
                         <TableCell className="text-right">{m.authPeriod != null ? fmtNum(m.authPeriod) : "—"}</TableCell>
                         <TableCell className="text-right">{fmtNum(m.volume)}</TableCell>
                         <TableCell className={`text-right font-medium ${m.pct == null ? "text-muted-foreground" : m.pct >= 100 ? "text-destructive" : m.pct >= 80 ? "text-warning" : "text-primary"}`}>
