@@ -69,6 +69,25 @@ export default function OutorgaWellLinks() {
     [wells],
   );
 
+  // Número do poço a partir do nome ("Poço 7"→"7"; "POÇO 07 R1"→"7").
+  const pocoNum = (s: string): string | null => {
+    const m = String(s).match(/po[çc]o\s*0*([0-9]+)/i);
+    return m ? m[1] : null;
+  };
+  // Auto-vínculo: para cada poço sem vínculo, casa por número; 1 match → vincula.
+  const autoLink = async () => {
+    let linked = 0, skipped = 0;
+    for (const w of wells) {
+      if (w.equipment_id) continue;
+      const wn = pocoNum(w.well_name);
+      if (!wn) { skipped++; continue; }
+      const matches = equips.filter((e) => pocoNum(e.name) === wn);
+      if (matches.length === 1) { await link(w.id, matches[0].id); linked++; }
+      else skipped++;
+    }
+    notify.ok("Vínculos", `${linked} vinculado(s) automaticamente · ${skipped} sem match único (manual).`);
+  };
+
   return (
     <Card className="bg-card border-border">
       <CardHeader>
@@ -79,6 +98,9 @@ export default function OutorgaWellLinks() {
               <SelectTrigger className="h-8 w-[180px] text-xs"><SelectValue placeholder="Fazenda" /></SelectTrigger>
               <SelectContent>{farms.map((f) => <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>)}</SelectContent>
             </Select>
+            <button type="button" className="text-xs text-primary flex items-center gap-1 font-medium" onClick={() => void autoLink()} disabled={loading || wells.length === 0}>
+              <Link2 className="w-3.5 h-3.5" /> Vincular automaticamente
+            </button>
             <button type="button" className="text-xs text-muted-foreground flex items-center gap-1" onClick={() => void load()} disabled={loading}>
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} /> Atualizar
             </button>

@@ -118,9 +118,15 @@ Deno.serve(async (req) => {
       let acted: any[] = [];
       if (step.attempt) acted = await commandShutdown(supabase, a, onPumps, step);
 
-      // AVISO 2 (verificação final) — só se ainda há bomba ligada.
+      // Passo final: AVISO CONSOLIDADO (item 5) — SEMPRE (sucesso ou falha).
       let alert2Sent = false;
-      if (step.final && onPumps.length > 0) alert2Sent = await sendAlert(supabase, farmName, onPumps, 2, maxRetries);
+      if (step.final) {
+        const scope = await fetchScopePumps(supabase, a);
+        const total = scope.length;
+        const off = Math.max(0, total - onPumps.length);
+        await sendConsolidated(supabase, a, farmName, total, off, onPumps);
+        alert2Sent = true;
+      }
 
       // persiste estado do run
       doneSet.add(step.key);
@@ -171,6 +177,60 @@ async function fetchOnPumps(supabase: any, a: any): Promise<any[]> {
     pumps = pumps.filter((e) => !ex.has(e.id));          // todas, menos as exceções
   }
   return pumps.filter((e) => isRunning(e.last_outputs_state, e.saida));
+}
+
+// Todas as bombas no ESCOPO da regra (ligadas ou não) — para o total "X/Y".
+async function fetchScopePumps(supabase: any, a: any): Promise<any[]> {
+  const { data: eqs } = await supabase
+    .from("equipments")
+    .select("id, name, saida, last_outputs_state")
+    .eq("farm_id", a.farm_id).in("type", ["poco", "bombeamento"]).eq("active", true);
+  let pumps = (eqs ?? []) as any[];
+  if (a.action === "shutdown_specific") {
+    const targets = new Set<string>(a.target_equipment_ids ?? []);
+    pumps = pumps.filter((e) => targets.has(e.id));
+  } else {
+    const ex = new Set<string>(a.excluded_equipment_ids ?? []);
+    pumps = pumps.filter((e) => !ex.has(e.id));
+  }
+  return pumps;
+}
+
+// Item 5: aviso CONSOLIDADO após o ciclo (passo final) — sempre enviado.
+async function sendConsolidated(supabase: any, a: any, farmName: string, total: number, off: number, stillOn: any[]): Promise<void> {
+  try {
+    const { data: cfg } = await supabase
+      .from("whatsapp_config").select("api_token, phone_number_id")
+      .not("api_token", "is", null).not("phone_number_id", "is", null)
+      .order("updated_at", { ascending: false }).limit(1).maybeSingle();
+    if (!cfg?.api_token || !cfg?.phone_number_id) { console.error("[scheduled-shutdown] consolidado: sem whatsapp_config"); return; }
+
+    const ruleName = (a.name && String(a.name).trim()) ? String(a.name).trim() : `Desligamento ${farmName}`;
+    const stillNames = stillOn.map((p) => p.name).join(", ");
+    let text: string, title: string, detail: string;
+    if (stillOn.length === 0) {
+      text = `✅ ${ruleName} concluído — ${off}/${total} bombas desligadas.`;
+      title = `✅ ${ruleName} concluído`;
+      detail = `${off}/${total} bombas desligadas`;
+    } else if (off > 0) {
+      text = `⚠️ ${ruleName} — ${off}/${total} desligadas.\n❌ NÃO DESLIGARAM: ${stillNames}`;
+      title = `⚠️ ${ruleName} — ${off}/${total} desligadas`;
+      detail = `NÃO desligaram: ${stillNames}`;
+    } else {
+      text = `🚨 ${ruleName} — FALHA TOTAL. Nenhuma bomba desligou.`;
+      title = `🚨 ${ruleName} — FALHA TOTAL`;
+      detail = "Nenhuma bomba desligou";
+    }
+    const tplParams = [title, farmName, detail, stillNames || "Todas desligadas"]
+      .map((s) => String(s).replace(/[\r\n\t]+/g, " ").replace(/\s{5,}/g, "    ").slice(0, 1000));
+
+    for (const to of ALERT_RECIPIENTS) {
+      const okTpl = await sendTemplate(cfg, to, "alerta_equipamento", tplParams);
+      if (!okTpl) await sendText(cfg, to, text);
+    }
+  } catch (e) {
+    console.error("[scheduled-shutdown] consolidado falhou:", (e as Error).message);
+  }
 }
 
 async function commandShutdown(supabase: any, a: any, onPumps: any[], step: Step): Promise<any[]> {
