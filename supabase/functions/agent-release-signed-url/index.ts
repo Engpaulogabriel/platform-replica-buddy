@@ -66,15 +66,40 @@ Deno.serve(async (req) => {
 
     const body = await req.json().catch(() => ({}));
     const version = typeof body?.version === "string" ? body.version.trim() : "";
+
+    // service role para ler tabela e assinar URLs
+    const admin = createClient(supabaseUrl, serviceKey);
+
+    // v3.25.62: path CUSTOMIZADO — assina qualquer arquivo do bucket agent-releases
+    // (ex.: 'bridge/serial_bridge.zip'), sem depender de uma linha em agent_releases.
+    // Usado pelo ensureBridgeOnedir para baixar a bridge --onedir pronta.
+    const customPath = typeof body?.path === "string" ? body.path.trim().replace(/^\/+/, "") : "";
+    if (customPath) {
+      if (customPath.includes("..") || customPath.startsWith("/")) {
+        return new Response(JSON.stringify({ error: "invalid_path" }), {
+          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const { data: signedCustom, error: signCustomErr } = await admin.storage
+        .from("agent-releases")
+        .createSignedUrl(customPath, 86400);
+      if (signCustomErr || !signedCustom?.signedUrl) {
+        return new Response(JSON.stringify({ error: "sign_failed", path: customPath }), {
+          status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ url: signedCustom.signedUrl, path: customPath, signed: true, expires_in: 86400 }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
     if (!version) {
       return new Response(JSON.stringify({ error: "missing_version" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-
-    // service role para ler tabela e assinar URLs
-    const admin = createClient(supabaseUrl, serviceKey);
 
     const { data: release, error: relErr } = await admin
       .from("agent_releases")

@@ -607,7 +607,93 @@ function downloadFile(url, dest) {
   });
 }
 
+// v3.25.62: fonte do .py só como ÚLTIMO fallback (compile local). O caminho normal
+// baixa a pasta JÁ COMPILADA (zip) via signed URL — não expõe o .py, não precisa
+// de Python/PyInstaller. Path no bucket agent-releases.
 const BRIDGE_PY_URL = "https://raw.githubusercontent.com/Engpaulogabriel/platform-replica-buddy/main/electron-agent/app/serial_bridge_persistent.py";
+const BRIDGE_ZIP_STORAGE_PATH = "bridge/serial_bridge.zip";
+
+// Baixa o zip da pasta onedir (Storage, via signed URL) e extrai em
+// resources/serial_bridge/. Retorna true se ficou com serial_bridge.exe.
+async function _downloadBridgeOnedir(resourcesDir, onedirExe) {
+  const fs = require("fs");
+  const res = await requestAgentReleaseSignedUrl(null, "BRIDGE-DL", BRIDGE_ZIP_STORAGE_PATH);
+  if (!res.ok || !res.signed || !res.signed.url) {
+    pushLog("warn", "bridge", `[BRIDGE-DL] signed-url indisponível (${res.status}: ${res.text || "sem url"})`);
+    return false;
+  }
+  const zipPath = path.join(app.getPath("userData"), "updates", "serial_bridge.zip");
+  try { fs.mkdirSync(path.dirname(zipPath), { recursive: true }); } catch (_) {}
+  try { await withCloudTimeout(downloadFile(res.signed.url, zipPath), "bridge-zip download", 120_000); }
+  catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] download falhou: ${(e && e.message) || e}`); return false; }
+  try { const st = fs.statSync(zipPath); if (st.size < 200 * 1024) { pushLog("warn", "bridge", `[BRIDGE-DL] zip pequeno (${st.size}B)`); return false; } }
+  catch (_) { return false; }
+
+  const staging = path.join(resourcesDir, "serial_bridge.dl");
+  try { fs.rmSync(staging, { recursive: true, force: true }); } catch (_) {}
+  try {
+    await execAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+      `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${staging}' -Force`],
+      { windowsHide: true, timeout: 120_000 });
+  } catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] extração falhou: ${(e && e.message) || e}`); return false; }
+
+  // o zip pode conter serial_bridge/ dentro ou os arquivos direto.
+  let newRoot = staging;
+  if (!fs.existsSync(path.join(newRoot, "serial_bridge.exe")) &&
+      fs.existsSync(path.join(staging, "serial_bridge", "serial_bridge.exe"))) {
+    newRoot = path.join(staging, "serial_bridge");
+  }
+  if (!fs.existsSync(path.join(newRoot, "serial_bridge.exe"))) {
+    pushLog("warn", "bridge", "[BRIDGE-DL] zip sem serial_bridge.exe");
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch (_) {}
+    return false;
+  }
+  const targetDir = path.join(resourcesDir, "serial_bridge");
+  try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch (_) {}
+  try { fs.renameSync(newRoot, targetDir); }
+  catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] mover pasta falhou: ${(e && e.message) || e}`); return false; }
+  try { fs.rmSync(staging, { recursive: true, force: true }); } catch (_) {}
+  try { fs.unlinkSync(zipPath); } catch (_) {}
+  return fs.existsSync(onedirExe);
+}
+
+// FALLBACK (v3.25.61): compila a bridge --onedir com o Python da máquina.
+async function _compileBridgeOnedir(resourcesDir, onedirExe) {
+  const fs = require("fs");
+  let py;
+  try { py = await findPython(); } catch (_) { py = null; }
+  if (!py) { pushLog("warn", "bridge", "[BRIDGE-AUTOCOMPILE] Python não encontrado"); return false; }
+  const run = (extra, opts) => execAsync(py.cmd, [...py.prefix, ...extra], opts);
+  try {
+    if (!(await checkCommand(py.cmd, [...py.prefix, "-m", "PyInstaller", "--version"]))) {
+      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Instalando pyserial + pyinstaller...");
+      await run(["-m", "pip", "install", "--user", "pyserial", "pyinstaller"], { timeout: 120_000 });
+    }
+    let pyFile = (typeof PYTHON_BRIDGE === "string" && PYTHON_BRIDGE && fs.existsSync(PYTHON_BRIDGE)) ? PYTHON_BRIDGE : null;
+    let downloaded = null;
+    if (!pyFile) {
+      downloaded = path.join(resourcesDir, "_bridge_build.py");
+      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Baixando fonte da bridge (fallback)...");
+      await downloadFile(BRIDGE_PY_URL, downloaded);
+      pyFile = downloaded;
+    }
+    pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Compilando serial_bridge (--onedir)...");
+    await run(
+      ["-m", "PyInstaller", "--onedir", "--noconsole", "--name", "serial_bridge",
+       "--clean", "--distpath", resourcesDir, "--workpath", path.join(resourcesDir, "build"),
+       "--specpath", resourcesDir, pyFile],
+      { timeout: 180_000, cwd: resourcesDir },
+    );
+    try { fs.rmSync(path.join(resourcesDir, "build"), { recursive: true, force: true }); } catch (_) {}
+    try { fs.unlinkSync(path.join(resourcesDir, "serial_bridge.spec")); } catch (_) {}
+    if (downloaded) { try { fs.unlinkSync(downloaded); } catch (_) {} }
+    return fs.existsSync(onedirExe);
+  } catch (e) {
+    pushLog("error", "bridge", `[BRIDGE-AUTOCOMPILE] erro: ${(e && e.message) || e}`);
+    try { fs.rmSync(path.join(resourcesDir, "build"), { recursive: true, force: true }); } catch (_) {}
+    return false;
+  }
+}
 
 async function ensureBridgeOnedir() {
   if (process.platform !== "win32") return;
@@ -616,53 +702,24 @@ async function ensureBridgeOnedir() {
   const onedirExe = path.join(resourcesDir, "serial_bridge", "serial_bridge.exe");
   if (fs.existsSync(onedirExe)) return; // já tem onedir → nada a fazer
 
-  let py;
-  try { py = await findPython(); } catch (_) { py = null; }
-  if (!py) {
-    pushLog("warn", "bridge", "[BRIDGE-AUTOCOMPILE] Python não encontrado — mantém fallback do .exe antigo");
-    return;
-  }
-  const run = (extra, opts) => execAsync(py.cmd, [...py.prefix, ...extra], opts);
+  // 1) CAMINHO NORMAL: baixa a pasta JÁ COMPILADA (zip) via signed URL — seguro
+  // (não expõe o .py) e não precisa de Python na fazenda.
+  pushLog("info", "bridge", "[BRIDGE] serial_bridge/ ausente — baixando zip pré-compilado (Storage)...");
+  let ok = false;
+  try { ok = await _downloadBridgeOnedir(resourcesDir, onedirExe); }
+  catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] exceção: ${(e && e.message) || e}`); }
+  if (ok) { COMPILED_BRIDGE = onedirExe; pushLog("info", "bridge", "[BRIDGE] ✅ onedir instalada via download (Storage)"); return; }
 
-  try {
-    // PyInstaller instalado?
-    if (!(await checkCommand(py.cmd, [...py.prefix, "-m", "PyInstaller", "--version"]))) {
-      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Instalando pyserial + pyinstaller...");
-      await run(["-m", "pip", "install", "--user", "pyserial", "pyinstaller"], { timeout: 120_000 });
-    }
-
-    // Fonte do .py: prefere o bundle local (se o install não o apagou); senão baixa do GitHub.
-    let pyFile = (typeof PYTHON_BRIDGE === "string" && PYTHON_BRIDGE && fs.existsSync(PYTHON_BRIDGE)) ? PYTHON_BRIDGE : null;
-    let downloaded = null;
-    if (!pyFile) {
-      downloaded = path.join(resourcesDir, "_bridge_build.py");
-      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Baixando fonte da bridge...");
-      await downloadFile(BRIDGE_PY_URL, downloaded);
-      pyFile = downloaded;
-    }
-
-    pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Compilando serial_bridge (--onedir)...");
-    await run(
-      ["-m", "PyInstaller", "--onedir", "--noconsole", "--name", "serial_bridge",
-       "--clean", "--distpath", resourcesDir, "--workpath", path.join(resourcesDir, "build"),
-       "--specpath", resourcesDir, pyFile],
-      { timeout: 180_000, cwd: resourcesDir },
-    );
-
-    // limpa resíduos (build/, .spec, .py baixado)
-    try { fs.rmSync(path.join(resourcesDir, "build"), { recursive: true, force: true }); } catch (_) {}
-    try { fs.unlinkSync(path.join(resourcesDir, "serial_bridge.spec")); } catch (_) {}
-    if (downloaded) { try { fs.unlinkSync(downloaded); } catch (_) {} }
-
-    if (fs.existsSync(onedirExe)) {
-      COMPILED_BRIDGE = onedirExe; // re-resolve para o boot atual usar a bridge nova
-      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] ✅ Compilação concluída — usando serial_bridge/ (--onedir)");
-    } else {
-      pushLog("error", "bridge", "[BRIDGE-AUTOCOMPILE] ❌ Falha na compilação — usando fallback do .exe antigo");
-    }
-  } catch (e) {
-    pushLog("error", "bridge", `[BRIDGE-AUTOCOMPILE] erro: ${(e && e.message) || e} — usando fallback do .exe antigo`);
-    try { fs.rmSync(path.join(resourcesDir, "build"), { recursive: true, force: true }); } catch (_) {}
+  // 2) FALLBACK: sem internet/Starlink em espera → compila com Python local.
+  pushLog("warn", "bridge", "[BRIDGE] download indisponível — fallback: compilar com Python local...");
+  try { ok = await _compileBridgeOnedir(resourcesDir, onedirExe); }
+  catch (_) { ok = false; }
+  if (ok && fs.existsSync(onedirExe)) {
+    COMPILED_BRIDGE = onedirExe;
+    pushLog("info", "bridge", "[BRIDGE] ✅ onedir compilada localmente (fallback)");
+  } else {
+    // 3) ambos falharam → segue com o .exe antigo (onefile) se existir; senão bridge_dead.
+    pushLog("error", "bridge", "[BRIDGE] ❌ download e compilação falharam — usando fallback do .exe antigo");
   }
 }
 
@@ -6785,7 +6842,7 @@ async function getFreshAgentBearer(cfg, force) {
 
 // Retorna { ok, status, text, signed }. Usa agent token no Bearer; em 401/403
 // força novo agent token e retenta 1×.
-async function requestAgentReleaseSignedUrl(version, tag) {
+async function requestAgentReleaseSignedUrl(version, tag, customPath) {
   const cfg = (typeof loadConfig === "function") ? loadConfig() : null;
   const baseUrl = _activeBaseUrl(cfg) || (typeof activeSupabaseUrl !== "undefined" && activeSupabaseUrl) || SUPABASE_URL_DEFAULT;
   const baseAnon = _activeAnon(cfg) || (typeof activeSupabaseAnonKey !== "undefined" && activeSupabaseAnonKey) || SUPABASE_ANON_DEFAULT;
@@ -6803,8 +6860,13 @@ async function requestAgentReleaseSignedUrl(version, tag) {
           "Authorization": `Bearer ${bearer}`,
           "apikey": baseAnon,
         },
-        // agent_token também no corpo p/ a validação de device_license da função.
-        body: JSON.stringify(token ? { version, agent_token: token } : { version }),
+        // path customizado (ex.: bridge/serial_bridge.zip) OU version. agent_token
+        // também no corpo p/ a validação de device_license da função.
+        body: JSON.stringify(
+          customPath
+            ? (token ? { path: customPath, agent_token: token } : { path: customPath })
+            : (token ? { version, agent_token: token } : { version }),
+        ),
       }),
       `${tag} signed-url`, 30_000,
     );
