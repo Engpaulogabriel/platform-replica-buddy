@@ -380,7 +380,10 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
           <Card className="border-border">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center justify-between gap-2 flex-wrap">
-                <span className="flex items-center gap-2"><Droplets className="w-4 h-4 text-primary" /> Relatório de Monitoramento — {agency.agency_name} ({agency.agency_acronym})</span>
+                <span className="flex items-center gap-2 flex-wrap">
+                  <Droplets className="w-4 h-4 text-primary" /> Relatório de Monitoramento — {agency.agency_name} ({agency.agency_acronym})
+                  <span className="text-xs font-normal text-muted-foreground">· Outorga: {mainPortaria?.permit_number ?? "—"}</span>
+                </span>
                 <div className="print:hidden">
                   <Select value={period} onValueChange={setPeriod}>
                     <SelectTrigger className="h-8 w-[170px] text-xs"><SelectValue /></SelectTrigger>
