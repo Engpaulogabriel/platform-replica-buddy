@@ -503,41 +503,5 @@ function exportRoiPDF(d: ReturnType<typeof useProductivityData>, periodDays: str
   notify.ok("Produtividade", "PDF exportado.");
 }
 
-function exportInemaPDF(d: ReturnType<typeof useProductivityData>, inema: any, periodDays: string) {
-  const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
-  pdfHeader(doc, "Relatório de Captação de Água — INEMA", `Portaria 22.181/2021  |  Últimos ${periodDays} dias`);
-  doc.setFontSize(10);
-  let y = 70;
-  doc.setFont("helvetica", "bold"); doc.text("Identificação", 30, y); y += 14;
-  doc.setFont("helvetica", "normal");
-  doc.text(`Outorga Nº: ${inema?.outorga_numero ?? "—"}`, 30, y); y += 12;
-  doc.text(`Processo: ${inema?.outorga_processo ?? "—"}`, 30, y); y += 12;
-  doc.text(`Validade: ${inema?.outorga_validade ? new Date(inema.outorga_validade).toLocaleDateString("pt-BR") : "—"}`, 30, y); y += 12;
-  doc.text(`Vazão outorgada: ${inema?.vazao_outorgada_m3h ?? "—"} m³/h`, 30, y); y += 12;
-  doc.text(`Responsável técnico: ${inema?.responsavel_tecnico ?? "—"}`, 30, y); y += 18;
-
-  doc.setFont("helvetica", "bold"); doc.text("Resumo do período", 30, y); y += 14;
-  doc.setFont("helvetica", "normal");
-  doc.text(`Volume total captado: ${fmtNum(d.totals.volume_m3, 0)} m³`, 30, y); y += 12;
-  doc.text(`Horas totais de bombeamento: ${fmtNum(d.totals.hours, 2)} h`, 30, y); y += 18;
-
-  autoTable(doc, {
-    startY: y,
-    head: [["Captação", "Horas", "Vazão (m³/h)", "Vazão (L/s)", "Volume (m³)", "Eficiência"]],
-    body: d.pumps.map(p => {
-      const flow = p.estimated_flow_m3h ?? 0;
-      const flowLs = (flow * 1000) / 3600;
-      const outorga = inema?.vazao_outorgada_m3h ?? 0;
-      const eff = outorga > 0 && flow > 0 ? Math.min(100, (flow / outorga) * 100) : 0;
-      return [p.name, fmtNum(p.hours_total, 2), flow || "—", flow ? fmtNum(flowLs, 2) : "—", fmtNum(p.volume_m3, 0), eff > 0 ? `${eff.toFixed(0)}%` : "—"];
-    }),
-    styles: { fontSize: 9, cellPadding: 3 },
-    headStyles: { fillColor: [66, 147, 80], textColor: 255 },
-  });
-
-  doc.setFontSize(8); doc.setTextColor(120);
-  doc.text("Medição indireta por horímetro × vazão nominal cadastrada (Portaria INEMA 22.181/2021).", 30, doc.internal.pageSize.getHeight() - 30);
-  doc.text(`Gerado em ${new Date().toLocaleString("pt-BR")} por Gestor de Bombas Renov.`, 30, doc.internal.pageSize.getHeight() - 18);
-  doc.save(`renov-inema-${new Date().toISOString().slice(0, 10)}.pdf`);
-  notify.ok("Produtividade", "Relatório INEMA exportado.");
-}
+// exportInemaPDF removido — o PDF do INEMA agora é gerado no InemaReport
+// (Relatórios → aba do órgão), lendo de water_permits.

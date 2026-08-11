@@ -21,7 +21,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { notify } from "@/lib/notify";
 
-interface Well { id: string; well_name: string; latitude: string | null; longitude: string | null; flow_rate_m3_day: number; datum: string | null }
+interface Well { id: string; well_name: string; latitude: string | null; longitude: string | null; flow_rate_m3_day: number; datum: string | null; equipment_id: string | null }
 interface Condition { id: string; condition_number: number | null; description: string; deadline_days: number | null; is_critical: boolean; status: string }
 interface Permit {
   id: string; permit_number: string; permit_date: string; process_number: string;
@@ -130,13 +130,23 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
     }
     return m;
   }, [permits]);
+  // Vínculo EXPLÍCITO poço→equipamento (water_permit_wells.equipment_id) — precede
+  // o casamento por número.
+  const authByEquip = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of permits) for (const w of p.wells) {
+      if (!w.equipment_id) continue;
+      m.set(w.equipment_id, Math.max(m.get(w.equipment_id) ?? 0, Number(w.flow_rate_m3_day || 0)));
+    }
+    return m;
+  }, [permits]);
   const perPoco = useMemo(() => monitoring.map((mo) => {
     const n = parseInt(String(mo.name).replace(/\D+/g, ""), 10);
-    const authDaily = Number.isFinite(n) ? (authByPocoNumber.get(n) ?? null) : null;
+    const authDaily = authByEquip.get(mo.id) ?? (Number.isFinite(n) ? (authByPocoNumber.get(n) ?? null) : null);
     const authPeriod = authDaily != null ? authDaily * range.days : null;
     const pct = authPeriod && authPeriod > 0 ? (mo.volume / authPeriod) * 100 : null;
     return { ...mo, authDaily, authPeriod, pct };
-  }), [monitoring, authByPocoNumber, range.days]);
+  }), [monitoring, authByEquip, authByPocoNumber, range.days]);
 
   // PDF oficial — DADOS DA OUTORGA vindos de water_permits (não da inema_permits/config).
   const exportPDF = () => {
@@ -212,6 +222,15 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
     } catch (_) {
       notify.fail("Relatório", "Falha ao gerar PDF.");
     }
+  };
+
+  // Vincula um poço da portaria a um equipamento físico (water_permit_wells.equipment_id).
+  const linkWell = async (wellId: string, equipmentId: string) => {
+    const eqId = equipmentId === "none" ? null : equipmentId;
+    setPermits((prev) => prev.map((p) => ({ ...p, wells: p.wells.map((wl) => wl.id === wellId ? { ...wl, equipment_id: eqId } : wl) })));
+    const { error } = await supabase.from("water_permit_wells" as any).update({ equipment_id: eqId }).eq("id", wellId);
+    if (error) { notify.fail("Vínculo", "Não foi possível salvar o vínculo."); void load(); }
+    else notify.ok("Vínculo", eqId ? "Poço vinculado ao equipamento." : "Vínculo removido.");
   };
 
   // Portaria principal = outorga vigente mais recente (fallback: a de validade mais longa).
@@ -310,6 +329,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
                             <TableHead>Longitude</TableHead>
                             <TableHead className="text-right">Vazão (m³/dia)</TableHead>
                             <TableHead>Datum</TableHead>
+                            <TableHead>Equipamento (sistema)</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -320,9 +340,18 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
                               <TableCell className="font-mono text-xs">{w.longitude ?? "—"}</TableCell>
                               <TableCell className="text-right">{fmtNum(w.flow_rate_m3_day)}</TableCell>
                               <TableCell className="text-xs">{w.datum ?? "—"}</TableCell>
+                              <TableCell>
+                                <Select value={w.equipment_id ?? "none"} onValueChange={(v) => void linkWell(w.id, v)}>
+                                  <SelectTrigger className="h-7 w-[160px] text-xs"><SelectValue placeholder="Vincular…" /></SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="none">— não vinculado —</SelectItem>
+                                    {pocos.map((eq) => <SelectItem key={eq.id} value={eq.id}>{eq.name}</SelectItem>)}
+                                  </SelectContent>
+                                </Select>
+                              </TableCell>
                             </TableRow>
                           ))}
-                          {p.wells.length === 0 && <TableRow><TableCell colSpan={5} className="text-center text-muted-foreground text-xs">Sem poços.</TableCell></TableRow>}
+                          {p.wells.length === 0 && <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground text-xs">Sem poços.</TableCell></TableRow>}
                         </TableBody>
                       </Table>
                     </div>
@@ -464,7 +493,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
               </div>
               <p className="text-[10px] text-muted-foreground leading-relaxed">
                 Captado estimado por horas operadas × vazão nominal (o sistema não historiza vazão real por dia).
-                Vazão autorizada casada por número do poço com as outorgas (water_permits).
+                Vazão autorizada pelo vínculo poço↔equipamento (aba Outorgas) ou, na falta, pelo número do poço.
               </p>
             </CardContent>
           </Card>
