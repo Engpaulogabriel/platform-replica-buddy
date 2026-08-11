@@ -4,18 +4,29 @@ import "leaflet/dist/leaflet.css";
 import { ExternalLink, Hand, MapPin, Wrench } from "lucide-react";
 import type { Pump } from "./PumpTable";
 
+export interface MapReservoir {
+  id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  alarm?: boolean;
+  online?: boolean;
+}
+
 interface PumpMapProps {
   pumps: Pump[];
   flowEnabled: boolean;
   consumptionEnabled: boolean;
   /** Sede da fazenda (marcador distinto no mapa). */
   sede?: { lat: number; lng: number; name?: string } | null;
+  /** Reservatórios/níveis (marcadores azuis). */
+  reservoirs?: MapReservoir[];
 }
 
 const abbreviateWellName = (name: string): string =>
   name.replace(/\bpo(?:ç|c|Ã§)o\s*[-_.:/#]?\s*(\d+)/giu, "P$1");
 
-export default function PumpMap({ pumps, sede }: PumpMapProps) {
+export default function PumpMap({ pumps, sede, reservoirs }: PumpMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<L.Layer[]>([]);
@@ -25,6 +36,14 @@ export default function PumpMap({ pumps, sede }: PumpMapProps) {
   const wells = useMemo(
     () => pumps.filter((p) => p.lat != null && p.lng != null),
     [pumps],
+  );
+  const reservoirsWithCoords = useMemo(
+    () => (reservoirs ?? []).filter((r) => r.lat != null && r.lng != null && !Number.isNaN(r.lat) && !Number.isNaN(r.lng)),
+    [reservoirs],
+  );
+  const reservoirKey = useMemo(
+    () => reservoirsWithCoords.map((r) => `${r.lat.toFixed(5)},${r.lng.toFixed(5)}`).join("|"),
+    [reservoirsWithCoords],
   );
 
   const centerLat = wells.length > 0
@@ -109,18 +128,19 @@ export default function PumpMap({ pumps, sede }: PumpMapProps) {
   useEffect(() => {
     const map = mapRef.current;
     const hasSede = !!(sede && sede.lat != null && sede.lng != null);
-    if (!map || (wells.length === 0 && !hasSede)) return;
-    const fitKey = wellsCoordKey + (hasSede ? `|S:${sede!.lat.toFixed(5)},${sede!.lng.toFixed(5)}` : "");
+    if (!map || (wells.length === 0 && reservoirsWithCoords.length === 0 && !hasSede)) return;
+    const fitKey = wellsCoordKey + `|R:${reservoirKey}` + (hasSede ? `|S:${sede!.lat.toFixed(5)},${sede!.lng.toFixed(5)}` : "");
     if (didFitRef.current === fitKey) return;
 
     const pts: [number, number][] = wells.map((p) => [p.lat as number, p.lng as number]);
+    reservoirsWithCoords.forEach((r) => pts.push([r.lat, r.lng]));
     if (hasSede) pts.push([sede!.lat, sede!.lng]);
     const bounds = L.latLngBounds(pts);
 
     map.fitBounds(bounds, { padding: [40, 40] });
     map.invalidateSize();
     didFitRef.current = fitKey;
-  }, [wellsCoordKey, wells, sede]);
+  }, [wellsCoordKey, wells, sede, reservoirsWithCoords, reservoirKey]);
 
   // Marcador DISTINTO da sede (independente do cleanup dos marcadores de poço).
   useEffect(() => {
@@ -244,12 +264,34 @@ export default function PumpMap({ pumps, sede }: PumpMapProps) {
         markersRef.current.push(marker);
       });
     });
-  }, [wells]);
 
-  if (wells.length === 0) {
+    // Reservatórios / níveis — marcadores AZUIS com o nome ao lado.
+    reservoirsWithCoords.forEach((res) => {
+      const size = 16;
+      const blue = res.alarm ? "#dc2626" : "#2563eb"; // alarme → vermelho; normal → azul
+      const html = `<div style="
+        width:${size}px;height:${size}px;border-radius:4px;
+        background:${blue};border:2px solid hsl(var(--background));
+        box-shadow:0 0 0 1px rgba(0,0,0,0.3);
+      "></div>`;
+      const icon = L.divIcon({
+        className: "reservoir-marker",
+        html,
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+      });
+      const marker = L.marker([res.lat, res.lng], { icon, zIndexOffset: 500 }).addTo(map);
+      marker.bindTooltip(`🔵 <strong>${(res.name ?? "Reservatório").replace(/[<>&]/g, "")}</strong>`, {
+        permanent: true, direction: "top", offset: [0, -size / 2],
+      });
+      markersRef.current.push(marker);
+    });
+  }, [wells, reservoirsWithCoords]);
+
+  if (wells.length === 0 && reservoirsWithCoords.length === 0) {
     return (
       <div className="h-[640px] rounded-lg border border-border bg-card flex items-center justify-center text-sm text-muted-foreground">
-        Nenhum poço com coordenadas cadastradas.
+        Nenhum poço ou reservatório com coordenadas cadastradas.
       </div>
     );
   }

@@ -474,6 +474,26 @@ const Dashboard = () => {
   const missingRes = reservoirs.filter(r => !layout.reservoirOrder.includes(r.id));
   const orderedReservoirs = [...sortedReservoirs, ...missingRes];
 
+  // Reservatórios (type='nivel') com coordenadas para o mapa — as coords vêm do
+  // cloudEquipments (o tipo Reservoir do dashboard não carrega lat/lng); alarme/
+  // online vêm de allReservoirs por id.
+  const mapReservoirs = useMemo(() => {
+    const byId = new Map((allReservoirs ?? []).map((r) => [r.id, r]));
+    return (cloudEquipments ?? [])
+      .filter((e) => e.type === "nivel" && e.latitude != null && e.longitude != null)
+      .map((e) => {
+        const r = byId.get(e.id);
+        return {
+          id: e.id,
+          name: e.name,
+          lat: Number(e.latitude),
+          lng: Number(e.longitude),
+          alarm: r?.online !== false && !!r?.alarm,
+          online: r?.online,
+        };
+      });
+  }, [cloudEquipments, allReservoirs]);
+
   const togglePump = async (id: string) => {
     const target = pumps.find((p) => p.id === id);
     if (!target) return;
@@ -1093,7 +1113,7 @@ const Dashboard = () => {
         <div className="flex-1 min-h-0 overflow-hidden">
           <MapErrorBoundary>
             <Suspense fallback={<div className="h-full flex items-center justify-center text-sm text-muted-foreground">Carregando mapa…</div>}>
-              <PumpMap pumps={orderedPumps} flowEnabled={flowEnabled} consumptionEnabled={consumptionEnabled} sede={sedeCoords} />
+              <PumpMap pumps={orderedPumps} flowEnabled={flowEnabled} consumptionEnabled={consumptionEnabled} sede={sedeCoords} reservoirs={mapReservoirs} />
             </Suspense>
           </MapErrorBoundary>
         </div>
