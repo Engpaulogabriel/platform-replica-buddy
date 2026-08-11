@@ -319,17 +319,17 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
         </CardHeader>
         <CardContent className="space-y-4">
           {/* Fazenda + timeout */}
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="min-w-[220px]">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-3">
+            <div className="w-full sm:min-w-[220px] sm:w-auto">
               <Label className="text-xs">Fazenda</Label>
               <Select value={farmId} onValueChange={setFarmId}>
-                <SelectTrigger><SelectValue placeholder="Selecione a fazenda" /></SelectTrigger>
+                <SelectTrigger className="w-full"><SelectValue placeholder="Selecione a fazenda" /></SelectTrigger>
                 <SelectContent>
                   {farms.map((f) => <SelectItem key={f.farm_id} value={f.farm_id}>{f.name}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
-            <div className="w-[140px]">
+            <div className="w-full sm:w-[140px]">
               <Label className="text-xs">Timeout (s)</Label>
               <Input
                 type="number" min={1} max={30}
@@ -337,7 +337,7 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
                 onChange={(e) => setTimeoutMs(clampTimeout(Number(e.target.value) * 1000))}
               />
             </div>
-            <div className="flex items-center gap-2 pb-1">
+            <div className="flex items-center flex-wrap gap-2 pb-1">
               <Label className="text-xs">Modo:</Label>
               <span className={mode === "raw" ? "font-semibold" : "text-muted-foreground"}>Direto</span>
               <Switch checked={mode === "equipment"} onCheckedChange={(v) => setMode(v ? "equipment" : "raw")} />
@@ -353,14 +353,14 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
                 <Input
                   value={rawCmd}
                   placeholder="[1305_1_]{1}[1305_ETX_]  ou  PING"
-                  className="font-mono"
+                  className="font-mono flex-1 min-w-0"
                   onChange={(e) => setRawCmd(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && !busy) submitRaw(); }}
                   disabled={busy}
                 />
-                <Button onClick={submitRaw} disabled={busy || !rawCmd.trim() || !farmId}>
+                <Button className="shrink-0" onClick={submitRaw} disabled={busy || !rawCmd.trim() || !farmId}>
                   {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                  <span className="ml-1">Enviar</span>
+                  <span className="ml-1 hidden sm:inline">Enviar</span>
                 </Button>
               </div>
               <div className="flex flex-wrap gap-1.5 pt-1">
@@ -377,10 +377,10 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
           {/* MODO EQUIPAMENTO */}
           {mode === "equipment" && (
             <div className="space-y-3">
-              <div className="min-w-[260px] max-w-md">
+              <div className="w-full sm:min-w-[260px] sm:max-w-md">
                 <Label className="text-xs">Equipamento</Label>
                 <Select value={equipId} onValueChange={setEquipId}>
-                  <SelectTrigger><SelectValue placeholder="Selecione o equipamento" /></SelectTrigger>
+                  <SelectTrigger className="w-full"><SelectValue placeholder="Selecione o equipamento" /></SelectTrigger>
                   <SelectContent>
                     {equips.map((e) => (
                       <SelectItem key={e.id} value={e.id}>
@@ -395,17 +395,18 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
                   Endereço PLC: {(selectedEquip.hw_id || "").slice(0, 4)} · Saída: {String(selectedEquip.saida ?? "—").padStart(2, "0")} · Tipo: {selectedEquip.type}
                 </div>
               )}
-              <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="secondary" disabled={busy || !selectedEquip} onClick={() => equipAction("status")}>
+              {/* 2x2 no mobile, linha no desktop */}
+              <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
+                <Button size="sm" variant="secondary" className="w-full sm:w-auto" disabled={busy || !selectedEquip} onClick={() => equipAction("status")}>
                   <Search className="w-4 h-4 mr-1" /> Consultar Status
                 </Button>
-                <Button size="sm" variant="secondary" disabled={busy || !selectedEquip} onClick={() => equipAction("ping")}>
+                <Button size="sm" variant="secondary" className="w-full sm:w-auto" disabled={busy || !selectedEquip} onClick={() => equipAction("ping")}>
                   <Radio className="w-4 h-4 mr-1" /> Ping PLC
                 </Button>
-                <Button size="sm" variant="outline" disabled={busy || !selectedEquip} onClick={() => equipAction("on")}>
+                <Button size="sm" variant="outline" className="w-full sm:w-auto" disabled={busy || !selectedEquip} onClick={() => equipAction("on")}>
                   <Power className="w-4 h-4 mr-1" /> Ligar
                 </Button>
-                <Button size="sm" variant="outline" disabled={busy || !selectedEquip} onClick={() => equipAction("off")}>
+                <Button size="sm" variant="outline" className="w-full sm:w-auto" disabled={busy || !selectedEquip} onClick={() => equipAction("off")}>
                   <PowerOff className="w-4 h-4 mr-1" /> Desligar
                 </Button>
               </div>
@@ -448,10 +449,10 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
                 Capturando há {fmtElapsed(Date.now() - liveStartedAt)}
               </Badge>
             )}
-            <div className="flex items-center gap-1">
-              <span className="text-xs text-muted-foreground">Filtrar:</span>
+            <div className="flex items-center gap-1 w-full sm:w-auto">
+              <span className="text-xs text-muted-foreground shrink-0">Filtrar:</span>
               <Select value={liveFilterId || "all"} onValueChange={(v) => setLiveFilterId(v === "all" ? "" : v)}>
-                <SelectTrigger className="h-8 w-[190px] text-xs"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-8 w-full sm:w-[190px] text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Todos os equipamentos</SelectItem>
                   {equips.filter((e) => e.hw_id).map((e) => (
@@ -473,15 +474,15 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
           </Button>
         </CardHeader>
         <CardContent>
-          <div ref={logRef} className="h-72 overflow-y-auto rounded bg-black/90 p-3 font-mono text-xs leading-relaxed">
+          <div ref={logRef} className="h-72 overflow-auto rounded bg-black/90 p-3 font-mono text-[11px] sm:text-xs leading-relaxed">
             {log.length === 0 && <div className="text-muted-foreground">Sem tráfego ainda.</div>}
             {log.map((l, i) => (
-              <div key={i} className={
+              <div key={i} className={`whitespace-nowrap ${
                 l.kind === "tx" ? "text-emerald-400"
                   : l.kind === "rx" ? "text-sky-400"
                     : l.kind === "err" ? "text-red-400"
                       : "text-neutral-400"
-              }>
+              }`}>
                 <span className="text-neutral-500">[{ts(l.at)}]</span>{" "}
                 <span className="text-neutral-500">{l.kind === "tx" ? "TX" : l.kind === "rx" ? "RX" : l.kind === "err" ? "!!" : "··"}</span>{" "}
                 {l.text}

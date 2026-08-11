@@ -201,16 +201,16 @@ export default function PlatformTecnico({ isAdmin: _isAdmin }: { isAdmin: boolea
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-wrap gap-2 mb-3">
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2 mb-3">
             <Select value={fFarm} onValueChange={setFFarm}>
-              <SelectTrigger className="h-8 w-[180px] text-xs"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-8 w-full sm:w-[180px] text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">Todas as fazendas</SelectItem>
                 {farms.map((f) => <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={fStatus} onValueChange={setFStatus}>
-              <SelectTrigger className="h-8 w-[150px] text-xs"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-8 w-full sm:w-[150px] text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="open">Abertas + andamento</SelectItem>
                 <SelectItem value="aberto">Aberto</SelectItem>
@@ -220,7 +220,7 @@ export default function PlatformTecnico({ isAdmin: _isAdmin }: { isAdmin: boolea
               </SelectContent>
             </Select>
             <Select value={fPriority} onValueChange={setFPriority}>
-              <SelectTrigger className="h-8 w-[130px] text-xs"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-8 w-full sm:w-[130px] text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">Toda prioridade</SelectItem>
                 <SelectItem value="alta">Alta</SelectItem>
@@ -229,7 +229,7 @@ export default function PlatformTecnico({ isAdmin: _isAdmin }: { isAdmin: boolea
               </SelectContent>
             </Select>
             <Select value={fType} onValueChange={setFType}>
-              <SelectTrigger className="h-8 w-[170px] text-xs"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-8 w-full sm:w-[170px] text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">Todo tipo</SelectItem>
                 {PROBLEM_TYPES.map((p) => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}
@@ -237,7 +237,8 @@ export default function PlatformTecnico({ isAdmin: _isAdmin }: { isAdmin: boolea
             </Select>
           </div>
 
-          <div className="overflow-x-auto">
+          <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
+          <div className="overflow-x-auto -mx-2 px-2">
             <Table>
               <TableHeader>
                 <TableRow>

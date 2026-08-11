@@ -91,11 +91,11 @@ export default function OutorgaWellLinks() {
   return (
     <Card className="bg-card border-border">
       <CardHeader>
-        <CardTitle className="text-base flex items-center justify-between gap-2 flex-wrap">
+        <CardTitle className="text-base flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <span className="flex items-center gap-2"><Link2 className="w-4 h-4 text-primary" /> Vínculos de Outorga (poço ↔ equipamento)</span>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center flex-wrap gap-2">
             <Select value={farmId} onValueChange={setFarmId}>
-              <SelectTrigger className="h-8 w-[180px] text-xs"><SelectValue placeholder="Fazenda" /></SelectTrigger>
+              <SelectTrigger className="h-8 w-full sm:w-[180px] text-xs"><SelectValue placeholder="Fazenda" /></SelectTrigger>
               <SelectContent>{farms.map((f) => <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>)}</SelectContent>
             </Select>
             <button type="button" className="text-xs text-primary flex items-center gap-1 font-medium" onClick={() => void autoLink()} disabled={loading || wells.length === 0}>
@@ -112,7 +112,8 @@ export default function OutorgaWellLinks() {
           Vincule cada poço das portarias ao equipamento físico correspondente. Isso alimenta o
           comparativo autorizado × captado do relatório. Só o Setor Técnico edita.
         </p>
-        <div className="overflow-x-auto">
+        <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
+        <div className="overflow-x-auto -mx-2 px-2">
           <Table>
             <TableHeader>
               <TableRow>
