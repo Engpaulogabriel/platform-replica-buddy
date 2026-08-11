@@ -5989,8 +5989,18 @@ async function processNextCommand() {
             .eq("status", "pending");
           continue; // tenta o proximo da fila (outra PLC)
         }
-        // Backoff por PLC sem resposta: pula esta rodada de polling
-        if (shouldSkipPollingForBackoff(candTsnn)) {
+        // BUG FIX: o botão "Atualizar Status" enfileira uma leitura POLLING
+        // reforçada (reinforcement=true, marcador manual-status-read). O objetivo
+        // dela é JUSTAMENTE forçar um frame de consulta numa bomba OFFLINE — então
+        // NÃO pode ser pulada pelo backoff (antes: era cancelada aqui sem TX, e o
+        // card nunca atualizava; o Terminal Serial funcionava por usar outro caminho).
+        const _manualStatusRead = candidate.reinforcement === true
+          && String(candidate.error_message || "").startsWith("manual-status-read");
+        if (_manualStatusRead && shouldSkipPollingForBackoff(candTsnn)) {
+          pushLog("info", "system", `[POLLING] leitura manual FORÇADA TSNN=${candTsnn} — ignora backoff (Atualizar Status)`);
+        }
+        // Backoff por PLC sem resposta: pula esta rodada de polling (exceto leitura manual)
+        if (!_manualStatusRead && shouldSkipPollingForBackoff(candTsnn)) {
           const b = pollingBackoffByTsnn.get(candTsnn);
           await supabase
             .from("commands")
@@ -6287,25 +6297,28 @@ async function processNextCommand() {
       inflightTimer = null;
       const c = inflightCmd;
 
-      // Camada 3: ate 2 retries imediatos se polling colidiu com espontaneo
-      if (
-        c &&
-        c.type === "polling" &&
-        inflightSpontaneousSeen &&
-        inflightRetryCount < 2
-      ) {
+      // RETRY REFORÇADO (polling): até 2 reenvios antes de contar falha —
+      // reduz falsos "offline" por interferência momentânea de rádio.
+      //  • colisão com espontâneo → reenvia IMEDIATO (como antes);
+      //  • sem resposta           → reenvia após 3s (novo: bombas problemáticas).
+      // Se o RX chegar durante a espera, o handler limpa o inflightTimer e resolve.
+      if (c && c.type === "polling" && inflightRetryCount < 2) {
         inflightRetryCount++;
+        const collided = inflightSpontaneousSeen;
         inflightSpontaneousSeen = false;
+        const gap = collided ? 0 : 3000; // 3s entre tentativas para sem-resposta
         pushLog("warn", "system",
-          `[POLLING] Retry ${inflightRetryCount}/2 TSNN ${expectedTsnn} apos colisao com espontaneo — reenviando frame`);
-
-        try {
-          sendTxFrame(frame, { priority: "polling" });
-          rememberTxForTsnn(expectedTsnn, cmd.type, cmd.id, frame);
-        } catch (e) {
-          pushLog("error", "serial", `retry polling stdin write falhou: ${e.message}`);
-        }
-        inflightTimer = setTimeout(onInflightTimeout, serialTimeoutMs);
+          `[POLLING] Retry ${inflightRetryCount}/2 TSNN ${expectedTsnn} — ${collided ? "colisão com espontâneo (imediato)" : "sem resposta (reenvia em 3s)"}`);
+        const doRetry = () => {
+          try {
+            sendTxFrame(frame, { priority: "polling" });
+            rememberTxForTsnn(expectedTsnn, cmd.type, cmd.id, frame);
+          } catch (e) {
+            pushLog("error", "serial", `retry polling stdin write falhou: ${e.message}`);
+          }
+          inflightTimer = setTimeout(onInflightTimeout, serialTimeoutMs);
+        };
+        if (gap > 0) inflightTimer = setTimeout(doRetry, gap); else doRetry();
         return;
       }
 
