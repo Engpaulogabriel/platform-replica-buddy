@@ -2,6 +2,14 @@
 // Devolve uma URL assinada para baixar o app.asar de uma release do agente.
 // Compat OTA legacy: agentes v3.12.0 podem chamar com access_token expirado,
 // então a função autentica pela apikey anon fixa e NÃO depende do Bearer JWT.
+//
+// ⚠️ REQUER verify_jwt=false NO DEPLOY (ver supabase/config.toml). Sem isso, o
+// gateway do Supabase barra o Bearer (agent token / anon) ANTES de chegar aqui e
+// devolve "401 invalid_or_expired_token", quebrando o OTA de TODAS as fazendas.
+// A validação real é interna (apikey anon + agent token/device_license). Se o OTA
+// voltar a dar 401, confira no dashboard: Edge Functions → agent-release-signed-url
+// → "Verify JWT" DESLIGADO (o config.toml só aplica em redeploy da função).
+// [redeploy-nudge 2026-08-11: força o Lovable a reaplicar verify_jwt=false]
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.0";
 
