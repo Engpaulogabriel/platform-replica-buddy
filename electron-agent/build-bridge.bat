@@ -9,13 +9,16 @@ REM
 REM  PRE-REQUISITOS (uma vez):
 REM    python -m pip install --upgrade pyinstaller pyserial
 REM
-REM  RESULTADO:
-REM    dist\serial_bridge.exe  ->  copie para a pasta resources\ do agente
-REM    (fica ao lado do app.asar). O main.cjs (v3.25.42+) da PRIORIDADE a esse
-REM    .exe e nao precisa de Python nem pyserial na maquina da fazenda.
+REM  RESULTADO (--onedir):
+REM    dist\serial_bridge\  ->  copie a PASTA INTEIRA para resources\serial_bridge\
+REM    do agente (fica ao lado do app.asar). Dentro dela vem serial_bridge.exe +
+REM    _internal\ com as dependencias. O main.cjs (v3.25.60+) procura primeiro em
+REM    resources\serial_bridge\serial_bridge.exe.
 REM
-REM  Por que --onefile --noconsole:
-REM    --onefile  = um unico .exe, sem pasta de dependencias exposta
+REM  Por que --onedir (e NAO mais --onefile):
+REM    --onefile extraia ~8MB em %TEMP%\_MEIxxxx a cada execucao; qualquer limpeza
+REM    de Temp matava a bridge (bug recorrente da Sykue). --onedir mantem as
+REM    dependencias numa subpasta FIXA e NAO usa %TEMP% -> imune a limpeza de Temp.
 REM    --noconsole= sem janela de console (o agente fala por stdin/stdout)
 REM    --name serial_bridge = nome fixo esperado pelo main.cjs
 REM ===========================================================================
@@ -34,8 +37,8 @@ if not exist "serial_bridge_persistent.py" (
   pause & exit /b 1
 )
 
-echo Compilando serial_bridge.exe ...
-pyinstaller --onefile --noconsole --name serial_bridge --clean --distpath dist --workpath build --specpath build serial_bridge_persistent.py
+echo Compilando serial_bridge (--onedir) ...
+pyinstaller --onedir --noconsole --name serial_bridge --clean --distpath dist --workpath build --specpath build serial_bridge_persistent.py
 if errorlevel 1 (
   echo [ERRO] Falha no PyInstaller.
   pause & exit /b 1
@@ -43,8 +46,9 @@ if errorlevel 1 (
 
 echo.
 echo ============================================================
-echo  Gerado: dist\serial_bridge.exe
-echo  Copie para resources\ do pacote do agente (ao lado do app.asar).
+echo  Gerado: dist\serial_bridge\ (pasta com serial_bridge.exe + _internal\)
+echo  Copie a PASTA INTEIRA para resources\serial_bridge\ do pacote do agente
+echo  (ao lado do app.asar). NAO usa mais %%TEMP%%\_MEI*.
 echo ============================================================
 pause
 exit /b 0

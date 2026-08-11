@@ -55,6 +55,13 @@ del /Q "%RES%\app.asar.bak" >nul 2>&1
 del /Q "%DEST%\debug.log" >nul 2>&1
 del /Q "%RES%\app\main.original.cjs" >nul 2>&1
 del /Q "%DEST%\INSTALAR-PYSERIAL.bat" >nul 2>&1
+REM  Bridge --onedir: o robocopy /E acima ja copiou a pasta resources\serial_bridge\.
+REM  Se o novo layout existe, remove o serial_bridge.exe --onefile LEGADO da raiz
+REM  (o que abusava de %TEMP%\_MEI*). Sem isso, o onefile antigo ficaria de resto.
+if exist "%RES%\serial_bridge\serial_bridge.exe" (
+  del /Q "%RES%\serial_bridge.exe" >nul 2>&1
+  del /Q "%RES%\app\serial_bridge.exe" >nul 2>&1
+)
 REM  locales: mantem SO en-US.pak e pt-BR.pak. Apagar TODOS quebra o Electron
 REM  (ele exige pelo menos o .pak do locale ativo / en-US para iniciar).
 if exist "%DEST%\locales" (
@@ -103,7 +110,7 @@ start "" "%AGENT_EXE%"
 
 echo ============================================================
 echo  Instalacao concluida. Agente iniciado.
-echo  - Bridge: serial_bridge.exe sem Python
+echo  - Bridge: serial_bridge\serial_bridge.exe (--onedir, sem Python, sem %%TEMP%%\_MEI)
 echo  - Boot: tarefa RENOV-Agent-Boot como SYSTEM sem login
 echo  - Watchdog: RENOV-Agent-Watchdog a cada 1 min
 echo  - Sem NTFS/icacls: OTA nunca trava; seguranca 100%% online

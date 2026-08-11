@@ -533,13 +533,19 @@ function resolvePythonBridgePath() {
 // antigo), cai no caminho Python de sempre: nunca deixa a fazenda sem bridge.
 function resolveCompiledBridgePath() {
   try {
-    const names = process.platform === "win32" ? ["serial_bridge.exe"] : ["serial_bridge"];
+    const exe = process.platform === "win32" ? "serial_bridge.exe" : "serial_bridge";
     const dirs = [process.resourcesPath, __dirname].filter(Boolean);
+    // v3.25.60: PREFERE o layout PyInstaller --onedir → as dependências ficam numa
+    // subpasta FIXA (resources/serial_bridge/) e NÃO usam %TEMP%\_MEI*. Assim, QUALQUER
+    // limpeza de Temp deixa de derrubar a bridge (bug recorrente da Sykue).
     for (const d of dirs) {
-      for (const n of names) {
-        const p = path.join(d, n);
-        if (fs.existsSync(p)) return p;
-      }
+      const oneDir = path.join(d, "serial_bridge", exe);
+      if (fs.existsSync(oneDir)) return oneDir;
+    }
+    // Fallback: --onefile legado (serial_bridge.exe na raiz) durante a transição.
+    for (const d of dirs) {
+      const oneFile = path.join(d, exe);
+      if (fs.existsSync(oneFile)) return oneFile;
     }
   } catch (_) {}
   return null;
