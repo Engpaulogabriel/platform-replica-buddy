@@ -6621,6 +6621,66 @@ async function reportUpdateStatus(patch) {
 // Removido o self-heal de icacls (o INSTALAR.bat não tranca mais nada, então a
 // pasta é gravável e o copy funciona direto). Sem permissões locais, sem icacls.
 
+// v3.25.57 — JWT fresco antes de pedir a signed URL + retry em 401.
+// CAUSA do "signed-url HTTP 401: invalid_or_expired_token" da Sykue: o agente
+// usava o access_token de getSession() (que podia já estar vencido/vencendo);
+// em Starlink lenta o JWT expirava ANTES da resposta da edge function. A signed
+// URL em si já é 24h — o 401 era na CHAMADA da function, não no download.
+// Fix: refreshSession() imediatamente antes (TTL cheio) e, se ainda vier 401/403,
+// força novo refresh e tenta mais uma vez.
+async function getFreshAccessToken() {
+  try {
+    const r = await withCloudTimeout(supabase.auth.refreshSession(), "auth.refreshSession", 20_000);
+    const t = r && r.data && r.data.session && r.data.session.access_token;
+    if (t && !r.error) return t;
+  } catch (_) { /* rede — cai no fallback abaixo */ }
+  try {
+    const s = await withCloudTimeout(supabase.auth.getSession(), "auth.getSession", 15_000);
+    return (s && s.data && s.data.session && s.data.session.access_token) || null;
+  } catch (_) { return null; }
+}
+
+// Retorna { ok, status, text, signed }. Renova o token a cada tentativa (o refresh
+// devolve JWT com TTL cheio) e retenta 1× quando o 401/403 for de token.
+async function requestAgentReleaseSignedUrl(version, tag) {
+  const baseUrl = (typeof activeSupabaseUrl !== "undefined" && activeSupabaseUrl) || SUPABASE_URL_DEFAULT;
+  const baseAnon = (typeof activeSupabaseAnonKey !== "undefined" && activeSupabaseAnonKey) || SUPABASE_ANON_DEFAULT;
+
+  const attempt = async () => {
+    const accessToken = await getFreshAccessToken();
+    if (!accessToken) return { ok: false, status: 0, text: "sem sessão autenticada", signed: null };
+    const fnRes = await withCloudTimeout(
+      fetch(`${baseUrl}/functions/v1/agent-release-signed-url`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${accessToken}`,
+          "apikey": baseAnon,
+        },
+        body: JSON.stringify({ version }),
+      }),
+      `${tag} signed-url`, 30_000,
+    );
+    if (!fnRes.ok) {
+      const txt = await fnRes.text().catch(() => "");
+      return { ok: false, status: fnRes.status, text: txt.slice(0, 200), signed: null };
+    }
+    const signed = await fnRes.json().catch(() => null);
+    return { ok: true, status: 200, text: "", signed };
+  };
+
+  let res;
+  try { res = await attempt(); }
+  catch (e) { return { ok: false, status: 0, text: `rede: ${e && e.message ? e.message : e}`, signed: null }; }
+
+  if (!res.ok && (res.status === 401 || res.status === 403)) {
+    pushLog("warn", "update", `[${tag}] signed-url ${res.status} (${res.text}) — renovando JWT e tentando novamente`);
+    try { res = await attempt(); }
+    catch (e) { return { ok: false, status: 0, text: `rede no retry: ${e && e.message ? e.message : e}`, signed: null }; }
+  }
+  return res;
+}
+
 async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize) {
   if (isInstallingUpdate) return;
   isInstallingUpdate = true;
@@ -6673,26 +6733,11 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
 
   try {
     pushLog("info", "update", `[OTA-asar] Solicitando URL assinada para v${version}...`);
-    const sessionRes = await supabase.auth.getSession();
-    const accessToken = sessionRes && sessionRes.data && sessionRes.data.session && sessionRes.data.session.access_token;
-    if (!accessToken) return recordFailure("sem sessão autenticada");
-
-    const baseUrl = (typeof activeSupabaseUrl !== "undefined" && activeSupabaseUrl) || SUPABASE_URL_DEFAULT;
-    const baseAnon = (typeof activeSupabaseAnonKey !== "undefined" && activeSupabaseAnonKey) || SUPABASE_ANON_DEFAULT;
-    const fnRes = await fetch(`${baseUrl}/functions/v1/agent-release-signed-url`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${accessToken}`,
-        "apikey": baseAnon,
-      },
-      body: JSON.stringify({ version }),
-    });
-    if (!fnRes.ok) {
-      const txt = await fnRes.text().catch(() => "");
-      return recordFailure(`signed-url HTTP ${fnRes.status}: ${txt.slice(0, 200)}`);
+    const res = await requestAgentReleaseSignedUrl(version, "OTA-asar");
+    if (!res.ok) {
+      return recordFailure(res.status === 0 ? (res.text || "sem sessão autenticada") : `signed-url HTTP ${res.status}: ${res.text}`);
     }
-    const signed = await fnRes.json();
+    const signed = res.signed;
     if (!signed || !signed.url) return recordFailure(`signed-url payload inválido`);
 
     const downloadUrl = signed.url;
@@ -6836,29 +6881,14 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
 async function resolveSignedUrlAndInstallExe(version, expectedHash, expectedSize) {
   try {
     pushLog("info", "update", `[OTA-exe] Solicitando URL assinada para v${version}...`);
-    const sessionRes = await supabase.auth.getSession();
-    const accessToken = sessionRes?.data?.session?.access_token;
-    if (!accessToken) {
-      pushLog("error", "update", "[OTA-exe] sem sessão autenticada — abortando");
+    const res = await requestAgentReleaseSignedUrl(version, "OTA-exe");
+    if (!res.ok) {
+      pushLog("error", "update", res.status === 0
+        ? `[OTA-exe] ${res.text || "sem sessão autenticada"} — abortando`
+        : `[OTA-exe] signed-url HTTP ${res.status}: ${res.text}`);
       return;
     }
-    const baseUrl = (typeof activeSupabaseUrl !== "undefined" && activeSupabaseUrl) || SUPABASE_URL_DEFAULT;
-    const baseAnon = (typeof activeSupabaseAnonKey !== "undefined" && activeSupabaseAnonKey) || SUPABASE_ANON_DEFAULT;
-    const fnRes = await fetch(`${baseUrl}/functions/v1/agent-release-signed-url`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${accessToken}`,
-        "apikey": baseAnon,
-      },
-      body: JSON.stringify({ version }),
-    });
-    if (!fnRes.ok) {
-      const txt = await fnRes.text().catch(() => "");
-      pushLog("error", "update", `[OTA-exe] signed-url HTTP ${fnRes.status}: ${txt.slice(0, 200)}`);
-      return;
-    }
-    const signed = await fnRes.json();
+    const signed = res.signed;
     if (!signed?.url) {
       pushLog("error", "update", "[OTA-exe] signed-url payload inválido");
       return;
