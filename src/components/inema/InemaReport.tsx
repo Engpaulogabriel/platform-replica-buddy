@@ -230,6 +230,31 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
       });
       y = (doc as any).lastAutoTable.finalY + 18;
 
+      // Poços outorgados — coordenadas EXATAMENTE como na portaria (DMS da
+      // outorga, NÃO do equipamento). É o que o órgão ambiental autorizou.
+      const wellRows = permitsForPdf.flatMap((p) =>
+        p.wells.map((wl) => [
+          p.permit_number,
+          wl.well_name,
+          wl.latitude ?? "—",
+          wl.longitude ?? "—",
+          fmtNum(wl.flow_rate_m3_day),
+          wl.datum ?? "—",
+        ]),
+      );
+      if (wellRows.length) {
+        doc.setFont("helvetica", "bold");
+        doc.text("Poços outorgados (coordenadas da portaria)", 30, y);
+        autoTable(doc, {
+          startY: y + 6,
+          head: [["Portaria", "Poço", "Latitude", "Longitude", "Vazão (m³/dia)", "Datum"]],
+          body: wellRows,
+          styles: { fontSize: 8, cellPadding: 3 },
+          headStyles: { fillColor: [66, 147, 80], textColor: 255 },
+        });
+        y = (doc as any).lastAutoTable.finalY + 18;
+      }
+
       doc.setFont("helvetica", "bold");
       doc.text(`Monitoramento (${fmtDate(range.from.toISOString())} a ${fmtDate(range.to.toISOString())})`, 30, y);
       autoTable(doc, {
@@ -336,7 +361,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
                   <div>
                     <div className="text-xs font-semibold text-muted-foreground mt-2 mb-1 flex items-center gap-1"><MapPin className="w-3 h-3" /> Poços outorgados</div>
                     <div className="overflow-x-auto">
-                      <Table>
+                      <Table className="md:[&_th]:px-2 md:[&_td]:px-2 md:[&_td]:py-1.5 xl:[&_th]:px-4 xl:[&_td]:p-4">
                         <TableHeader>
                           <TableRow>
                             <TableHead>Poço</TableHead>
@@ -422,7 +447,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
                 Período: {fmtDate(range.from.toISOString())} a {fmtDate(range.to.toISOString())} ({range.days} dia(s))
               </div>
               <div className="overflow-x-auto">
-                <Table>
+                <Table className="md:[&_th]:px-2 md:[&_td]:px-2 md:[&_td]:py-1.5 xl:[&_th]:px-4 xl:[&_td]:p-4">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Poço</TableHead>
@@ -463,7 +488,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
                 Período: {fmtDate(range.from.toISOString())} a {fmtDate(range.to.toISOString())} ({range.days} dia(s))
               </div>
               <div className="overflow-x-auto">
-                <Table>
+                <Table className="md:[&_th]:px-2 md:[&_td]:px-2 md:[&_td]:py-1.5 xl:[&_th]:px-4 xl:[&_td]:p-4">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Poço</TableHead>

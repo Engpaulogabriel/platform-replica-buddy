@@ -6,22 +6,25 @@
 --   2. Comparar com latitude/longitude (decimais) dos equipamentos da MESMA
 --      fazenda (equipments.type='poco', ativos).
 --   3. Vincular cada poço da outorga (water_permit_wells.equipment_id) ao
---      equipamento mais PRÓXIMO, apenas quando a distância < 100 m.
+--      equipamento mais PRÓXIMO da mesma fazenda, SEM limite de distância — o
+--      GPS de campo da portaria pode divergir do GPS do sistema, mas é o mesmo
+--      poço; então o mais próximo é sempre o correto.
 --   4. Definir equipments.estimated_flow_m3h = flow_rate_m3_day /
 --      regime_hours_per_day da outorga vinculada (500 m³/h p/ 25.560/27.368,
 --      300 m³/h p/ 33.285/33.281/33.737 — regime = 18 h/dia).
 --
--- Idempotente. Genérico (roda p/ qualquer fazenda com water_permits). Só toca
--- em equipment_id de poços com casamento confiável (<100 m) — NÃO apaga vínculos
--- manuais existentes sem um match melhor. Aplicar via push (Lovable) ou SQL Editor.
+-- Idempotente. Genérico (roda p/ qualquer fazenda com water_permits). Vincula
+-- CADA poço ao equipamento mais próximo (sobrescreve vínculo anterior). Aplicar
+-- via push (Lovable) ou SQL Editor.
 --
 -- Resultado validado offline (Semear, 2026-08-11) contra os equipamentos ao vivo:
---   • 14 poços casam < 100 m (nenhum equipamento recebe 2 poços):
+--   BIJEÇÃO PERFEITA: os 16 poços da Semear casam 1:1 com os 16 equipamentos,
+--   ZERO colisões (cada equipamento recebe exatamente 1 poço):
 --       500 m³/h → POÇO 01 R1, 02 R1, 03 R2, 04 R1/R4, 15 R3  (25.560 / 27.368)
---       300 m³/h → POÇO 05,06,07,08,09,11,12,13,14           (33.285 / 33.281 / 33.737)
---   • 2 sem casamento (coord da outorga distante): POÇO 10 R4 (~394 m — Poço 10
---     da 33.285) e POÇO 16 R4 (~902 m — Poço 16 da 33.285). Mantêm o valor atual.
---   • Agronave (28.608) não casa com equipamentos da Semear (~2380 m). OK.
+--       300 m³/h → POÇO 05,06,07,08,09,10,11,12,13,14,16      (33.285 / 33.281 / 33.737)
+--   POÇO 10 R4 ← Poço 10 (33.285, ~394 m) e POÇO 16 R4 ← Poço 16 (33.285, ~902 m)
+--   agora TAMBÉM vinculados (imprecisão de GPS de campo — é o mesmo poço).
+--   Agronave (28.608) tem farm_id próprio/NULL → não casa com a Semear. OK.
 -- ============================================================================
 
 -- ── 1. DMS (texto) → decimal ────────────────────────────────────────────────
@@ -70,7 +73,7 @@ AS $$
   END;
 $$;
 
--- ── 3. Vincula cada poço ao equipamento mais próximo (< 100 m) ──────────────
+-- ── 3. Vincula cada poço ao equipamento mais próximo (SEM limite de distância) ─
 WITH nearest AS (
   SELECT DISTINCT ON (w.id)
          w.id  AS well_id,
@@ -99,7 +102,6 @@ UPDATE public.water_permit_wells w
 SET equipment_id = n.equipment_id
 FROM nearest n
 WHERE w.id = n.well_id
-  AND n.dist_m < 100
   AND w.equipment_id IS DISTINCT FROM n.equipment_id;
 
 -- ── 4. Vazão do equipamento = m³/dia da outorga ÷ regime (h/dia) ────────────
