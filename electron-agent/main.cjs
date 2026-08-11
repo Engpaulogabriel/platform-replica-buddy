@@ -1181,6 +1181,44 @@ async function refreshCommTimeout() {
     }
   } catch (_) { /* mantém o valor atual */ }
 }
+
+// v3.25.63 — Desligamento PROGRAMADO não é acionamento LOCAL. Cache das regras
+// (scheduled_automations) da fazenda; se uma bomba desligar dentro da janela de
+// execução de uma regra ativa (do horário até fim das retentativas + folga), o
+// agente NÃO marca 'local' (badge some, relatório fica 'Automático'). Independe do
+// cache de forced_shutdown_enabled (que podia estar defasado — causa da regressão).
+let scheduledAutomationsCache = [];
+async function refreshScheduledAutomations() {
+  if (!supabase || !farmId) return;
+  try {
+    const { data } = await supabase
+      .from("scheduled_automations")
+      .select("time_brt, days_of_week, max_retries, retry_interval_min, is_active")
+      .eq("farm_id", farmId)
+      .eq("is_active", true);
+    scheduledAutomationsCache = (data || []).filter((a) => a && a.time_brt);
+  } catch (_) { /* mantém o cache atual */ }
+}
+const _DOW_CODES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+function isWithinScheduledShutdownWindow() {
+  if (!scheduledAutomationsCache.length) return false;
+  // America/Bahia = UTC-3 fixo (sem horário de verão).
+  const brt = new Date(Date.now() - 3 * 3600 * 1000);
+  const nowMin = brt.getUTCHours() * 60 + brt.getUTCMinutes();
+  const dow = _DOW_CODES[brt.getUTCDay()];
+  for (const a of scheduledAutomationsCache) {
+    const days = Array.isArray(a.days_of_week) ? a.days_of_week : [];
+    if (days.length && !days.includes(dow)) continue;
+    const m = String(a.time_brt).match(/^(\d{1,2}):(\d{2})/);
+    if (!m) continue;
+    const baseMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    const retries = Number(a.max_retries) || 3;
+    const interval = Number(a.retry_interval_min) || 5;
+    const endMin = baseMin + retries * interval + 5; // cobre a sequência de retentativas + folga
+    if (nowMin >= baseMin - 2 && nowMin <= endMin) return true;
+  }
+  return false;
+}
 function isInStartupSyncWindow() {
   return agentStartupAt > 0 && (Date.now() - agentStartupAt) < STARTUP_SYNC_DURATION_MS;
 }
@@ -3748,7 +3786,12 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
         ? (equipmentById.get(String(resolvedEqId))?.forced_shutdown_enabled === true)
         : false;
       const _isForcedOff = _fsEnabled && !realRunning;
-      originForRpc = _isTech ? "tech_terminal" : (_isForcedOff ? "remote-desired" : "local");
+      // v3.25.63: desligamento dentro da janela de uma automação programada NÃO é
+      // local (veio da plataforma). Independe do cache forced_shutdown_enabled.
+      const _isScheduledOff = !realRunning && isWithinScheduledShutdownWindow();
+      originForRpc = _isTech
+        ? "tech_terminal"
+        : ((_isForcedOff || _isScheduledOff) ? "remote-desired" : "local");
       const reason = safetyArmedForFrame
         ? "safety cancelado"
         : pendingCommandActive
@@ -8859,6 +8902,7 @@ async function tickAgentConfigWatch() {
   // Timeout de comunicação por fazenda — relido junto do watch de config (60s),
   // pode mudar sem OTA. Alimenta wasOfflineLong (proteção do PLC).
   await refreshCommTimeout();
+  await refreshScheduledAutomations(); // regras de desligamento programado (janela p/ não marcar 'local')
   try {
     const { data, error } = await supabase
       .from("agent_config")
@@ -8982,6 +9026,7 @@ async function startAgent(cfg) {
       if (supabase && farmId) {
         // Lê o timeout de comunicação da fazenda ANTES de decidir wasOfflineLong.
         await refreshCommTimeout();
+        await refreshScheduledAutomations();
         // STARTUP SYNC: mede o tempo OFFLINE (último heartbeat ANTES deste boot vs
         // agora) — LER antes de sobrescrever. > comm_timeout ⇒ proteção do PLC
         // desligou as bombas ⇒ bomba ligada = acionamento LOCAL (botoeira).

@@ -182,7 +182,11 @@ async function commandShutdown(supabase: any, a: any, onPumps: any[], step: Step
   // ORIGEM no relatório é feita pelo trigger BEFORE INSERT em automation_log.
   // Rótulo "Automação {HH}h" derivado do horário da regra (ex.: "Automação 17h").
   const hh = parseInt(String(a.time_brt ?? "").slice(0, 2), 10);
-  const changedBy = Number.isFinite(hh) ? `Automação ${hh}h` : (a.name || "Desligamento Programado");
+  // "Por" no relatório = NOME da regra (ex.: "Desligamento 17h Semear"); só cai no
+  // genérico "Automação {HH}h" se a regra não tiver nome.
+  const changedBy = (a.name && String(a.name).trim())
+    ? String(a.name).trim()
+    : (Number.isFinite(hh) ? `Automação ${hh}h` : "Desligamento Programado");
   const nowIso = new Date().toISOString();
   const acted: any[] = [];
   for (const p of onPumps) {
