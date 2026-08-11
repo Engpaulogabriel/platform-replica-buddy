@@ -37,8 +37,18 @@ type LogLine = { kind: "tx" | "rx" | "err" | "info"; text: string; at: number };
 const QUICK = ["PING", "STATUS", "RESET", "RESET_B", "REP:R3:PING", "REP:R3:STATUS", "REP:R3:RESET"];
 // Comandos que pedem confirmação antes de enviar (item 5).
 const DANGEROUS = /(^|:)RESET|CFG:FACTORY_RESET/i;
-const MAX_LOG = 100;
+const MAX_LOG = 300;
 const MAX_TIMEOUT_MS = 30_000;
+// Log ao vivo: reenfileira chunks de sniff (o agente limita cada sniff a 30s) até
+// o usuário parar ou atingir o teto de 10 min de segurança.
+const LIVE_MAX_MS = 10 * 60_000;
+const SNIFF_CHUNK_MS = 30_000;
+
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${String(s % 60).padStart(2, "0")}s` : `${s}s`;
+}
 
 function ts(at: number) {
   const d = new Date(at);
@@ -58,6 +68,13 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
   const [log, setLog] = useState<LogLine[]>([]);
   const [confirm, setConfirm] = useState<{ frame: string; run: () => void } | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  // Log ao vivo (captura contínua)
+  const [liveOn, setLiveOn] = useState(false);
+  const [liveStartedAt, setLiveStartedAt] = useState(0);
+  const [, setNowTick] = useState(0); // força re-render do contador a cada 1s
+  const [liveFilterId, setLiveFilterId] = useState(""); // "" = tudo; senão equipment id
+  const liveStopRef = useRef(false);
+  const liveFilterHwRef = useRef<string | null>(null);
 
   const selectedEquip = useMemo(() => equips.find((e) => e.id === equipId) || null, [equips, equipId]);
 
@@ -98,6 +115,28 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
 
   useEffect(() => { void loadFarms(); }, []);
   useEffect(() => { setEquipId(""); void loadEquips(farmId); }, [farmId]);
+
+  // Contador "Capturando há Xm Ys" enquanto o log ao vivo roda.
+  useEffect(() => {
+    if (!liveOn) return;
+    const id = window.setInterval(() => setNowTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [liveOn]);
+
+  // Auto-scroll: no modo ao vivo, mantém o topo (linha mais recente) visível.
+  useEffect(() => {
+    if (liveOn && logRef.current) logRef.current.scrollTop = 0;
+  }, [log, liveOn]);
+
+  // Filtro por equipamento → guarda o hw_id (TSNN) num ref lido pelo loop ao vivo.
+  useEffect(() => {
+    const eq = equips.find((e) => e.id === liveFilterId) || null;
+    liveFilterHwRef.current = eq?.hw_id ? String(eq.hw_id) : null;
+  }, [liveFilterId, equips]);
+
+  // Ao trocar de fazenda ou desmontar, encerra a captura ao vivo.
+  useEffect(() => () => { liveStopRef.current = true; }, []);
+  useEffect(() => { if (liveOn) stopLive(); }, [farmId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = 0; }, [log]);
 
   if (!isAdmin) {
@@ -224,6 +263,50 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
     }
   };
 
+  // ▶ Log ao Vivo — captura CONTÍNUA. O agente limita cada serial_sniff a 30s, então
+  // reenfileiramos chunks em sequência até o usuário parar (⏹) ou atingir 10 min.
+  const stopLive = () => { liveStopRef.current = true; };
+
+  const startLive = async () => {
+    if (!farmId || liveOn || sniffing || busy) return;
+    liveStopRef.current = false;
+    setLiveOn(true);
+    const startedAt = Date.now();
+    setLiveStartedAt(startedAt);
+    push("info", "▶ Log ao vivo iniciado — captura contínua (máx 10 min). Use ⏹ Parar para encerrar.");
+    const seen = new Set<string>();
+    try {
+      while (!liveStopRef.current && (Date.now() - startedAt) < LIVE_MAX_MS) {
+        const remaining = LIVE_MAX_MS - (Date.now() - startedAt);
+        const chunk = Math.min(SNIFF_CHUNK_MS, remaining);
+        if (chunk < 1_000) break;
+        const commandId = await enqueueAgentCommand({
+          farmId, kind: "serial_sniff", payload: { duration_ms: chunk }, expiresInSec: 90,
+        });
+        await watchAgentCommand(commandId, (partial) => {
+          const d = (partial.result?.data as SerialSniffData) ?? null;
+          if (!d?.frames) return;
+          const hw = liveFilterHwRef.current; // filtro pode mudar durante a captura
+          for (const f of d.frames) {
+            const key = `${f.at}|${f.frame}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            if (hw && !String(f.frame).includes(hw)) continue;
+            push("rx", f.frame);
+          }
+        }, { pollMs: 1_500, timeoutMs: chunk + 15_000 });
+        if (seen.size > 5_000) seen.clear(); // evita crescer sem limite
+      }
+      if (!liveStopRef.current) push("info", "⏹ Teto de 10 min atingido — captura encerrada.");
+    } catch (e) {
+      push("err", (e as Error).message);
+    } finally {
+      liveStopRef.current = true;
+      setLiveOn(false);
+      push("info", "⏹ Log ao vivo encerrado");
+    }
+  };
+
   return (
     <div className="space-y-4">
       <Card>
@@ -337,12 +420,45 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
           <div className="flex flex-wrap items-center gap-2 border-t pt-3">
             <Radar className="w-4 h-4 text-muted-foreground" />
             <span className="text-sm text-muted-foreground">Ver tráfego passando (passivo):</span>
-            <Button size="sm" variant="secondary" disabled={sniffing || !farmId} onClick={() => startSniff(10_000)}>
+            <Button size="sm" variant="secondary" disabled={sniffing || liveOn || !farmId} onClick={() => startSniff(10_000)}>
               {sniffing ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null} Iniciar Captura (10s)
             </Button>
-            <Button size="sm" variant="ghost" disabled={sniffing || !farmId} onClick={() => startSniff(30_000)}>
+            <Button size="sm" variant="ghost" disabled={sniffing || liveOn || !farmId} onClick={() => startSniff(30_000)}>
               30s
             </Button>
+          </div>
+
+          {/* LOG AO VIVO (captura contínua) */}
+          <div className="flex flex-wrap items-center gap-2 border-t pt-3">
+            <Radar className="w-4 h-4 text-primary" />
+            <span className="text-sm text-muted-foreground">Log ao vivo (contínuo):</span>
+            {!liveOn ? (
+              <Button size="sm" disabled={sniffing || busy || !farmId} onClick={() => void startLive()}>
+                ▶ Log ao Vivo
+              </Button>
+            ) : (
+              <Button size="sm" variant="destructive" onClick={stopLive}>
+                ⏹ Parar
+              </Button>
+            )}
+            {liveOn && (
+              <Badge variant="outline" className="font-normal gap-1">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Capturando há {fmtElapsed(Date.now() - liveStartedAt)}
+              </Badge>
+            )}
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-muted-foreground">Filtrar:</span>
+              <Select value={liveFilterId || "all"} onValueChange={(v) => setLiveFilterId(v === "all" ? "" : v)}>
+                <SelectTrigger className="h-8 w-[190px] text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Todos os equipamentos</SelectItem>
+                  {equips.filter((e) => e.hw_id).map((e) => (
+                    <SelectItem key={e.id} value={e.id}>{e.name} ({e.hw_id})</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         </CardContent>
       </Card>
