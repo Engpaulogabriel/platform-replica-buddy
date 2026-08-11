@@ -1,12 +1,21 @@
 // F2 — Fingerprint mismatch detection.
 // Ao voltar aba (visibilitychange -> visible), recalcula o fingerprint e
-// compara com o gravado em active_sessions.device_fp. Diferenças acima do
-// limiar disparam logout + alerta.
+// compara com o gravado em active_sessions.device_fp.
+//
+// v(fix login): NÃO DESLOGA MAIS por divergência de fingerprint. O visitorId do
+// FingerprintJS oscila na MESMA máquina (atualização de navegador/driver de GPU,
+// ruído de canvas/WebGL), gerando falso-positivo que derrubava a sessão do
+// operador — inaceitável em campo. Mantemos a DETECÇÃO + o alerta em
+// security_alerts (o admin vê e pode revogar manualmente via sessão única),
+// mas a sessão do usuário NUNCA é encerrada por este guard. Só deslogamos por:
+// logout manual, token revogado (401) ou 30+ dias sem uso.
 
 import { supabase } from "@/integrations/supabase/client";
 import { getDeviceInfo } from "@/lib/deviceFingerprint";
 
-const MISMATCH_LIMIT = 2;
+// Divergências consecutivas antes de registrar um alerta (não desloga). Mais alto
+// que antes (era 2) para reduzir ruído de alerta por oscilação natural.
+const MISMATCH_LIMIT = 3;
 
 let started = false;
 let lastCheck = 0;
@@ -58,7 +67,7 @@ export function startFingerprintGuard(
           try {
             await supabase.from("security_alerts").insert({
               alert_type: "fingerprint_mismatch",
-              severity: "high",
+              severity: "medium",
               details: {
                 user_id: userId,
                 session_id: sessionId,
@@ -66,10 +75,13 @@ export function startFingerprintGuard(
                 current_fp: fingerprint.slice(-8),
                 mismatch_count: next,
                 user_agent: navigator.userAgent,
+                note: "detecção apenas — logout automático desativado (falso-positivo em campo)",
               } as any,
             } as any);
           } catch { /* noop */ }
-          onMismatch();
+          // NÃO desloga: apenas registra. onMismatch fica intencionalmente sem uso.
+          console.warn("[AUTH] fingerprint mismatch registrado (sem logout)", { count: next });
+          void onMismatch; // evita unused sem alterar a assinatura pública
         }
       } else {
         const { error: updateError } = await supabase

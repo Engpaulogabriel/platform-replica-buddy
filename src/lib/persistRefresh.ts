@@ -1,11 +1,12 @@
 // "Remember me" seguro: salva o refresh_token do Supabase criptografado
-// (AES-GCM) com chave derivada do device fingerprint + TTL de 7 dias.
+// (AES-GCM) com chave derivada do device fingerprint + TTL de 30 dias.
 // Copiar o localStorage para outra máquina não permite descriptografar,
 // pois o fingerprint (canvas/UA/hardware) será diferente.
+// v(fix login): TTL 7d → 30d — o usuário só reautentica após 30+ dias sem uso.
 import { getDeviceInfo } from "@/lib/deviceFingerprint";
 
 const STORAGE_KEY = "renov-persist-refresh";
-const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

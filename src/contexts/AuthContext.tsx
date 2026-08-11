@@ -172,26 +172,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Refresh proativo a cada 45min — garante rotação antes do JWT expirar em 60min,
-  // mesmo se o auto-refresh interno do supabase-js falhar por rede instável.
+  // Persiste o refresh_token corrente (remember-me criptografado) sempre que a
+  // sessão muda. v(fix login): REMOVIDO o refresh cego a cada 45min — ele
+  // rotacionava o refresh_token repetidamente e, em rede lenta (Starlink), a
+  // resposta rotacionada podia se perder e invalidar o token, forçando login. O
+  // watchdog abaixo já refaz o token de forma orientada à expiração (só quando
+  // falta pouco), minimizando rotações e o risco de perda no meio do caminho.
   useEffect(() => {
     if (!session?.refresh_token) return;
     void persistRefreshToken(session.refresh_token);
-    const REFRESH_INTERVAL = 45 * 60 * 1000;
-    const interval = window.setInterval(async () => {
-      console.log("[AUTH] Proactive token refresh…");
-      try {
-        const { data, error } = await supabase.auth.refreshSession();
-        if (error) console.warn("[AUTH] Proactive refresh failed, will retry", error.message);
-        else {
-          console.log("[AUTH] Token refreshed proactively");
-          if (data.session?.refresh_token) void persistRefreshToken(data.session.refresh_token);
-        }
-      } catch (e) {
-        console.warn("[AUTH] Proactive refresh threw", e);
-      }
-    }, REFRESH_INTERVAL);
-    return () => window.clearInterval(interval);
   }, [session?.refresh_token]);
 
   // Watchdog do auto-refresh: o supabase-js já faz refresh automático, mas em
@@ -221,10 +210,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (attempt < AUTH_REFRESH_RETRY_ATTEMPTS) await wait(AUTH_REFRESH_RETRY_DELAY_MS);
         }
         console.log("[AUTH] Token refresh failed after retries", lastError);
+        // v(fix login): NÃO desloga proativamente, nem em erro "fatal". Em rede
+        // instável (Starlink), o refresh_token rotacionado pode se perder e o erro
+        // aparecer como "not found" mesmo com sessão ainda utilizável. Deixamos o
+        // access token vigente rodar até realmente expirar; se e quando o token
+        // estiver de fato morto, uma chamada 401 dispara SIGNED_OUT, e o handler de
+        // SIGNED_OUT ainda faz 3 tentativas de recuperação antes de limpar. Assim,
+        // só caímos para o login quando a sessão está COMPROVADAMENTE inválida —
+        // nunca por um soluço de rede. Aqui apenas registramos e tentamos de novo.
         if (isFatalRefreshError(lastError)) {
-          await signOutWithReason("token_refresh_failed");
+          console.warn("[AUTH] refresh reportou token inválido — aguardando expiração real (sem logout proativo)");
         }
-        // Erro de rede/timeout não encerra sessão; tenta novamente no próximo ciclo.
       } catch (error) {
         console.log("[AUTH] Token refresh retry skipped after network error", error);
       } finally {
