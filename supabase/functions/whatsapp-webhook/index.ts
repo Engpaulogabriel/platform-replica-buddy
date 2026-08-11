@@ -3258,6 +3258,16 @@ const APPROVER_ROLES = new Set(["super_admin", "manager", "approver"]);
 const MANAGER_ROLES = new Set(["super_admin", "manager"]);
 
 // ─── Super admin bypass: dono do sistema tem TODAS permissões, sempre ──
+// HARDCODE dos super_admins GLOBAIS (últimos 8 dígitos do WhatsApp). Acesso a
+// TODAS as fazendas, SEM depender de env, platform_admins ou whatsapp_operators.role
+// (o cruzamento por env/tabela não pegava em produção). Fonte única e à prova de
+// config externa. 99608294 = Paulo Gabriel; 81503951 = 2º dono.
+const GLOBAL_SUPER_ADMIN_TAILS = ["99608294", "81503951"];
+function isGlobalSuperAdminPhone(phone: string): boolean {
+  const tail = String(phone ?? "").replace(/\D/g, "").slice(-8);
+  return tail.length === 8 && GLOBAL_SUPER_ADMIN_TAILS.includes(tail);
+}
+
 function isSuperAdmin(op: any): boolean {
   if (!op) return false;
   return op.role === "super_admin" || op.is_super_admin === true;
@@ -7756,32 +7766,24 @@ async function processMessage(from: string, text: string, location: WaLocation =
   });
   // Se houver registros duplicados para o mesmo WhatsApp, super_admin vence sempre.
   // Isso evita cair em um registro comum/antigo e bloquear permissões do dono.
-  const matched = operatorMatches.find((o: any) => isSuperAdmin(o)) ?? operatorMatches[0];
+  let matched = operatorMatches.find((o: any) => isSuperAdmin(o)) ?? operatorMatches[0];
 
-  // Super-admin GLOBAL: o dono da plataforma tem acesso a TODAS as fazendas mesmo
-  // que a linha em whatsapp_operators não esteja marcada super_admin em cada uma.
-  // Cruza com a fonte real de super_admin: (a) platform_admins pelo user_id
-  // vinculado; (b) allowlist de telefones por env SUPER_ADMIN_PHONES (últimos 8
-  // dígitos, separados por vírgula). Sem isto, "Status Fazenda X" caía em
-  // "🔒 sem acesso" para o super_admin não cadastrado naquela fazenda.
-  if (matched && !isSuperAdmin(matched)) {
-    try {
-      let isGlobalSuper = false;
-      const superPhones = (Deno.env.get("SUPER_ADMIN_PHONES") || "")
-        .split(",").map((s) => s.replace(/\D/g, "").slice(-8)).filter((s) => s.length >= 8);
-      if (superPhones.includes(incomingTail8)) isGlobalSuper = true;
-      if (!isGlobalSuper && (matched as any).user_id) {
-        const { data: pa } = await supabase
-          .from("platform_admins").select("user_id").eq("user_id", (matched as any).user_id).maybeSingle();
-        if (pa) isGlobalSuper = true;
-      }
-      if (isGlobalSuper) {
-        (matched as any).is_super_admin = true;
-        console.log(`[super-admin] ${incomingTail8} reconhecido como super_admin GLOBAL — acesso a todas as fazendas`);
-      }
-    } catch (e) {
-      console.warn("[super-admin] cross-check falhou:", (e as Error).message);
+  // ═══ SUPER_ADMIN GLOBAL — HARDCODE, ANTES DE QUALQUER 🔒 ════════════════════
+  // Se o remetente está na allowlist fixa (GLOBAL_SUPER_ADMIN_TAILS), ele é
+  // super_admin com acesso a TODAS as fazendas — SEMPRE, sem depender de env,
+  // platform_admins nem whatsapp_operators.role. Se por acaso não tiver linha em
+  // whatsapp_operators, sintetiza uma op mínima de super_admin para não travar.
+  if (isGlobalSuperAdminPhone(phone)) {
+    if (matched) {
+      (matched as any).is_super_admin = true;
+      (matched as any).role = "super_admin";
+    } else {
+      matched = {
+        id: null, phone, name: "Super Admin", role: "super_admin", is_super_admin: true,
+        is_active: true, farm_id: null, default_farm_id: null,
+      } as any;
     }
+    console.log(`[super-admin] ${incomingTail8} é super_admin GLOBAL (hardcode) — acesso a todas as fazendas`);
   }
 
   // ── STEP B: unknown/revoked sender → permitir fluxo de cadastro por código ──
