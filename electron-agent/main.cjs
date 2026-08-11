@@ -2287,9 +2287,32 @@ function refreshDiskFree() {
   return lastDiskFreeMb;
 }
 
-// Boot: limpeza leve + mede o disco. Depois, a cada 30 min: se < 5 GB, agressiva.
+// CAUSA-RAIZ do disco cheio: a bridge compilada (PyInstaller --onefile) extrai
+// ~8MB em %TEMP%\_MEIxxxxx a cada execução. Se morre por taskkill/crash, a pasta
+// NÃO é limpa e acumula GBs. Aqui apagamos as _MEI* ÓRFÃS. O 'rd /s /q ... 2>nul'
+// pula automaticamente as pastas EM USO (arquivos travados pela bridge viva), então
+// a bridge rodando NÃO é afetada — só os resíduos de kills/crashes somem.
+function cleanupMeiFolders() {
+  if (process.platform !== "win32") return;
+  try {
+    require("child_process").exec(
+      'for /d %i in ("%TEMP%\\_MEI*") do @rd /s /q "%i" 2>nul',
+      { windowsHide: true, timeout: 60_000 },
+      () => {},
+    );
+  } catch (_) {}
+}
+let meiCleanupTimer = null;
+
+// Boot: limpeza leve + _MEI órfãs + mede o disco. Depois, a cada 30 min: se < 5 GB,
+// agressiva. E a cada 6h: varredura de _MEI órfãs.
 function startDiskWatchdog() {
   try { cleanupDiskTemp(false); } catch (_) {}
+  try { cleanupMeiFolders(); } catch (_) {}
+  if (!meiCleanupTimer) {
+    meiCleanupTimer = setInterval(() => { try { cleanupMeiFolders(); } catch (_) {} }, 6 * 60 * 60 * 1000);
+    try { meiCleanupTimer.unref?.(); } catch (_) {}
+  }
   refreshDiskFree();
   const t = setInterval(() => {
     const free = refreshDiskFree();
@@ -5079,8 +5102,14 @@ function stopBridge() {
     const finish = () => { if (!done) { done = true; resolve(); } };
 
     proc.once("exit", finish);
+    // GRACEFUL: QUIT no stdin → a bridge sai limpo e o PyInstaller apaga o PRÓPRIO
+    // _MEI (atexit). Damos 2.5s antes do kill à força (antes eram 1.2s). Se sair pelo
+    // QUIT, nenhuma _MEI órfã é criada.
     try { proc.stdin.write(Buffer.from("QUIT\n", "utf8")); } catch (e) {}
-    setTimeout(() => { try { proc.kill(); } catch (e) {} finish(); }, 1200);
+    setTimeout(() => { try { proc.kill(); } catch (e) {} finish(); }, 2500);
+    // Pós-parada: 2s depois do kill, varre _MEI órfãs (o kill não limpa). A bridge
+    // nova (se já subiu) tem sua _MEI travada → o rd a pula. Best-effort.
+    setTimeout(() => { try { cleanupMeiFolders(); } catch (_) {} }, 4500);
   });
 }
 
