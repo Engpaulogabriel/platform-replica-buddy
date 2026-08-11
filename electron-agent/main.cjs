@@ -2187,6 +2187,124 @@ function startMemoryCleanup() {
   try { memoryCleanupTimer.unref?.(); } catch (_) {}
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LIMPEZA DE DISCO — os PCs de fazenda enchem com temp/crash/cache do Electron.
+// ═══════════════════════════════════════════════════════════════════════════
+let lastDiskFreeMb = null;
+let lastAggressiveCleanupAt = 0;
+const DISK_CHECK_INTERVAL_MS = 30 * 60 * 1000;   // reavalia disco a cada 30 min
+const DISK_LOW_MB = 5000;                         // < 5 GB → limpeza agressiva
+const DISK_ALERT_MB = 2000;                       // < 2 GB → reporta disk_low
+const AGGRESSIVE_THROTTLE_MS = 6 * 60 * 60 * 1000; // no máx 1 limpeza agressiva/6h
+
+function getDiskFreeMb() {
+  try {
+    if (typeof fs.statfsSync === "function") {
+      const drive = process.platform === "win32" ? ((process.env.SystemDrive || "C:") + "\\") : "/";
+      const st = fs.statfsSync(drive);
+      return Math.round((Number(st.bavail) * Number(st.bsize)) / (1024 * 1024));
+    }
+  } catch (_) {}
+  try {
+    if (process.platform === "win32") {
+      const out = execSync('wmic logicaldisk where "DeviceID=\'C:\'" get FreeSpace /value', { timeout: 5000 }).toString();
+      const m = out.match(/FreeSpace=(\d+)/);
+      if (m) return Math.round(Number(m[1]) / (1024 * 1024));
+    }
+  } catch (_) {}
+  return null;
+}
+
+// Remove temp/resíduos. `aggressive` também limpa o cache do Electron (recriado no uso).
+function cleanupDiskTemp(aggressive) {
+  const removed = [];
+  const delFile = (p) => { try { if (fs.existsSync(p)) { fs.unlinkSync(p); removed.push(p); } } catch (_) {} };
+  const delDir = (p) => { try { if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true, force: true }); removed.push(p); } } catch (_) {} };
+  const olderThan = (p, days) => { try { return (Date.now() - fs.statSync(p).mtimeMs) > days * 86400_000; } catch (_) { return false; } };
+  let ofs; try { ofs = require("original-fs"); } catch (_) { ofs = fs; }
+  const userData = (() => { try { return app.getPath("userData"); } catch (_) { return null; } })();
+
+  // 1) backups do OTA em resources/ (.bak sobrescrito por versão; app_pre_ota.bak = pasta)
+  const rp = process.resourcesPath;
+  if (rp) {
+    try { const b = path.join(rp, "app.asar.bak"); if (ofs.existsSync(b)) { ofs.unlinkSync(b); removed.push(b); } } catch (_) {}
+    delDir(path.join(rp, "app_pre_ota.bak"));
+    // resíduos de build que não deveriam estar em resources/
+    for (const d of ["build", "dist", "__pycache__"]) delDir(path.join(rp, d));
+    try { for (const f of fs.readdirSync(rp)) if (f.endsWith(".spec")) delFile(path.join(rp, f)); } catch (_) {}
+  }
+  if (userData) {
+    // 2) downloads de OTA que sobraram (falha no meio)
+    try {
+      const upd = path.join(userData, "updates");
+      if (fs.existsSync(upd)) for (const f of fs.readdirSync(upd)) {
+        if (/\.(asar\.new|asar\.old|tmp|partial)$/i.test(f) || f.startsWith("app-")) delFile(path.join(upd, f));
+      }
+    } catch (_) {}
+    // 3) crash dumps do Electron (Crashpad) — só dumps prontos/pendentes
+    for (const sub of ["Crashpad/completed", "Crashpad/reports", "Crashpad/pending"]) {
+      try {
+        const d = path.join(userData, sub);
+        if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) delFile(path.join(d, f));
+      } catch (_) {}
+    }
+    // 5) logs antigos (>7 dias) se existirem
+    try {
+      if (fs.existsSync(LOG_DIR)) for (const f of fs.readdirSync(LOG_DIR)) {
+        const full = path.join(LOG_DIR, f);
+        if (olderThan(full, 7)) delFile(full);
+      }
+    } catch (_) {}
+    // 6) AGRESSIVO: cache do Electron (recriado automaticamente)
+    if (aggressive) {
+      for (const d of ["Cache", "GPUCache", "Code Cache", "DawnCache", "DawnGraphiteCache", "GrShaderCache", "blob_storage", "Crashpad"]) {
+        delDir(path.join(userData, d));
+      }
+    }
+  }
+  // 4) %TEMP%\electron* e *renov* — só entradas ANTIGAS (>1 dia), evita apagar o
+  //    temp da sessão viva ou de terceiros.
+  try {
+    const tmp = os.tmpdir();
+    for (const f of fs.readdirSync(tmp)) {
+      const low = f.toLowerCase();
+      if (!(low.startsWith("electron") || low.includes("renov") || low.startsWith("scoped_dir"))) continue;
+      const full = path.join(tmp, f);
+      if (!olderThan(full, 1)) continue;
+      try { (fs.statSync(full).isDirectory() ? delDir : delFile)(full); } catch (_) {}
+    }
+  } catch (_) {}
+
+  if (removed.length) {
+    try { pushLog("info", "system", `[DISK] limpeza${aggressive ? " AGRESSIVA" : ""}: ${removed.length} item(s) removido(s)`); } catch (_) {}
+  }
+  return removed.length;
+}
+
+function refreshDiskFree() {
+  const mb = getDiskFreeMb();
+  if (mb != null) lastDiskFreeMb = mb;
+  return lastDiskFreeMb;
+}
+
+// Boot: limpeza leve + mede o disco. Depois, a cada 30 min: se < 5 GB, agressiva.
+function startDiskWatchdog() {
+  try { cleanupDiskTemp(false); } catch (_) {}
+  refreshDiskFree();
+  const t = setInterval(() => {
+    const free = refreshDiskFree();
+    try {
+      if (free != null && free < DISK_LOW_MB && (Date.now() - lastAggressiveCleanupAt) > AGGRESSIVE_THROTTLE_MS) {
+        lastAggressiveCleanupAt = Date.now();
+        pushLog("warn", "system", `[DISK] livre=${free}MB (< ${DISK_LOW_MB}MB) — limpeza agressiva`);
+        cleanupDiskTemp(true);
+        refreshDiskFree();
+      }
+    } catch (_) {}
+  }, DISK_CHECK_INTERVAL_MS);
+  try { t.unref?.(); } catch (_) {}
+}
+
 // Auto-reboot watchdog: a cada 5 min reinicia o agente sozinho quando
 //   • heap > 500MB (memory leak inevitável)  →  log "[AUTO-REBOOT] Memória excedeu 500MB"
 //   • porta serial não recebeu nenhum byte há > 10 min  →  log "[AUTO-REBOOT] Serial inativa por 10 minutos"
@@ -6291,9 +6409,12 @@ async function upsertSiteHealth() {
           com_port: comPort,
           com_connected: bridgeReady,
           agent_version: AGENT_VERSION,
-          // FASE 2: reporta dpapi_failed (credentials.enc copiado de outra máquina)
-          // sem sobrescrever um erro de bridge já existente.
-          last_error: credentialsDpapiFailed ? (lastBridgeError || "dpapi_failed") : lastBridgeError,
+          // disco livre p/ monitoramento; < 2 GB vira alerta em last_error.
+          disk_free_mb: lastDiskFreeMb,
+          // last_error prioriza disco baixo (crise atual), senão dpapi/bridge.
+          last_error: (lastDiskFreeMb != null && lastDiskFreeMb < DISK_ALERT_MB)
+            ? "disk_low"
+            : (credentialsDpapiFailed ? (lastBridgeError || "dpapi_failed") : lastBridgeError),
         },
         { onConflict: "farm_id" }
       ),
@@ -6626,6 +6747,12 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
     try {
       await supabase.from("farms").update({ agent_previous_version: AGENT_VERSION }).eq("id", farmId);
     } catch (_) {}
+
+    // PREVENÇÃO DE DISCO: apaga o backup do asar (.bak, 11MB) imediatamente após
+    // o sucesso. Rollback passa a usar o fluxo OTA da versão anterior (o código já
+    // trata .bak ausente). Também remove resíduos de temp/download.
+    try { if (originalFs.existsSync(bakAsar)) originalFs.unlinkSync(bakAsar); } catch (_) {}
+    try { cleanupDiskTemp(false); } catch (_) {}
 
     pushLog("info", "update", `[OTA-asar] Atualização v${version} instalada com sucesso — reiniciando`);
     setTimeout(() => { void relaunchAgent("update_agent", 0); }, 1500);
@@ -8573,6 +8700,7 @@ async function startAgent(cfg) {
     logRotationTimer = setInterval(rotateOldLogs, 6 * 60 * 60 * 1000);
     startMemoryCleanup();
     startAutoRebootWatchdog();
+    startDiskWatchdog();  // limpeza de temp/crash/cache + disk_free_mb no heartbeat
     // v3.25.40: #7 memory guard (5min) + #6 restart preventivo diário às 03:00.
     startMemoryGuard();
     startPreventiveRestart();
