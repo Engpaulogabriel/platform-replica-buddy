@@ -192,8 +192,26 @@ Deno.serve(async (req) => {
       return new Date(shared).getTime() > new Date(e.last_communication).getTime() ? shared : e.last_communication;
     };
 
-    // Threshold por TIPO de equipamento — alinhado com a plataforma web.
+    // Timeout de comunicação POR FAZENDA (farms.comm_timeout_minutes). Sobrepõe o
+    // fallback por tipo. Default 15 quando nulo. Mesma regra do frontend e do agente:
+    // offline só depois deste tempo sem comunicação real (proteção do PLC ativa).
+    const farmTimeoutMin = new Map<string, number>();
+    {
+      const fids = Array.from(new Set(equips.map((e) => e.farm_id)));
+      if (fids.length > 0) {
+        const { data: ftRows } = await sb.from("farms").select("id, comm_timeout_minutes").in("id", fids);
+        for (const f of (ftRows ?? []) as Array<{ id: string; comm_timeout_minutes: number | null }>) {
+          if (typeof f.comm_timeout_minutes === "number" && f.comm_timeout_minutes > 0) {
+            farmTimeoutMin.set(f.id, f.comm_timeout_minutes);
+          }
+        }
+      }
+    }
+
+    // Threshold por equipamento — fazenda configurada vence; senão fallback por TIPO.
     const offlineMinFor = (e: Equip) => {
+      const configured = farmTimeoutMin.get(e.farm_id);
+      if (configured != null) return configured;
       const t = (e.type ?? "").toLowerCase();
       if (t === "bombeamento") return OFFLINE_MIN_BOMBA; // 20 min
       return OFFLINE_MIN_POCO; // 15 min — poço e demais

@@ -80,6 +80,11 @@ function PumpCardImpl(props: PumpCardProps) {
   const isOffline = pump.communicationStatus === "offline";
   const isUnstable = pump.communicationStatus === "unstable";
   const isCommFail = stateInfo.isCommFail;
+  // Minutos desde a última comunicação real — alimenta o indicador discreto "⏱ Xmin"
+  // (instável, sem alarme) e o tooltip de offline. null quando nunca comunicou.
+  const minutesSinceComm = pump.lastCommunication
+    ? Math.max(0, Math.floor((Date.now() - new Date(pump.lastCommunication).getTime()) / 60_000))
+    : null;
 
   // ── Badge de origem LOCAL ─────────────────────────────────────────────────
   // Só em estado ESTÁVEL: NUNCA durante uma transição (Ligando/Desligando). Um pump
@@ -99,7 +104,7 @@ function PumpCardImpl(props: PumpCardProps) {
   const bg = inMaintenance
     ? "bg-[#FFF3E0] dark:bg-amber-950/30 border-l-[3px] border-l-amber-500 border-amber-300/60"
     : isOffline
-      ? "bg-muted/60 border-muted-foreground/30 opacity-70 grayscale"
+      ? "bg-destructive/10 border-destructive/50"
       : isCommFail
         ? "bg-destructive/25 border-destructive/70"
         : isTransitioning
@@ -111,7 +116,7 @@ function PumpCardImpl(props: PumpCardProps) {
   const dotColor = inMaintenance
     ? "bg-muted-foreground"
     : isOffline
-      ? "bg-muted-foreground"
+      ? "bg-destructive"
       : isCommFail
         ? "bg-destructive animate-pulse"
         : isTransitioning
@@ -191,10 +196,18 @@ function PumpCardImpl(props: PumpCardProps) {
           </Popover>
           {isOffline && (
             <span
-              className="text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded bg-muted text-muted-foreground border border-muted-foreground/40 shrink-0"
-              title={`Sem comunicação há mais de 20 min — última: ${formatLastSeen(pump.lastCommunication)}`}
+              className="text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded bg-destructive/20 text-destructive border border-destructive/50 shrink-0"
+              title={`Sem comunicação${minutesSinceComm != null ? ` há ${minutesSinceComm} min` : ""} — proteção do PLC ativa (mantém o último estado). Última: ${formatLastSeen(pump.lastCommunication)}`}
             >
-              Offline
+              ⚠️ Offline · Proteção ativa
+            </span>
+          )}
+          {isUnstable && minutesSinceComm != null && (
+            <span
+              className="text-[9px] font-medium tracking-wide px-1 py-0.5 rounded bg-muted/60 text-muted-foreground shrink-0"
+              title={`Último estado conhecido — sem nova comunicação há ${minutesSinceComm} min (ainda dentro do tempo de proteção). Última: ${formatLastSeen(pump.lastCommunication)}`}
+            >
+              ⏱ {minutesSinceComm}min
             </span>
           )}
           {/* Badges LOCAL/AUTO/MANUTENÇÃO ficam na LINHA 2 (abaixo), nunca na linha do nome. */}
@@ -346,14 +359,14 @@ function PumpCardImpl(props: PumpCardProps) {
                 ) : (
                   <span className={`text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded ${
                     isOffline
-                      ? "bg-muted text-muted-foreground"
-                      : isUnstable
-                        ? "bg-warning/20 text-warning"
-                        : pump.running
-                          ? "bg-primary/20 text-primary"
-                          : "bg-destructive/20 text-destructive"
+                      ? "bg-destructive/20 text-destructive"
+                      : pump.running
+                        ? "bg-primary/20 text-primary"
+                        : "bg-destructive/20 text-destructive"
                   }`}>
-                    {isOffline ? "Offline" : isUnstable ? "Instável" : pump.running ? "Ligado" : "Desligado"}
+                    {/* Offline → proteção do PLC ativa. Instável → mostra o ÚLTIMO estado
+                        conhecido (Ligado/Desligado), nunca "offline"; o "⏱ Xmin" fica no badge. */}
+                    {isOffline ? "Offline · Proteção ativa" : pump.running ? "Ligado" : "Desligado"}
                   </span>
                 )}
               </div>

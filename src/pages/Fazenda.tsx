@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Building2, Copy, KeyRound, Check, FileText, RotateCw, Loader2 } from "lucide-react";
+import { Building2, Copy, KeyRound, Check, FileText, RotateCw, Loader2, Timer } from "lucide-react";
 import { notify } from "@/lib/notify";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { usePlatformAdmin } from "@/hooks/usePlatformAdmin";
@@ -104,6 +104,105 @@ function InemaToggleCard({ farmId }: { farmId: string | null }) {
   );
 }
 
+// Timeout de comunicação — SÓ super-admin. Grava farms.comm_timeout_minutes:
+// tempo (min) sem comunicação real antes de um equipamento ser considerado offline.
+// Deve bater com o parâmetro de proteção do PLC (que mantém o último estado com
+// autonomia local durante esse período). Lido pelo frontend, backend e agente.
+function CommTimeoutCard({ farmId }: { farmId: string | null }) {
+  const { isPlatformAdmin, loading } = usePlatformAdmin();
+  const [value, setValue] = useState<string>("15");
+  const [initial, setInitial] = useState<number>(15);
+  const [loadingVal, setLoadingVal] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    if (!farmId) return;
+    setLoadingVal(true);
+    (async () => {
+      const { data, error } = await supabase
+        .from("farms")
+        .select("comm_timeout_minutes" as any)
+        .eq("id", farmId)
+        .maybeSingle();
+      if (!alive) return;
+      const v = !error && data ? (data as any).comm_timeout_minutes : null;
+      const n = typeof v === "number" && v > 0 ? v : 15;
+      setValue(String(n));
+      setInitial(n);
+      setLoadingVal(false);
+    })();
+    return () => { alive = false; };
+  }, [farmId]);
+
+  if (loading || !isPlatformAdmin) return null;
+
+  const parsed = Math.round(Number(value));
+  const valid = Number.isFinite(parsed) && parsed >= 1 && parsed <= 120;
+  const dirty = valid && parsed !== initial;
+
+  const save = async () => {
+    if (!farmId || saving || !dirty) return;
+    setSaving(true);
+    const { error } = await supabase
+      .from("farms")
+      .update({ comm_timeout_minutes: parsed } as any)
+      .eq("id", farmId);
+    setSaving(false);
+    if (error) {
+      notify.fail("Timeout de comunicação", "Não foi possível salvar o timeout.");
+    } else {
+      setInitial(parsed);
+      setValue(String(parsed));
+      notify.ok("Timeout de comunicação", `Equipamentos ficam offline após ${parsed} min sem comunicação.`);
+    }
+  };
+
+  return (
+    <Card className="bg-card border-border">
+      <CardHeader>
+        <CardTitle className="text-base text-foreground flex items-center gap-2">
+          <Timer className="w-4 h-4 text-primary" /> Timeout de comunicação
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-end gap-3">
+            <div className="flex-1 max-w-[220px]">
+              <Label htmlFor="comm-timeout" className="text-sm text-foreground">
+                Tempo sem comunicação (minutos)
+              </Label>
+              <Input
+                id="comm-timeout"
+                type="number"
+                min={1}
+                max={120}
+                inputMode="numeric"
+                value={value}
+                disabled={loadingVal || saving}
+                onChange={(e) => setValue(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <Button onClick={save} disabled={!dirty || saving || loadingVal} className="shrink-0">
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Salvar"}
+            </Button>
+          </div>
+          {!valid && (
+            <p className="text-xs text-destructive">Informe um valor entre 1 e 120 minutos.</p>
+          )}
+          <p className="text-xs text-muted-foreground">
+            Tempo sem comunicação antes de considerar o equipamento offline. Deve corresponder
+            ao parâmetro de proteção configurado no PLC. Enquanto a plataforma aguarda este tempo,
+            o PLC mantém o último estado com autonomia local (proteção ativa). Interferências
+            momentâneas de RF (1–2 ciclos) não derrubam mais o equipamento para offline.
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // Reiniciar Agente — SÓ super-admin (platform_admin). Enfileira agent_restart em
 // agent_commands; o agente Electron executa app.relaunch()+app.exit(0) e volta em
 // segundos. Elimina AnyDesk para reiniciar o .exe da fazenda remotamente.
@@ -190,6 +289,7 @@ const FazendaContent = () => {
     <div className="space-y-4">
       <SedeCoordsCard />
       <AgentRestartCard farmId={farmId} />
+      <CommTimeoutCard farmId={farmId} />
       <InemaToggleCard farmId={farmId} />
       <Card className="bg-card border-border">
         <CardHeader>

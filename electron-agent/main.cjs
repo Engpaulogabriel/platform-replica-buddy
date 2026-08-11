@@ -961,6 +961,32 @@ let startupSyncEndTimer = null;
 // de sobrescrever o site_health.
 let bootOfflineMs = 0;
 let wasOfflineLong = false;
+// v3.25.56 — Timeout de comunicação configurável por fazenda (farms.comm_timeout_minutes).
+// É o tempo SEM comunicação real antes de considerar um equipamento offline — e deve
+// bater com o parâmetro de proteção do PLC. Relido no boot e a cada watch de config
+// (60s), sem OTA. Default 15 min. NÃO é decidido por nº de falhas de polling: o
+// comm_failures/backoff serve APENAS ao reforço de retry, nunca para "offline".
+const COMM_TIMEOUT_DEFAULT_MS = 15 * 60_000;
+let commTimeoutMs = COMM_TIMEOUT_DEFAULT_MS;
+async function refreshCommTimeout() {
+  if (!supabase || !farmId) return;
+  try {
+    const { data, error } = await supabase
+      .from("farms")
+      .select("comm_timeout_minutes")
+      .eq("id", farmId)
+      .maybeSingle();
+    if (error || !data) return;
+    const min = Number(data.comm_timeout_minutes);
+    if (Number.isFinite(min) && min > 0) {
+      const next = Math.round(min) * 60_000;
+      if (next !== commTimeoutMs) {
+        pushLog("info", "system", `[CONFIG] comm_timeout_minutes = ${Math.round(min)} min (offline por TEMPO, não por falhas)`);
+        commTimeoutMs = next;
+      }
+    }
+  } catch (_) { /* mantém o valor atual */ }
+}
 function isInStartupSyncWindow() {
   return agentStartupAt > 0 && (Date.now() - agentStartupAt) < STARTUP_SYNC_DURATION_MS;
 }
@@ -8454,6 +8480,9 @@ async function applyAgentConfig(newCfg, options = {}) {
 
 async function tickAgentConfigWatch() {
   if (!supabase || !farmId) return;
+  // Timeout de comunicação por fazenda — relido junto do watch de config (60s),
+  // pode mudar sem OTA. Alimenta wasOfflineLong (proteção do PLC).
+  await refreshCommTimeout();
   try {
     const { data, error } = await supabase
       .from("agent_config")
@@ -8569,18 +8598,20 @@ async function startAgent(cfg) {
     // a versão real do .asar em execução.
     try {
       if (supabase && farmId) {
+        // Lê o timeout de comunicação da fazenda ANTES de decidir wasOfflineLong.
+        await refreshCommTimeout();
         // STARTUP SYNC: mede o tempo OFFLINE (último heartbeat ANTES deste boot vs
-        // agora) — LER antes de sobrescrever. > 15 min ⇒ proteção do PLC desligou
-        // as bombas ⇒ bomba ligada = acionamento LOCAL (botoeira). Ver applySpontaneous.
+        // agora) — LER antes de sobrescrever. > comm_timeout ⇒ proteção do PLC
+        // desligou as bombas ⇒ bomba ligada = acionamento LOCAL (botoeira).
         try {
           const { data: prevSh } = await supabase
             .from("site_health").select("last_heartbeat").eq("farm_id", farmId).maybeSingle();
           if (prevSh?.last_heartbeat) {
             bootOfflineMs = Date.now() - new Date(prevSh.last_heartbeat).getTime();
-            wasOfflineLong = bootOfflineMs > STARTUP_SYNC_DURATION_MS;
+            wasOfflineLong = bootOfflineMs > commTimeoutMs;
             if (wasOfflineLong) {
               pushLog("warn", "system",
-                `[STARTUP SYNC] agente ficou OFFLINE ~${Math.round(bootOfflineMs / 60000)}min (>15min) — bombas ligadas serão tratadas como acionamento LOCAL (botoeira)`);
+                `[STARTUP SYNC] agente ficou OFFLINE ~${Math.round(bootOfflineMs / 60000)}min (> ${Math.round(commTimeoutMs / 60000)}min) — bombas ligadas serão tratadas como acionamento LOCAL (botoeira)`);
             }
           }
         } catch (_) { /* sem site_health prévio (1º boot) → wasOfflineLong=false */ }

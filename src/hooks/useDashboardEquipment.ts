@@ -31,13 +31,25 @@ import { usePendingManualCommands, type PendingManualCommand } from "@/hooks/use
 const MANUAL_PENDING_WINDOW_MS = 300_000;
 
 
-// Janela de classificação de comunicação por equipamento:
-//   • 1 saída no PLC          → 15 min
-//   • >1 saídas no mesmo PLC  → 20 min (Boosters e similares)
-// Sem `last_communication` → não marca OFFLINE (evita falsos positivos).
+// Janela de classificação de comunicação por equipamento.
+// REGRA: o equipamento só é OFFLINE após `comm_timeout_minutes` (configurável por
+// fazenda, ver setActiveFarmCommTimeout) SEM comunicação real — NÃO após N falhas
+// de polling. Interferência momentânea de RF (1–2 ciclos) não derruba o card.
+// Fallback (fazenda sem valor carregado): 15 min (1 saída) / 20 min (>1 saída).
 // Página web e WhatsApp seguem EXATAMENTE a mesma regra.
 const OFFLINE_MIN_SINGLE = 15;
 const OFFLINE_MIN_MULTI = 20;
+
+// Timeout de comunicação da fazenda ativa (farms.comm_timeout_minutes, em min).
+// Quando definido (>0), sobrepõe o fallback 15/20. O loader em useDashboardEquipment
+// atualiza este valor ao trocar de fazenda; o default é 15 (igual ao PLC).
+let activeFarmCommTimeoutMin: number | null = null;
+export function setActiveFarmCommTimeout(min: number | null | undefined): void {
+  activeFarmCommTimeoutMin = (typeof min === "number" && min > 0) ? Math.round(min) : null;
+}
+// Abaixo deste tempo sem comunicação NÃO é offline — mostramos apenas um indicador
+// discreto "⏱ Xmin" (sem alarme): é o último estado conhecido, só faz tempo.
+const UNSTABLE_MIN = 2;
 const STATUS_REFRESH_MS = 30_000;
 // Estados "Ligando…/Desligando…" aguardam a janela física completa antes de
 // qualquer falha definitiva. Resposta antiga em 8s NÃO é falha.
@@ -105,8 +117,10 @@ function applyConfirmedOffLatch(
 
 export type EquipmentCommunicationStatus = "online" | "unstable" | "offline";
 
-const offlineWindowMs = (outputsInPlc: number | null | undefined): number =>
-  ((outputsInPlc ?? 1) > 1 ? OFFLINE_MIN_MULTI : OFFLINE_MIN_SINGLE) * 60_000;
+const offlineWindowMs = (outputsInPlc: number | null | undefined): number => {
+  if (activeFarmCommTimeoutMin != null) return activeFarmCommTimeoutMin * 60_000;
+  return ((outputsInPlc ?? 1) > 1 ? OFFLINE_MIN_MULTI : OFFLINE_MIN_SINGLE) * 60_000;
+};
 
 export const getEquipmentCommunicationStatus = (
   lastComm: string | null | undefined,
@@ -117,8 +131,11 @@ export const getEquipmentCommunicationStatus = (
   if (Number.isNaN(t)) return "online";
 
   const diff = Date.now() - t;
-  if (diff < offlineWindowMs(outputsInPlc)) return "online";
-  return "offline";
+  // OFFLINE só depois do timeout de comunicação (proteção do PLC ativa).
+  if (diff >= offlineWindowMs(outputsInPlc)) return "offline";
+  // Entre UNSTABLE_MIN e o timeout: ainda online, mas com indicador discreto de tempo.
+  if (diff >= UNSTABLE_MIN * 60_000) return "unstable";
+  return "online";
 };
 
 
@@ -370,6 +387,25 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
     const id = setInterval(load, 300_000); // 5 min — horímetro mensal não muda rápido
     return () => { cancelled = true; clearInterval(id); };
   }, [farmId, cloudPumps.length]);
+
+  // Timeout de comunicação da fazenda (farms.comm_timeout_minutes). Relido ao
+  // trocar de fazenda; alimenta getEquipmentCommunicationStatus (offline por TEMPO).
+  // Default 15 min quando a coluna vier nula. Sem alterar OTA/agente.
+  useEffect(() => {
+    if (!farmId) { setActiveFarmCommTimeout(null); return; }
+    let cancelled = false;
+    void (async () => {
+      const { data } = await supabase
+        .from("farms")
+        .select("comm_timeout_minutes" as any)
+        .eq("id", farmId)
+        .maybeSingle();
+      if (cancelled) return;
+      const v = (data as any)?.comm_timeout_minutes;
+      setActiveFarmCommTimeout(typeof v === "number" && v > 0 ? v : 15);
+    })();
+    return () => { cancelled = true; };
+  }, [farmId]);
 
   useEffect(() => {
     const localTimeoutsFromCloud: { equipmentId: string; name: string }[] = [];
