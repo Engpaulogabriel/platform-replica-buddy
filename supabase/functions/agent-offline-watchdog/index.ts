@@ -25,6 +25,16 @@ const AGENT_OFFLINE_MS = 5 * 60_000;      // #1: 5 min sem heartbeat
 const BRIDGE_DEAD_GRACE_MS = 5 * 60_000;  // #2: bridge morta por >= 5 min antes de avisar
 const DAILY_REMINDER_MS = 24 * 60 * 60_000; // reenvio: no máximo 1x/dia enquanto persistir
 
+// Fazendas de TESTE que NUNCA recebem alerta automático (agente offline, bridge
+// morta, nada) — só respondem quando consultadas pelo WhatsApp. Por nome
+// (normalizado) ou por farm_id via env ALERT_SKIP_FARM_IDS (csv).
+const ALERT_SKIP_FARM_NAMES = new Set(["laboratorio renov"]);
+const ALERT_SKIP_FARM_IDS = new Set(
+  (Deno.env.get("ALERT_SKIP_FARM_IDS") || "").split(",").map((s) => s.trim()).filter(Boolean),
+);
+const normFarmName = (n: string) =>
+  n.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+
 // ── EMAIL crítico (Resend) — configs por env (secret na edge function) ──────
 const EMAIL_TO = Deno.env.get("ALERT_EMAIL_TO") || "contato@renovelectronics.com.br";
 const RESEND_FROM = Deno.env.get("RESEND_FROM") || "RENOV Alertas <onboarding@resend.dev>";
@@ -123,6 +133,10 @@ Deno.serve(async (req) => {
   for (const r of (sh ?? []) as any[]) {
     if (r?.farm?.is_demo || !r.last_heartbeat) continue;
     const farmName = r?.farm?.name ?? "Fazenda";
+    // Fazenda de TESTE (Laboratório RENOV) → NENHUM alerta automático.
+    if (ALERT_SKIP_FARM_IDS.has(r.farm_id) || ALERT_SKIP_FARM_NAMES.has(normFarmName(farmName))) {
+      continue;
+    }
     const hbAge = nowMs - new Date(r.last_heartbeat).getTime();
     const agentOffline = hbAge > AGENT_OFFLINE_MS;
 
