@@ -24,6 +24,7 @@ import PlatformBackups from "@/components/platform/PlatformBackups";
 import PlatformUsers from "@/components/platform/PlatformUsers";
 import PlatformTechnicians from "@/components/platform/PlatformTechnicians";
 import PlatformAlerts from "@/components/platform/PlatformAlerts";
+import PlatformAlertSettings from "@/components/platform/PlatformAlertSettings";
 import PlatformReports from "@/components/platform/PlatformReports";
 import PlatformRemoteControl from "@/components/platform/PlatformRemoteControl";
 import PlatformSerialTerminal from "@/components/platform/PlatformSerialTerminal";
@@ -168,6 +169,7 @@ export default function PlatformAdmin() {
         <TabsList className="!grid grid-cols-2 w-full !h-auto gap-1 sm:!inline-flex sm:w-auto sm:flex-wrap sm:justify-start [&>*]:min-w-0 [&>*]:whitespace-normal [&>*]:text-center">
           <TabsTrigger value="farms"><Building2 className="w-4 h-4 mr-1.5" />Fazendas</TabsTrigger>
           <TabsTrigger value="alerts"><Bell className="w-4 h-4 mr-1.5" />Alertas</TabsTrigger>
+          <TabsTrigger value="alert_cfg"><Bell className="w-4 h-4 mr-1.5" />Config. Alertas</TabsTrigger>
           <TabsTrigger value="reports"><FileText className="w-4 h-4 mr-1.5" />Relatórios</TabsTrigger>
           <TabsTrigger value="remote"><Power className="w-4 h-4 mr-1.5" />Controle remoto</TabsTrigger>
           <TabsTrigger value="serial"><TerminalSquare className="w-4 h-4 mr-1.5" />Terminal Serial</TabsTrigger>
@@ -352,6 +354,10 @@ export default function PlatformAdmin() {
 
         <TabsContent value="alerts" className="mt-4">
           <PlatformAlerts isAdmin={isAdmin} />
+        </TabsContent>
+
+        <TabsContent value="alert_cfg" className="mt-4">
+          <PlatformAlertSettings isAdmin={isAdmin} />
         </TabsContent>
 
         <TabsContent value="reports" className="mt-4">

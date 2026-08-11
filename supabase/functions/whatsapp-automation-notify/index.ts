@@ -1992,13 +1992,18 @@ async function processImmediateAlert(supabase: any, config: any, phoneNumberId: 
         updated_at: new Date().toISOString(),
       }).eq("id", state.id);
     } else {
-      // Alerta normal: dedup por 10 minutos se ainda ativo.
+      // Alerta normal: cada alerta CRÍTICO é enviado UMA vez por ocorrência.
+      // Enquanto o estado seguir ativo, só reenviamos como LEMBRETE DIÁRIO (24h) —
+      // no máximo 1 por dia. Um novo evento (voltou online → caiu de novo) apaga o
+      // estado (watchdog clearState) e reenvia na hora. Antes eram 10 min, o que
+      // fazia o "AGENTE OFFLINE" repetir a cada ciclo do cron (bug reportado).
+      const DAILY_REMINDER_MS = 24 * 60 * 60 * 1000;
       const nowMs = Date.now();
       if (state?.is_active && state.last_sent_at) {
         const ageMs = nowMs - new Date(state.last_sent_at).getTime();
-        if (ageMs < 10 * 60 * 1000) {
-          console.log(`[NOTIFY] watchdog alert ${baseType} suppressed (last sent ${Math.round(ageMs/1000)}s ago)`);
-          return { ok: true, mode: "immediate", type: "alert", sent: 0, skipped: "antispam_10min" };
+        if (ageMs < DAILY_REMINDER_MS) {
+          console.log(`[NOTIFY] watchdog alert ${baseType} suppressed (last sent ${Math.round(ageMs/60000)}min ago, <24h)`);
+          return { ok: true, mode: "immediate", type: "alert", sent: 0, skipped: "antispam_24h" };
         }
       }
       const payload = {

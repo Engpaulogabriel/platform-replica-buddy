@@ -7673,6 +7673,32 @@ async function processMessage(from: string, text: string, location: WaLocation =
   // Isso evita cair em um registro comum/antigo e bloquear permissões do dono.
   const matched = operatorMatches.find((o: any) => isSuperAdmin(o)) ?? operatorMatches[0];
 
+  // Super-admin GLOBAL: o dono da plataforma tem acesso a TODAS as fazendas mesmo
+  // que a linha em whatsapp_operators não esteja marcada super_admin em cada uma.
+  // Cruza com a fonte real de super_admin: (a) platform_admins pelo user_id
+  // vinculado; (b) allowlist de telefones por env SUPER_ADMIN_PHONES (últimos 8
+  // dígitos, separados por vírgula). Sem isto, "Status Fazenda X" caía em
+  // "🔒 sem acesso" para o super_admin não cadastrado naquela fazenda.
+  if (matched && !isSuperAdmin(matched)) {
+    try {
+      let isGlobalSuper = false;
+      const superPhones = (Deno.env.get("SUPER_ADMIN_PHONES") || "")
+        .split(",").map((s) => s.replace(/\D/g, "").slice(-8)).filter((s) => s.length >= 8);
+      if (superPhones.includes(incomingTail8)) isGlobalSuper = true;
+      if (!isGlobalSuper && (matched as any).user_id) {
+        const { data: pa } = await supabase
+          .from("platform_admins").select("user_id").eq("user_id", (matched as any).user_id).maybeSingle();
+        if (pa) isGlobalSuper = true;
+      }
+      if (isGlobalSuper) {
+        (matched as any).is_super_admin = true;
+        console.log(`[super-admin] ${incomingTail8} reconhecido como super_admin GLOBAL — acesso a todas as fazendas`);
+      }
+    } catch (e) {
+      console.warn("[super-admin] cross-check falhou:", (e as Error).message);
+    }
+  }
+
   // ── STEP B: unknown/revoked sender → permitir fluxo de cadastro por código ──
   if (!matched) {
     const trimmed = (text || "").trim();

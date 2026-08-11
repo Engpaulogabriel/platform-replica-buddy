@@ -111,16 +111,48 @@ Deno.serve(async (req) => {
     alert_type = body.kind;
   }
 
-  // ═══ KILL-SWITCH DE POLÍTICA (por decisão do dono) ═════════════════════════
-  // O WhatsApp SÓ envia 2 alertas de SISTEMA (AGENTE OFFLINE e BRIDGE MORTA), e
-  // ambos vêm do agent-offline-watchdog → whatsapp-automation-notify. Esta função
-  // (local_change, bridge_offline, offline, back_online, agent_tx_stalled/TX
-  // travada, level, safety_timer, etc.) fica TOTALMENTE DESATIVADA — nada sai por
-  // aqui. Reativar quando os alertas forem configuráveis por fazenda.
-  console.log(`[POLICY] whatsapp-alerts DESATIVADO — descartado alert_type=${alert_type} farm=${farm_id}`);
-  return new Response(JSON.stringify({ ok: true, status: "alerts_disabled_policy", alert_type }), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+  // ═══ POLÍTICA DE ALERTAS — CONFIGURÁVEL POR FAZENDA (opt-in) ═══════════════
+  // Os 2 alertas OBRIGATÓRIOS (AGENTE OFFLINE / BRIDGE MORTA) NÃO passam por aqui:
+  // vêm do agent-offline-watchdog → whatsapp-automation-notify e não podem ser
+  // desativados. Aqui só saem os alertas CONFIGURÁVEIS e SOMENTE se a fazenda os
+  // ativou explicitamente na plataforma (aba "Alertas"). Default = desativado.
+  // Todo tipo não-configurável (bridge_*, agent_*, tx_stalled, safety, level…) é
+  // descartado — não é papel desta função enviá-los.
+  const CONFIGURABLE_TYPE_COL: Record<string, string> = {
+    local_change: "alert_ligar_desligar",
+    offline: "alert_sem_resposta",
+    com_missing: "alert_sem_resposta",
+    back_online: "alert_com_restaurada",
+    peak_hours: "alert_pico",
+  };
+  const _cfgCol = CONFIGURABLE_TYPE_COL[String(alert_type)];
+  let _alertRecipients = "admin";
+  if (!_cfgCol) {
+    console.log(`[POLICY] whatsapp-alerts: tipo não-configurável descartado alert_type=${alert_type} farm=${farm_id}`);
+    return new Response(JSON.stringify({ ok: true, status: "alerts_policy_off", alert_type }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  {
+    let enabled = false;
+    if (farm_id) {
+      const { data: s } = await supabase
+        .from("whatsapp_alert_settings")
+        .select("alerts_master_enabled, alert_ligar_desligar, alert_sem_resposta, alert_com_restaurada, alert_pico, alert_recipients")
+        .eq("farm_id", farm_id)
+        .maybeSingle();
+      if (s) {
+        enabled = (s as any).alerts_master_enabled === true && (s as any)[_cfgCol] === true;
+        _alertRecipients = String((s as any).alert_recipients ?? "admin");
+      }
+    }
+    if (!enabled) {
+      console.log(`[POLICY] whatsapp-alerts: ${alert_type} desativado p/ fazenda ${farm_id} (sem opt-in)`);
+      return new Response(JSON.stringify({ ok: true, status: "type_disabled_by_farm", alert_type }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+  }
 
   if (isSemear(farm_id)) {
     semearLog("INBOUND alert", { alert_type, equipment_id, equipment_name, new_running, farm_id, farm_name, force });
@@ -253,6 +285,18 @@ Deno.serve(async (req) => {
     }
     operators = adminList;
     console.log(`[whatsapp-alerts] alerta TÉCNICO '${alert_type}' → SÓ admins (${adminList.length}); CLIENTE não recebe`);
+  }
+
+  // Destinatários configuráveis por fazenda (admin | operators | all). Só se aplica
+  // a tipos NÃO-técnicos (local_change, peak_hours) — a regra absoluta "técnico só
+  // admin" (offline/back_online/com_missing) permanece e nunca vai ao cliente.
+  if (!TECH_ALERT_TYPES.has(String(alert_type))) {
+    if (_alertRecipients === "admin") {
+      operators = (operators ?? []).filter((o: any) => o.role === "super_admin" || o.role === "admin");
+    } else if (_alertRecipients === "operators") {
+      operators = (operators ?? []).filter((o: any) => o.role !== "super_admin");
+    }
+    // "all" → mantém todos
   }
 
   if ((!operators || !operators.length) && (isBridgeAlert || CRITICAL_ALERT_TYPES.has(String(alert_type)))) {
