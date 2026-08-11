@@ -53,6 +53,14 @@ const condTone = (s: string) =>
     : s === "vencida" ? "bg-destructive/20 text-destructive border-destructive/50"
       : "bg-warning/15 text-warning border-warning/40";
 
+// Portaria principal = outorga vigente mais recente (fallback: a de validade mais longa).
+function pickMainPortaria(list: Permit[]): Permit | null {
+  if (!list.length) return null;
+  const vigentes = list.filter((p) => daysToExpiry(p.validity_end) >= 0);
+  const pool = vigentes.length ? vigentes : list;
+  return pool.slice().sort((a, b) => new Date(b.permit_date).getTime() - new Date(a.permit_date).getTime())[0];
+}
+
 export function InemaReport({ farmId }: { farmId: string | null }) {
   const [permits, setPermits] = useState<Permit[]>([]);
   const [pocos, setPocos] = useState<Poco[]>([]);
@@ -149,8 +157,27 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
   }), [monitoring, authByEquip, authByPocoNumber, range.days]);
 
   // PDF oficial — DADOS DA OUTORGA vindos de water_permits (não da inema_permits/config).
-  const exportPDF = () => {
+  const exportPDF = async () => {
     try {
+      // Rebusca FRESCA no clique — o PDF nunca depende do estado do componente
+      // (evita "—" por timing / estado não carregado). Fallback: usa o state.
+      let src: Permit[] = permits;
+      if (farmId) {
+        try {
+          const { data: pr } = await supabase.from("water_permits" as any)
+            .select("*").eq("farm_id", farmId).order("validity_end", { ascending: true });
+          const pl = (pr ?? []) as any[];
+          if (pl.length) {
+            const ids = pl.map((p) => p.id);
+            const { data: w } = await supabase.from("water_permit_wells" as any).select("*").in("permit_id", ids);
+            const wl = (w ?? []) as any[];
+            src = pl.map((p) => ({ ...p, wells: wl.filter((x) => x.permit_id === p.id), conditions: [] })) as Permit[];
+          }
+        } catch (_) { /* mantém o state */ }
+      }
+      const permitsForPdf = src;
+      const mainForPdf = pickMainPortaria(permitsForPdf);
+
       const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
       const w = doc.internal.pageSize.getWidth();
       doc.setFillColor(66, 147, 80); doc.rect(0, 0, w, 50, "F");
@@ -163,7 +190,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
       doc.setTextColor(0, 0, 0);
 
       const wellsSum = (p: Permit) => p.wells.reduce((a, wl) => a + Number(wl.flow_rate_m3_day || 0), 0);
-      const mp = mainPortaria;
+      const mp = mainForPdf;
       let y = 70;
       doc.setFontSize(11); doc.setFont("helvetica", "bold"); doc.text("Dados da outorga (principal)", 30, y); y += 15;
       doc.setFontSize(10); doc.setFont("helvetica", "normal");
@@ -193,7 +220,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
       autoTable(doc, {
         startY: y + 6,
         head: [["Portaria", "Processo", "Validade", "Área (ha)", "Poços", "Vazão total (m³/dia)"]],
-        body: permits.map((p) => [
+        body: permitsForPdf.map((p) => [
           p.permit_number, p.process_number,
           `${fmtDate(p.validity_start)}–${fmtDate(p.validity_end)}`,
           fmtNum(p.irrigated_area_ha, 2), String(p.wells.length), fmtNum(wellsSum(p)),
@@ -227,13 +254,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
   // Nome do equipamento vinculado (só leitura aqui; o vínculo é editado no Setor Técnico).
   const equipNameById = useMemo(() => new Map(pocos.map((e) => [e.id, e.name])), [pocos]);
 
-  // Portaria principal = outorga vigente mais recente (fallback: a de validade mais longa).
-  const mainPortaria = useMemo(() => {
-    if (permits.length === 0) return null;
-    const vigentes = permits.filter((p) => daysToExpiry(p.validity_end) >= 0);
-    const pool = vigentes.length ? vigentes : permits;
-    return pool.slice().sort((a, b) => new Date(b.permit_date).getTime() - new Date(a.permit_date).getTime())[0];
-  }, [permits]);
+  const mainPortaria = useMemo(() => pickMainPortaria(permits), [permits]);
 
   if (!farmId) return <Card><CardContent className="py-8 text-center text-muted-foreground">Selecione uma fazenda.</CardContent></Card>;
 
