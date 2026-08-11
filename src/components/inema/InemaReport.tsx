@@ -224,14 +224,8 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
     }
   };
 
-  // Vincula um poço da portaria a um equipamento físico (water_permit_wells.equipment_id).
-  const linkWell = async (wellId: string, equipmentId: string) => {
-    const eqId = equipmentId === "none" ? null : equipmentId;
-    setPermits((prev) => prev.map((p) => ({ ...p, wells: p.wells.map((wl) => wl.id === wellId ? { ...wl, equipment_id: eqId } : wl) })));
-    const { error } = await supabase.from("water_permit_wells" as any).update({ equipment_id: eqId }).eq("id", wellId);
-    if (error) { notify.fail("Vínculo", "Não foi possível salvar o vínculo."); void load(); }
-    else notify.ok("Vínculo", eqId ? "Poço vinculado ao equipamento." : "Vínculo removido.");
-  };
+  // Nome do equipamento vinculado (só leitura aqui; o vínculo é editado no Setor Técnico).
+  const equipNameById = useMemo(() => new Map(pocos.map((e) => [e.id, e.name])), [pocos]);
 
   // Portaria principal = outorga vigente mais recente (fallback: a de validade mais longa).
   const mainPortaria = useMemo(() => {
@@ -340,14 +334,10 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
                               <TableCell className="font-mono text-xs">{w.longitude ?? "—"}</TableCell>
                               <TableCell className="text-right">{fmtNum(w.flow_rate_m3_day)}</TableCell>
                               <TableCell className="text-xs">{w.datum ?? "—"}</TableCell>
-                              <TableCell>
-                                <Select value={w.equipment_id ?? "none"} onValueChange={(v) => void linkWell(w.id, v)}>
-                                  <SelectTrigger className="h-7 w-[160px] text-xs"><SelectValue placeholder="Vincular…" /></SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem value="none">— não vinculado —</SelectItem>
-                                    {pocos.map((eq) => <SelectItem key={eq.id} value={eq.id}>{eq.name}</SelectItem>)}
-                                  </SelectContent>
-                                </Select>
+                              <TableCell className="text-xs">
+                                {w.equipment_id
+                                  ? (equipNameById.get(w.equipment_id) ?? "—")
+                                  : <span className="text-muted-foreground">— não vinculado —</span>}
                               </TableCell>
                             </TableRow>
                           ))}
