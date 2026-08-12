@@ -38,23 +38,28 @@ export default function Automacoes() {
     })();
   }, [activeFarmId]);
 
-  // Load history of last 30 executions for this farm
+  // Histórico REAL das execuções automáticas (desligamento programado etc.):
+  // lê de automation_log onde origin='auto' — o trigger BEFORE INSERT marca
+  // origin='auto' e actor_label = nome da regra (ex.: "Desligamento 17h Semear")
+  // a partir de equipments.last_changed_by. Cada linha = 1 equipamento; agrupamos
+  // por regra + dia na `executionRows` abaixo. (Antes lia automation_execution_history,
+  // preenchido só pelo sistema legado `automations`, que fica vazio para a Semear.)
   useEffect(() => {
-    if (!activeFarmId || items.length === 0) {
+    if (!activeFarmId) {
       setHistory([]);
       return;
     }
     void (async () => {
-      const ids = items.map((a) => a.id);
       const { data } = await supabase
-        .from("automation_execution_history")
-        .select("*")
-        .in("automation_id", ids)
-        .order("triggered_at", { ascending: false })
-        .limit(30);
+        .from("automation_log")
+        .select("id, equipment_name, action, result, actor_label, occurred_at")
+        .eq("farm_id", activeFarmId)
+        .eq("origin", "auto")
+        .order("occurred_at", { ascending: false })
+        .limit(400);
       setHistory(data ?? []);
     })();
-  }, [activeFarmId, items]);
+  }, [activeFarmId]);
 
   const equipmentNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -70,6 +75,33 @@ export default function Automacoes() {
 
   const active = items.filter((a) => a.is_active);
   const inactive = items.filter((a) => !a.is_active);
+
+  // Agrupa as linhas do automation_log (1 por equipamento) em 1 execução por
+  // regra + dia: mostra quantos equipamentos e o resultado consolidado.
+  const executionRows = useMemo(() => {
+    const groups = new Map<string, {
+      key: string; label: string; firstAt: string; lastAt: string;
+      equipamentos: Set<string>; ok: number; fail: number;
+    }>();
+    for (const r of history) {
+      if (!r?.occurred_at) continue;
+      const day = new Date(r.occurred_at).toLocaleDateString("pt-BR");
+      const label = (r.actor_label && String(r.actor_label).trim()) ? String(r.actor_label).trim() : "Automação";
+      const key = `${label}__${day}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = { key, label, firstAt: r.occurred_at, lastAt: r.occurred_at, equipamentos: new Set(), ok: 0, fail: 0 };
+        groups.set(key, g);
+      }
+      if (r.equipment_name) g.equipamentos.add(r.equipment_name);
+      if (r.result === "success") g.ok++; else g.fail++;
+      if (new Date(r.occurred_at).getTime() > new Date(g.lastAt).getTime()) g.lastAt = r.occurred_at;
+      if (new Date(r.occurred_at).getTime() < new Date(g.firstAt).getTime()) g.firstAt = r.occurred_at;
+    }
+    return Array.from(groups.values()).sort(
+      (a, b) => new Date(b.lastAt).getTime() - new Date(a.lastAt).getTime(),
+    );
+  }, [history]);
 
   return (
     <div className="p-4 sm:p-6 space-y-6 max-w-6xl mx-auto">
@@ -98,18 +130,24 @@ export default function Automacoes() {
 
 
 
-      {/* Active */}
-      <section className="space-y-3">
-        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
-          Automações Ativas ({active.length})
-        </h2>
-        {loading ? (
-          <p className="text-sm text-muted-foreground">Carregando…</p>
-        ) : active.length === 0 ? (
-          <Card className="p-8 text-center text-sm text-muted-foreground">
-            Nenhuma automação ativa. Clique em "Nova Automação" para criar a primeira.
-          </Card>
-        ) : (
+      {/* Automações Ativas (config-driven, tabela scheduled_automations): o
+          desligamento programado (ex.: 17h Semear) aparece aqui como card
+          Nome/Horário/Dias/Equipamentos/Status com Editar/Desativar. É o sistema
+          que realmente executa hoje — por isso vem primeiro. */}
+      <ScheduledShutdownSection
+        farmId={activeFarmId}
+        equipments={equipments}
+        canEdit={canEditSchedules}
+      />
+
+      {/* Automações por condição (sistema legado `automations`): só aparecem
+          quando existem — não mostramos "Nenhuma automação ativa" enganoso quando
+          já há desligamento programado configurado acima. */}
+      {active.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+            Automações por Condição ({active.length})
+          </h2>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {active.map((a) => (
               <AutomacaoCard
@@ -121,10 +159,10 @@ export default function Automacoes() {
               />
             ))}
           </div>
-        )}
-      </section>
+        </section>
+      )}
 
-      {/* Inactive */}
+      {/* Inativas */}
       {inactive.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
@@ -144,14 +182,6 @@ export default function Automacoes() {
         </section>
       )}
 
-
-      {/* Desligamento Programado (config-driven, tabela scheduled_automations) */}
-      <ScheduledShutdownSection
-        farmId={activeFarmId}
-        equipments={equipments}
-        canEdit={canEditSchedules}
-      />
-
       {/* History */}
       <section className="space-y-3">
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-2">
@@ -170,27 +200,29 @@ export default function Automacoes() {
                 </tr>
               </thead>
               <tbody>
-                {history.length === 0 ? (
+                {executionRows.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="text-center px-3 py-6 text-muted-foreground">
-                      Nenhuma execução registrada ainda.
+                      Nenhuma execução automática registrada ainda.
                     </td>
                   </tr>
                 ) : (
-                  history.map((h) => {
-                    const acts: any[] = Array.isArray(h.actions_executed) ? h.actions_executed : [];
+                  executionRows.map((g) => {
+                    const total = g.ok + g.fail;
                     return (
-                      <tr key={h.id} className="border-t">
+                      <tr key={g.key} className="border-t">
                         <td className="px-3 py-2 whitespace-nowrap">
-                          {new Date(h.triggered_at).toLocaleString("pt-BR")}
+                          {new Date(g.lastAt).toLocaleString("pt-BR")}
                         </td>
-                        <td className="px-3 py-2">{automacaoNameById.get(h.automation_id) ?? "—"}</td>
-                        <td className="px-3 py-2">{acts.length} equip.</td>
-                        <td className="px-3 py-2">
-                          {h.all_success ? (
+                        <td className="px-3 py-2">{g.label}</td>
+                        <td className="px-3 py-2">{g.equipamentos.size} equip.</td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {g.fail === 0 ? (
                             <span className="text-emerald-600">✅ Sucesso</span>
+                          ) : g.ok === 0 ? (
+                            <span className="text-rose-600">❌ Falha ({g.fail})</span>
                           ) : (
-                            <span className="text-amber-600">⚠️ Parcial</span>
+                            <span className="text-amber-600">⚠️ Parcial ({g.ok}/{total})</span>
                           )}
                         </td>
                       </tr>
