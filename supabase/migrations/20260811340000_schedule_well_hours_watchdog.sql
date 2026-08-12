@@ -1,6 +1,7 @@
--- Agenda o well-hours-watchdog no pg_cron (a cada 10 min) ────────────────────
--- Checa horas operadas hoje × limite diário da outorga por poço; quando faltar
--- ≤ 1h, dispara WhatsApp ao técnico da fazenda (whatsapp_alert_settings).
+-- Agenda o well-hours-watchdog no pg_cron (a cada 5 min) ─────────────────────
+-- Checa horas operadas hoje × limite diário da outorga por poço; dispara avisos
+-- ESCALONADOS por WhatsApp (1h/45/30/15/8/5/3 min + LIMITE ATINGIDO) ao técnico
+-- da fazenda (whatsapp_alert_settings). Cron a cada 5 min p/ pegar as faixas curtas.
 -- Requer config.toml [functions.well-hours-watchdog] verify_jwt = false (senão 401).
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
@@ -13,7 +14,7 @@ END $$;
 
 SELECT cron.schedule(
   'well-hours-watchdog-tick',
-  '*/10 * * * *',
+  '*/5 * * * *',
   $cron$
   SELECT net.http_post(
     url     := 'https://dnyukgfedredvxpzjpqz.supabase.co/functions/v1/well-hours-watchdog',

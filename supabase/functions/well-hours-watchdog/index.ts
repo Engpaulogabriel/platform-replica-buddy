@@ -1,10 +1,11 @@
-// Edge Function: well-hours-watchdog  (agendada por pg_cron a cada 10 min)
+// Edge Function: well-hours-watchdog  (agendada por pg_cron a cada 5 min)
 // ─────────────────────────────────────────────────────────────────────────────
 // Compliance preventivo de HORAS da outorga. Para cada fazenda com alertas
 // ligados, compara as horas operadas HOJE de cada poço com o limite diário da
-// outorga (water_permits.regime_hours_per_day). Quando faltar ≤ 1h para o limite,
-// envia WhatsApp ao técnico da fazenda:
-//   "⚠️ POÇO XX — Falta 1h para atingir o limite de 18h/dia da outorga. Considere desligar."
+// outorga (water_permits.regime_hours_per_day) e envia avisos ESCALONADOS por
+// WhatsApp ao técnico conforme o tempo restante:
+//   1h → 45min → 30min → 15min → 8min → 5min → 3min → LIMITE ATINGIDO.
+// Cada FAIXA dispara 1x por poço por dia (quando cai pra próxima faixa, avisa de novo).
 //
 // Envio: Meta Cloud API (template `alerta_equipamento`, 4 params), reusando as
 // credenciais de whatsapp_config. NÃO passa pelo whatsapp-automation-notify porque
@@ -21,7 +22,17 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 const TZ = "America/Sao_Paulo";
-const REMAINING_ALERT_HOURS = 1; // avisa quando faltar ≤ 1h
+
+// Faixas de aviso (minutos restantes para o limite). Cada faixa dispara 1x por
+// poço por dia. Cron a cada 5 min cobre as faixas curtas (8/5/3 min).
+const TIERS = [60, 45, 30, 15, 8, 5, 3];
+// Faixa atual = menor limiar >= restante; "limit" quando restante <= 0; null se >60min.
+function currentTier(remMin: number): string | null {
+  if (remMin <= 0) return "limit";
+  const t = TIERS.filter((T) => T >= remMin).sort((a, b) => a - b)[0];
+  return t != null ? String(t) : null;
+}
+const tierLabel = (tier: string): string => (tier === "60" ? "1h" : `${tier}min`);
 
 const json = (b: unknown, status = 200) =>
   new Response(JSON.stringify(b), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -32,11 +43,6 @@ const firstNum = (s: string | null | undefined): number => {
   return m ? parseInt(m[0], 10) : NaN;
 };
 const dayInTz = (d: Date): string => new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(d); // yyyy-mm-dd
-const fmtHm = (h: number): string => {
-  const total = Math.max(0, Math.round(h * 60));
-  const hh = Math.floor(total / 60), mm = total % 60;
-  return hh === 0 ? `${mm}min` : `${hh}h ${String(mm).padStart(2, "0")}min`;
-};
 // Normalização BR simples (só dígitos; garante DDI 55). O notify tem uma
 // normalizePhoneKey mais completa (9º dígito) — alinhar se necessário.
 const normPhone = (p: string | null | undefined): string => {
@@ -149,20 +155,23 @@ Deno.serve(async (req) => {
       if (limit == null) { const n = firstNum(nameByEq.get(eqId)); if (Number.isFinite(n)) limit = limitByNum.get(n); }
       if (limit == null || limit <= 0) continue; // sem outorga vinculada → não avalia
       checked++;
-      const remaining = limit - h;
-      if (remaining > REMAINING_ALERT_HOURS) continue; // ainda longe do limite
+      const remainingMin = (limit - h) * 60;
+      const tier = currentTier(remainingMin);
+      if (tier == null) continue; // ainda > 1h do limite → sem aviso
 
-      // Dedup: 1 alerta por poço por DIA.
-      const alertType = `hours_limit:${eqId}`;
+      // Dedup POR FAIXA: cada faixa (1h/45/30/15/8/5/3/limit) dispara 1x por poço por dia.
+      const alertType = `hours_limit:${eqId}:${tier}`;
       const last = lastByKey.get(`${farmId}|${alertType}`);
       if (last && dayInTz(new Date(last)) === today) continue;
 
       const poco = nameByEq.get(eqId) ?? "Poço";
-      const detalhe = remaining <= 0
-        ? `${poco} atingiu o limite de ${limit}h/dia da outorga. Desligue para evitar infração.`
-        : `Falta ${fmtHm(remaining)} para ${poco} atingir o limite de ${limit}h/dia da outorga. Considere desligar.`;
+      const isLimit = tier === "limit";
+      const tipo = isLimit ? "🚨 LIMITE ATINGIDO" : "Limite de horas (aviso preventivo)";
+      const detalhe = isLimit
+        ? `${poco} — LIMITE DE ${limit}h/dia ATINGIDO. Desligue IMEDIATAMENTE para evitar infração INEMA.`
+        : `Faltam ${tierLabel(tier)} para ${poco} atingir o limite de ${limit}h/dia da outorga. Considere desligar.`;
       // Template alerta_equipamento (4 slots): {{1}} fazenda, {{2}} equipamento, {{3}} tipo, {{4}} detalhes.
-      const params = [farmName, poco, "Limite de horas da outorga", detalhe];
+      const params = [farmName, poco, tipo, detalhe];
 
       const okSend = await sendTemplate(cfg.token, cfg.pnid, phone, params);
       if (okSend) {
@@ -172,7 +181,7 @@ Deno.serve(async (req) => {
           alert_type: alertType,
           is_active: true,
           last_sent_at: new Date().toISOString(),
-          metadata: { equipment_id: eqId, poco, hours: Math.round(h * 100) / 100, limit, remaining_h: Math.round(remaining * 100) / 100 },
+          metadata: { equipment_id: eqId, poco, tier, hours: Math.round(h * 100) / 100, limit, remaining_min: Math.round(remainingMin) },
           updated_at: new Date().toISOString(),
         }, { onConflict: "farm_id,alert_type" });
       }
