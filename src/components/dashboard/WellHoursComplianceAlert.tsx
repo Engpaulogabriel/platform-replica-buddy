@@ -12,7 +12,9 @@ interface Props { farmId: string | null }
 interface PumpHours { id: string; name: string; hours: number; limit: number; pct: number }
 
 const todayStartIso = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.toISOString(); };
-const onlyNum = (s: string) => parseInt(String(s).replace(/\D+/g, ""), 10);
+// Primeiro número do texto ("Poço 3" → 3; "POÇO 03 R2" → 3). NÃO concatena todos
+// os dígitos (senão "POÇO 03 R2" viraria 32 e não casaria com "Poço 3").
+const firstNum = (s: string) => { const m = String(s ?? "").match(/\d+/); return m ? parseInt(m[0], 10) : NaN; };
 const fmtH = (h: number) => `${h.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}h`;
 
 export function WellHoursComplianceAlert({ farmId }: Props) {
@@ -40,7 +42,7 @@ export function WellHoursComplianceAlert({ farmId }: Props) {
     for (const w of wells) {
       const hrs = regimeByPermit.get(w.permit_id) ?? 18;
       if (w.equipment_id && !limitByEq.has(w.equipment_id)) limitByEq.set(w.equipment_id, hrs);
-      const n = onlyNum(w.well_name ?? "");
+      const n = firstNum(w.well_name ?? "");
       if (Number.isFinite(n) && !limitByNum.has(n)) limitByNum.set(n, hrs);
     }
 
@@ -54,7 +56,7 @@ export function WellHoursComplianceAlert({ farmId }: Props) {
     const out: PumpHours[] = [];
     for (const [eqId, v] of hoursByEq) {
       let limit = limitByEq.get(eqId);
-      if (limit == null) { const n = onlyNum(v.name); if (Number.isFinite(n)) limit = limitByNum.get(n); }
+      if (limit == null) { const n = firstNum(v.name); if (Number.isFinite(n)) limit = limitByNum.get(n); }
       if (limit == null || limit <= 0) continue; // sem outorga vinculada → não avalia
       const pct = v.hours / limit;
       if (pct >= 0.8) out.push({ id: eqId, name: v.name, hours: Math.round(v.hours * 100) / 100, limit, pct });
