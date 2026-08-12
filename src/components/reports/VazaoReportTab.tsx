@@ -236,14 +236,17 @@ export default function VazaoReportTab({ farmId, fromDate, toDate }: VazaoReport
       if (r.date < fromDate || r.date > toDate) continue;
       if (r.date === today) continue;
       const key = `${r.date}__${r.equipment_id}`;
+      const consumo = Number(r.total_m3 ?? 0);
       out.push({
         key,
         day: r.date,
         label: labelDay(r.date),
         equipmentId: r.equipment_id,
         equipmentName: equipNameById.get(r.equipment_id) ?? "Desconhecido",
-        consumo: Number(r.total_m3 ?? 0),
-        vazaoMax: flowMaxByDayEq.get(key) ?? 0,
+        consumo,
+        // Vazão só faz sentido quando houve operação no dia. Sem consumo, "—"
+        // (não exibir a vazão nominal cadastrada como se a bomba tivesse rodado).
+        vazaoMax: consumo > 0 ? (flowMaxByDayEq.get(key) ?? 0) : 0,
         isPartial: false,
       });
     }
@@ -253,8 +256,9 @@ export default function VazaoReportTab({ farmId, fromDate, toDate }: VazaoReport
         const key = `${today}__${e.id}`;
         const hist = flowMaxByDayEq.get(key) ?? 0;
         const currentRate = Number(e.flow_rate_m3h ?? 0);
-        // Se não há histórico do dia, mostra a vazão instantânea atual.
-        const vazaoMax = hist > 0 ? hist : currentRate;
+        // Sem consumo hoje (bomba não operou) → "—". Só quando houve operação
+        // mostramos a vazão: medida do dia (hist) ou a instantânea atual.
+        const vazaoMax = v > 0 ? (hist > 0 ? hist : currentRate) : 0;
         // Sempre inclui a linha do dia em curso para os equipamentos ativos.
 
         out.push({
