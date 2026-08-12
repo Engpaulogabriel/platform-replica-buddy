@@ -21,6 +21,7 @@ import { useProductivityHistory } from "@/hooks/useProductivityHistory";
 import { useRoiHistory } from "@/hooks/useRoiHistory";
 import { RoiProjectionPanel } from "@/components/indicadores/RoiProjectionPanel";
 import { ManualVsAutoPanel } from "@/components/indicadores/ManualVsAutoPanel";
+import { RenovImpactPanel } from "@/components/indicadores/RenovImpactPanel";
 
 export default function Indicadores() {
   const farmId = useDefaultFarmId();
@@ -97,6 +98,9 @@ export default function Indicadores() {
       {canViewFinancial && <RoiProjectionPanel roi={roiHist} productivity={productivity} />}
 
       {canViewFinancial && <RoiHistoryPanel history={roiHist} />}
+
+      {/* Impacto RENOV — dinâmico por fazenda (medido + estimado por premissa) */}
+      {canViewFinancial && <RenovImpactPanel farmId={farmId} />}
     </div>
   );
 }
