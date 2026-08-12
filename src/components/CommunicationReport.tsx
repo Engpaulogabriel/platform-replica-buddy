@@ -18,6 +18,7 @@ type Cycle = {
   autoClosed?: boolean;       // fechado pela UI usando last_communication
   attempts?: number | null;
   tsnn?: string | null;
+  systemOutage?: boolean;     // queda de sistema (agente/bridge caiu) — não é do equipamento
 };
 
 
@@ -46,7 +47,16 @@ function fmtTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-const MIN_DURATION_DEFAULT = 30; // segundos
+// Padrão 5 min: quedas mais curtas costumam ser apenas o intervalo entre ciclos
+// de polling (o equipamento respondeu no ciclo anterior e no próximo, mas ficou
+// "sem RX" no meio). Ver Problema 2 (Sykue PLC 1301 caindo a cada ~3 min).
+const MIN_DURATION_DEFAULT = 300; // segundos (5 min)
+
+// Queda de sistema: quando uma fração alta dos equipamentos que comunicam cai
+// junta dentro de ±30s (agente/bridge/Starlink reiniciou), NÃO é queda individual
+// do equipamento. Isso limpa as falsas quedas de 100h+.
+const SYSTEM_OUTAGE_WINDOW_MS = 30_000;
+const SYSTEM_OUTAGE_MIN_FRACTION = 0.8;
 
 export default function CommunicationReport({ farmId, fromDate, toDate, equipmentFilter }: Props) {
   const [rawCycles, setRawCycles] = useState<Cycle[]>([]);
@@ -162,6 +172,33 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
         }
       }
 
+      // Detecta "quedas de sistema": quando uma fração alta (≥80%) dos
+      // equipamentos que comunicam cai junta dentro de ±30s, foi o agente/bridge/
+      // Starlink que reiniciou — não o equipamento. Marca essas quedas para não
+      // contarem como queda individual (limpa as falsas quedas de 100h+).
+      const totalCommunicating = Object.keys(byEquip).length;
+      const sysThreshold = Math.max(2, Math.ceil(totalCommunicating * SYSTEM_OUTAGE_MIN_FRACTION));
+      if (totalCommunicating >= 2) {
+        const byOffline = [...cycles].sort(
+          (a, b) => new Date(a.offlineAt).getTime() - new Date(b.offlineAt).getTime(),
+        );
+        let i = 0;
+        while (i < byOffline.length) {
+          const anchor = new Date(byOffline[i].offlineAt).getTime();
+          const cluster: Cycle[] = [];
+          let j = i;
+          while (j < byOffline.length && new Date(byOffline[j].offlineAt).getTime() - anchor <= SYSTEM_OUTAGE_WINDOW_MS) {
+            cluster.push(byOffline[j]);
+            j++;
+          }
+          const distinct = new Set(cluster.map((c) => c.equipment)).size;
+          if (distinct >= sysThreshold) {
+            for (const c of cluster) c.systemOutage = true;
+          }
+          i = j;
+        }
+      }
+
       // Mais recente primeiro
       cycles.sort((a, b) => new Date(b.offlineAt).getTime() - new Date(a.offlineAt).getTime());
       setRawCycles(cycles);
@@ -181,16 +218,19 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
   }, [rawCycles, equipmentFilter, minDuration]);
 
   const stats = useMemo(() => {
-    const total = filtered.length;
-    const recovered = filtered.filter(c => !c.ongoing);
-    const ongoing = filtered.filter(c => c.ongoing).length;
-    const totalDownSec = filtered.reduce((s, c) => s + c.durationSec, 0);
+    // Quedas de sistema não entram nas métricas individuais do equipamento.
+    const equip = filtered.filter(c => !c.systemOutage);
+    const systemOutages = filtered.filter(c => c.systemOutage).length;
+    const total = equip.length;
+    const recovered = equip.filter(c => !c.ongoing);
+    const ongoing = equip.filter(c => c.ongoing).length;
+    const totalDownSec = equip.reduce((s, c) => s + c.durationSec, 0);
     const avg = recovered.length > 0 ? Math.round(recovered.reduce((s, c) => s + c.durationSec, 0) / recovered.length) : 0;
-    return { total, recovered: recovered.length, ongoing, totalDownSec, avg };
+    return { total, recovered: recovered.length, ongoing, totalDownSec, avg, systemOutages };
   }, [filtered]);
 
   const exportCSV = () => {
-    const header = ["Data", "Hora Offline", "Hora Online", "Equipamento", "TSNN", "Duração", "Tentativas"];
+    const header = ["Data", "Hora Offline", "Hora Online", "Equipamento", "Tipo", "TSNN", "Duração", "Tentativas"];
     const lines = [header.join(";")];
     for (const c of filtered) {
       lines.push([
@@ -198,6 +238,7 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
         fmtTime(c.offlineAt),
         c.onlineAt ? fmtTime(c.onlineAt) : "—",
         c.equipment,
+        c.systemOutage ? "Queda de sistema" : "Equipamento",
         c.tsnn ?? "",
         c.ongoing ? `Em andamento (${fmtDuration(c.durationSec)})` : fmtDuration(c.durationSec),
         c.attempts ?? "",
@@ -222,7 +263,12 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
               <WifiOff className="w-3.5 h-3.5" />
               <p className="text-[11px] uppercase tracking-wider font-semibold">Quedas</p>
             </div>
-            <p className="text-xl font-bold text-foreground mt-1">{stats.total}</p>
+            <p className="text-xl font-bold text-foreground mt-1">
+              {stats.total}
+              {stats.systemOutages > 0 && (
+                <span className="text-xs text-info ml-1 font-semibold">+{stats.systemOutages} sistema</span>
+              )}
+            </p>
           </CardContent>
         </Card>
         <Card className="border-primary/30 bg-primary/5">
@@ -299,7 +345,11 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
                         <p className="font-semibold text-foreground truncate">{c.equipment}</p>
                         <p className="text-xs text-muted-foreground">{fmtDate(c.offlineAt)}</p>
                       </div>
-                      {c.ongoing ? (
+                      {c.systemOutage ? (
+                        <span className="shrink-0 text-[10px] font-bold px-2 py-1 rounded-full bg-info/10 text-info flex items-center gap-1">
+                          <Radio className="w-3 h-3" /> SISTEMA
+                        </span>
+                      ) : c.ongoing ? (
                         <span className="shrink-0 text-[10px] font-bold px-2 py-1 rounded-full bg-warning/10 text-warning flex items-center gap-1">
                           <WifiOff className="w-3 h-3" /> EM CURSO
                         </span>
@@ -340,7 +390,7 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
                   </TableHeader>
                   <TableBody>
                     {filtered.map((c) => (
-                      <TableRow key={c.id} className="border-border hover:bg-secondary/50">
+                      <TableRow key={c.id} className={`border-border hover:bg-secondary/50 ${c.systemOutage ? "bg-info/5" : ""}`}>
                         <TableCell className="text-foreground text-sm whitespace-nowrap">{fmtDate(c.offlineAt)}</TableCell>
                         <TableCell className="text-foreground text-sm whitespace-nowrap">
                           <span className="inline-flex items-center gap-1">
@@ -361,7 +411,12 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
                         <TableCell className="text-foreground font-medium">{c.equipment}</TableCell>
                         <TableCell className="text-muted-foreground text-xs">{c.tsnn ?? "—"}</TableCell>
                         <TableCell className="text-sm whitespace-nowrap">
-                          {c.ongoing ? (
+                          {c.systemOutage ? (
+                            <span className="text-info font-semibold inline-flex items-center gap-1">
+                              <Radio className="w-3 h-3" /> Queda de sistema
+                              <span className="ml-1 text-[10px] text-muted-foreground font-normal">({fmtDuration(c.durationSec)})</span>
+                            </span>
+                          ) : c.ongoing ? (
                             <span className="text-warning font-semibold">Em andamento ({fmtDuration(c.durationSec)})</span>
                           ) : (
                             <span className="text-foreground font-semibold">
