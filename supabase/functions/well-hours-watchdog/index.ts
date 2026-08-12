@@ -12,9 +12,12 @@
 // o gate de política daquela função descarta alertas que não sejam agent_offline/
 // bridge_down — então este watchdog envia direto (mesmo template/número).
 //
-// Recipientes: whatsapp_alert_settings.technical_team_phone por fazenda (gate:
-// alerts_enabled). Dedup: 1 alerta por (fazenda, poço) por DIA (BRT), via
-// watchdog_alerts_state (alert_type = "hours_limit:<equipment_id>").
+// Recipientes: TODOS os números da fazenda — operadores ativos de whatsapp_operators
+// (respeitando receive_alerts / preferência) + technical_team_phone de
+// whatsapp_alert_settings, normalizados e deduplicados. Gate: alerts_enabled.
+// Compliance é crítico → todos recebem. Telefone alinhado à normalizePhoneKey do
+// whatsapp-automation-notify (insere o 9º dígito BR). Dedup dos avisos: por FAIXA,
+// 1x por (fazenda, poço, faixa) por dia (BRT), via watchdog_alerts_state.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
@@ -43,17 +46,22 @@ const firstNum = (s: string | null | undefined): number => {
   return m ? parseInt(m[0], 10) : NaN;
 };
 const dayInTz = (d: Date): string => new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(d); // yyyy-mm-dd
-// Normalização BR simples (só dígitos; garante DDI 55). O notify tem uma
-// normalizePhoneKey mais completa (9º dígito) — alinhar se necessário.
-const normPhone = (p: string | null | undefined): string => {
-  let d = String(p ?? "").replace(/\D/g, "");
-  if (!d) return "";
-  if ((d.length === 10 || d.length === 11) && !d.startsWith("55")) d = "55" + d;
-  return d;
-};
+// Normalização BR alinhada ao whatsapp-automation-notify: prepende DDI 55 e
+// insere o 9º dígito do celular quando o número vem com 12 dígitos (55 + DDD + 8
+// locais). Idempotente para números já normalizados (13 dígitos).
+function normalizePhoneKey(phone: string | null | undefined): string {
+  let digits = String(phone ?? "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (!digits.startsWith("55") && (digits.length === 10 || digits.length === 11)) digits = `55${digits}`;
+  if (digits.startsWith("55")) {
+    const rest = digits.slice(2); // DDD(2) + local
+    if (rest.length === 10) digits = `55${rest.slice(0, 2)}9${rest.slice(2)}`;
+  }
+  return digits;
+}
 
 async function sendTemplate(token: string, phoneNumberId: string, to: string, params: string[]): Promise<boolean> {
-  const toDigits = normPhone(to);
+  const toDigits = normalizePhoneKey(to);
   if (!toDigits) return false;
   try {
     const r = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
@@ -103,13 +111,48 @@ Deno.serve(async (req) => {
   }
   if (!cfgGlobal && cfgByFarm.size === 0) return json({ ok: true, checked: 0, sent: 0, note: "no whatsapp_config" });
 
-  // Fazendas com alertas ligados + telefone do técnico.
+  // Fazendas com alertas ligados (gate) + technical_team_phone.
   const { data: settings } = await supabase.from("whatsapp_alert_settings").select("farm_id, alerts_enabled, technical_team_phone");
-  const recipientByFarm = new Map<string, string>();
+  const enabledFarms = new Set<string>();
+  const techByFarm = new Map<string, string[]>();
   for (const s of (settings ?? []) as any[]) {
-    if (s.farm_id && s.alerts_enabled && s.technical_team_phone) recipientByFarm.set(s.farm_id, s.technical_team_phone);
+    if (!s.farm_id || !s.alerts_enabled) continue;
+    enabledFarms.add(s.farm_id);
+    if (s.technical_team_phone) techByFarm.set(s.farm_id, [...(techByFarm.get(s.farm_id) ?? []), s.technical_team_phone]);
   }
-  if (recipientByFarm.size === 0) return json({ ok: true, checked: 0, sent: 0, note: "no recipients" });
+  if (enabledFarms.size === 0) return json({ ok: true, checked: 0, sent: 0, note: "no farms with alerts_enabled" });
+
+  // TODOS os operadores ativos por fazenda (whatsapp_operators) — respeita
+  // receive_alerts e preferência (mute). Compliance é crítico: todos recebem.
+  const { data: operators } = await supabase.from("whatsapp_operators")
+    .select("phone, notification_preference, receive_alerts, farm_id, default_farm_id, is_active")
+    .eq("is_active", true);
+  const opByFarm = new Map<string, string[]>();
+  for (const o of (operators ?? []) as any[]) {
+    if (!o.phone) continue;
+    const pref = String(o.notification_preference ?? "default").toLowerCase();
+    if (pref === "mute" || pref === "mudo" || o.receive_alerts === false) continue;
+    const farmsFor = new Set<string>([o.farm_id, o.default_farm_id].filter(Boolean) as string[]);
+    for (const f of farmsFor) {
+      if (!enabledFarms.has(f)) continue;
+      opByFarm.set(f, [...(opByFarm.get(f) ?? []), o.phone]);
+    }
+  }
+
+  // Recipientes finais por fazenda: operadores + técnico, normalizados e ÚNICOS.
+  const recipientsByFarm = new Map<string, string[]>();
+  for (const f of enabledFarms) {
+    const seen = new Set<string>();
+    const list: string[] = [];
+    for (const p of [...(opByFarm.get(f) ?? []), ...(techByFarm.get(f) ?? [])]) {
+      const key = normalizePhoneKey(p);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      list.push(key);
+    }
+    if (list.length) recipientsByFarm.set(f, list);
+  }
+  if (recipientsByFarm.size === 0) return json({ ok: true, checked: 0, sent: 0, note: "no recipients" });
 
   // Estado de dedup (alertas de horas já enviados).
   const { data: states } = await supabase.from("watchdog_alerts_state")
@@ -119,7 +162,7 @@ Deno.serve(async (req) => {
 
   let checked = 0, sent = 0;
 
-  for (const [farmId, phone] of recipientByFarm) {
+  for (const [farmId, phones] of recipientsByFarm) {
     const cfg = cfgByFarm.get(farmId) ?? cfgGlobal;
     if (!cfg) continue;
 
@@ -173,15 +216,20 @@ Deno.serve(async (req) => {
       // Template alerta_equipamento (4 slots): {{1}} fazenda, {{2}} equipamento, {{3}} tipo, {{4}} detalhes.
       const params = [farmName, poco, tipo, detalhe];
 
-      const okSend = await sendTemplate(cfg.token, cfg.pnid, phone, params);
-      if (okSend) {
+      // Envia a TODOS os recipientes da fazenda. A faixa é marcada como enviada
+      // se AO MENOS um envio deu certo (evita reenvio no próximo cron).
+      let anyOk = false;
+      for (const to of phones) {
+        if (await sendTemplate(cfg.token, cfg.pnid, to, params)) anyOk = true;
+      }
+      if (anyOk) {
         sent++;
         await supabase.from("watchdog_alerts_state").upsert({
           farm_id: farmId,
           alert_type: alertType,
           is_active: true,
           last_sent_at: new Date().toISOString(),
-          metadata: { equipment_id: eqId, poco, tier, hours: Math.round(h * 100) / 100, limit, remaining_min: Math.round(remainingMin) },
+          metadata: { equipment_id: eqId, poco, tier, hours: Math.round(h * 100) / 100, limit, remaining_min: Math.round(remainingMin), recipients: phones.length },
           updated_at: new Date().toISOString(),
         }, { onConflict: "farm_id,alert_type" });
       }
