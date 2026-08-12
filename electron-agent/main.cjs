@@ -1316,35 +1316,28 @@ let appClosing = false;
 // é decidido SOMENTE pelo backend (critical-alerts-tick) com limiar de 15 min.
 // v3.9.21: + registro em automation_log de eventos equipamento_offline /
 // equipamento_online (campo details.tipo_evento) para histórico no relatório.
-const pollingBackoffByTsnn = new Map(); // tsnn -> { failures, offlineSince, lastSuccessAt, backoffCycle }
-// v3.25.19: BACKOFF EXPONENCIAL para PLC sem resposta. Uma PLC morta consome ~5s de
-// timeout por rodada; sem backoff isso monopoliza o ciclo e atrasa as PLCs que
-// funcionam. Regra: <3 falhas → poll todo ciclo; ≥3 → 1 poll a cada 5 ciclos;
-// ≥10 → 1 a cada 10 ciclos. noteBackoffSuccess (qualquer RX) reseta failures.
-function getBackoffSkipEvery(failures) {
-  if ((failures || 0) >= 10) return 10;
-  if ((failures || 0) >= 3) return 5;
-  return 1; // sem backoff
+const pollingBackoffByTsnn = new Map(); // tsnn -> { failures, offlineSince, offlineLogged, lastSuccessAt, nextRetryAt }
+// v3.25.64: POLLING ADAPTATIVO por PLC sem resposta (pedido do cliente — Sykue).
+// Antes o backoff era por CICLOS e só começava com ≥3 falhas (uma PLC morta ainda
+// era polada todo ciclo até lá, consumindo ~5s de timeout cada e atrasando as PLCs
+// boas). Agora é em TEMPO REAL e adaptativo: após uma falha, re-tenta em 30s; nova
+// falha, 1min; depois 2min; teto 5min — NUNCA desiste. É mais agressivo no início
+// (detecta recuperação rápido) e limitado no tail (não congestiona a serial nem
+// monopoliza o rodízio). O timeout reduzido (5s) para PLC em falha continua valendo.
+// noteBackoffSuccess (qualquer RX) zera tudo e volta ao ciclo normal.
+const BACKOFF_RETRY_SCHEDULE_MS = [30_000, 60_000, 120_000, 300_000]; // 30s, 1min, 2min, 5min (teto)
+function backoffRetryDelayMs(failures) {
+  const i = Math.min(Math.max(0, (failures || 1) - 1), BACKOFF_RETRY_SCHEDULE_MS.length - 1);
+  return BACKOFF_RETRY_SCHEDULE_MS[i];
 }
 function shouldSkipPollingForBackoff(tsnn) {
   if (!tsnn) return false;
   const b = pollingBackoffByTsnn.get(String(tsnn));
-  const failures = b ? (b.failures || 0) : 0;
-  if (failures < 3) return false; // sem backoff — poll normal
-  const skipEvery = getBackoffSkipEvery(failures);
-  const c = (b.backoffCycle || 0) + 1;
-  if (c >= skipEvery) {
-    b.backoffCycle = 0; // deixa passar 1 tentativa e reinicia a contagem
-    pollingBackoffByTsnn.set(String(tsnn), b);
-    return false;
-  }
-  b.backoffCycle = c;
-  pollingBackoffByTsnn.set(String(tsnn), b);
-  if (c === 1) { // loga uma vez por janela de skip (evita spam)
-    pushLog("info", "system",
-      `[POLLING BACKOFF] TSNN ${tsnn} em backoff (tentativa ${failures}, próxima em ${skipEvery - c} ciclos)`);
-  }
-  return true; // pula esta rodada
+  // Sem falha registrada → poll normal (todo ciclo). Só entra em backoff após
+  // ao menos 1 timeout, e libera assim que nextRetryAt vence.
+  if (!b || (b.failures || 0) < 1 || !b.nextRetryAt) return false;
+  if (Date.now() >= b.nextRetryAt) return false; // venceu o intervalo → re-transmite agora
+  return true; // ainda dentro do intervalo de backoff → pula esta rodada
 }
 
 // v3.9.30 — Métricas por ciclo de polling. Ciclo = uma rodada de enqueue
@@ -1379,7 +1372,11 @@ async function seedBackoffFromCloud() {
       const tsnn = String(row.hw_id || "").substring(0, 4).toUpperCase();
       if (!/^[0-9A-F]{4}$/.test(tsnn) || seeded.has(tsnn)) continue;
       if (!pollingBackoffByTsnn.has(tsnn)) {
-        pollingBackoffByTsnn.set(tsnn, { failures: 6, offlineSince: Date.now(), lastSuccessAt: null });
+        // failures=6 (>3) mantém o timeout reduzido de 5s; nextRetryAt=0 permite
+        // polar já no startup para detectar recuperação. offlineLogged=false: a
+        // queda é anterior a esta sessão (já offline no banco) → não re-loga offline
+        // nem gera "online" órfão se voltar; o 1º RX zera tudo via noteBackoffSuccess.
+        pollingBackoffByTsnn.set(tsnn, { failures: 6, offlineSince: null, offlineLogged: false, lastSuccessAt: null, nextRetryAt: 0 });
         seeded.add(tsnn);
       }
     }
@@ -1456,40 +1453,50 @@ function noteBackoffSuccess(tsnn) {
     pushLog("info", "system",
       `[POLLING] TSNN ${tsnn} voltou a comunicar apos ${b.failures} tentativas sem resposta`);
     if (b.failures >= 3) void updatePlcCommStatus(tsnn, "online");
-    if (b.offlineSince) {
+    // Só registra "equipamento_online" se um "equipamento_offline" foi logado
+    // (≥3 falhas). Recuperação com 1-2 falhas não gerou queda → não gera volta
+    // (evita evento órfão no relatório).
+    if (b.offlineLogged && b.offlineSince) {
       const tempoTotal = Math.floor((Date.now() - b.offlineSince) / 1000);
       void logCommEventToAutomationLog(tsnn, "equipamento_online", {
         tempo_total_offline_segundos: tempoTotal,
         tentativas_sem_resposta: b.failures,
       });
     }
-    pollingBackoffByTsnn.set(tsnn, { failures: 0, offlineSince: null, lastSuccessAt: Date.now() });
-  } else {
-    pollingBackoffByTsnn.set(tsnn, { failures: 0, offlineSince: null, lastSuccessAt: Date.now() });
   }
+  pollingBackoffByTsnn.set(tsnn, { failures: 0, offlineSince: null, offlineLogged: false, lastSuccessAt: Date.now(), nextRetryAt: 0 });
 }
 
 function noteBackoffFailure(tsnn) {
   if (!tsnn) return;
-  const prev = pollingBackoffByTsnn.get(tsnn) || { failures: 0, offlineSince: null, lastSuccessAt: null };
+  const prev = pollingBackoffByTsnn.get(tsnn) || { failures: 0, offlineSince: null, offlineLogged: false, lastSuccessAt: null };
+  const failures = (prev.failures || 0) + 1;
   const b = {
-    failures: prev.failures + 1,
-    offlineSince: prev.offlineSince || Date.now(),
+    failures,
+    offlineSince: prev.offlineSince || null,
+    offlineLogged: prev.offlineLogged || false,
     lastSuccessAt: prev.lastSuccessAt || null,
+    nextRetryAt: Date.now() + backoffRetryDelayMs(failures),
   };
-  pollingBackoffByTsnn.set(tsnn, b);
-  pushLog("warn", "system",
-    `[POLLING] TSNN ${tsnn} sem resposta (tentativa consecutiva ${b.failures})`);
-  if (b.failures === 1) {
+  // ALERTA INTELIGENTE: só registra "equipamento_offline" após 3 tentativas
+  // CONSECUTIVAS com retry (não na 1ª). Uma PLC que perde 1 ciclo de polling e
+  // volta (ciclo normal, ex.: Sykue) NÃO vira "queda" — elimina o flapping que
+  // poluía o Relatório de Comunicação. Aos 3 fracassos (~90s: 30s+60s) é offline real.
+  if (failures === 3 && !b.offlineLogged) {
+    b.offlineLogged = true;
+    b.offlineSince = Date.now();
     const lastTs = b.lastSuccessAt ? new Date(b.lastSuccessAt).toISOString() : null;
     const tempoOff = b.lastSuccessAt ? Math.floor((Date.now() - b.lastSuccessAt) / 1000) : null;
     void logCommEventToAutomationLog(tsnn, "equipamento_offline", {
-      tentativas_consecutivas: 1,
+      tentativas_consecutivas: failures,
       ultimo_contato: lastTs,
       tempo_offline_segundos: tempoOff,
     });
+    void updatePlcCommStatus(tsnn, "offline");
   }
-  if (b.failures === 3) void updatePlcCommStatus(tsnn, "offline");
+  pollingBackoffByTsnn.set(tsnn, b);
+  pushLog("warn", "system",
+    `[POLLING] TSNN ${tsnn} sem resposta (tentativa consecutiva ${failures}; próximo retry em ${Math.round(backoffRetryDelayMs(failures) / 1000)}s)`);
 }
 
 // ─── Throttle de sinais espontaneos por TSNN ────────────────────────────────
