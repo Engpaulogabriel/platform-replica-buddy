@@ -11,7 +11,6 @@ import { useAutomationGuards } from "@/hooks/useAutomationGuards";
 import { clearAutomationGuard } from "@/lib/automationGuard";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { useDefaultFarm } from "@/hooks/useDefaultFarm";
-import { useCommReliability } from "@/hooks/useCommReliability";
 import { useCloudAutomation } from "@/hooks/useCloudAutomation";
 import { useCadastrosCloud } from "@/hooks/useCadastrosCloud";
 import { enqueueProtectiveOffOnDisable } from "@/lib/automationProtectiveOff";
@@ -144,8 +143,6 @@ export function PumpTable({ pumps, onToggle, onReset, onModeChange, onRefreshSta
   const guardSet = useAutomationGuards();
   const guardFarmId = useDefaultFarmId();
   const { farm: defaultFarmInfo } = useDefaultFarm();
-  // Score de confiabilidade (% online 7 dias) por nome de equipamento → badge 📶 no card.
-  const reliabilityByName = useCommReliability(guardFarmId);
 
   useEffect(() => {
     const refresh = () => { setFarms(loadFarms()); setSectors(loadSectors()); };
@@ -371,7 +368,6 @@ export function PumpTable({ pumps, onToggle, onReset, onModeChange, onRefreshSta
                 maintenanceActive={maintenanceActive}
                 voltageEnabled={voltageEnabled}
                 currentEnabled={currentEnabled}
-                reliabilityScore={reliabilityByName.get(pump.name) ?? null}
                 farms={farms}
                 sectors={sectors}
                 defaultFarmName={defaultFarmInfo?.name ?? null}

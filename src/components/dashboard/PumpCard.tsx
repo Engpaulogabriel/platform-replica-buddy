@@ -46,9 +46,6 @@ export interface PumpCardProps {
   maintenanceActive: boolean;
   voltageEnabled?: boolean;
   currentEnabled?: boolean;
-  /** Score de confiabilidade de comunicação (0..100, % online nos últimos 7 dias).
-   *  null quando não há dados. < 80% é destacado (equipamento problemático). */
-  reliabilityScore?: number | null;
   farms: Farm[];
   sectors: Sector[];
   defaultFarmName?: string | null;
@@ -65,7 +62,7 @@ function PumpCardImpl(props: PumpCardProps) {
   const {
     pump, expanded, refreshing, refreshResult, lastFailed, flashStatus,
     isGuarded, isAutoSchedule, inMaintenance, maintenanceTooltip,
-    userOnline, maintenanceActive, voltageEnabled, currentEnabled, reliabilityScore,
+    userOnline, maintenanceActive, voltageEnabled, currentEnabled,
     farms, sectors, defaultFarmName, guardFarmId, virtualize,
     onToggle, onReset, onRefresh, onOpenDialog, onToggleExpand,
   } = props;
@@ -205,9 +202,9 @@ function PumpCardImpl(props: PumpCardProps) {
           {isOffline && (
             <span
               className="text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded bg-destructive/20 text-destructive border border-destructive/50 shrink-0"
-              title={`Sem comunicação${minutesSinceComm != null ? ` há ${minutesSinceComm} min` : ""} — proteção do PLC ativa (mantém o último estado). Última: ${formatLastSeen(pump.lastCommunication)}`}
+              title={`Sem comunicação${minutesSinceComm != null ? ` há ${minutesSinceComm} min` : ""}. Última: ${formatLastSeen(pump.lastCommunication)}`}
             >
-              ⚠️ Offline · Proteção ativa
+              ⚠️ Offline
             </span>
           )}
           {isUnstable && minutesSinceComm != null && (
@@ -309,16 +306,6 @@ function PumpCardImpl(props: PumpCardProps) {
               </span>
             </span>
           )}
-          {reliabilityScore != null && (
-            <span
-              className={`flex items-center gap-0.5 text-[9px] font-bold tabular-nums shrink-0 ${
-                reliabilityScore >= 80 ? "text-primary" : reliabilityScore >= 50 ? "text-warning" : "text-destructive"
-              }`}
-              title={`Confiabilidade de comunicação (últimos 7 dias): ${reliabilityScore}%${reliabilityScore < 80 ? " — abaixo de 80%: polling prioritário no agente" : ""}`}
-            >
-              📶 {reliabilityScore}%
-            </span>
-          )}
           {pump.vazaoMode && pump.vazaoMode !== "off" && (
             <FlowInfoPopover pump={pump} />
           )}
@@ -394,9 +381,9 @@ function PumpCardImpl(props: PumpCardProps) {
                         ? "bg-primary/20 text-primary"
                         : "bg-destructive/20 text-destructive"
                   }`}>
-                    {/* Offline → proteção do PLC ativa. Instável → mostra o ÚLTIMO estado
-                        conhecido (Ligado/Desligado), nunca "offline"; o "⏱ Xmin" fica no badge. */}
-                    {isOffline ? "Offline · Proteção ativa" : pump.running ? "Ligado" : "Desligado"}
+                    {/* Instável → mostra o ÚLTIMO estado conhecido (Ligado/Desligado),
+                        nunca "offline"; o "⏱ Xmin" fica no badge. */}
+                    {isOffline ? "⚠️ Offline" : pump.running ? "Ligado" : "Desligado"}
                   </span>
                 )}
               </div>
@@ -684,8 +671,7 @@ function areEqual(prev: PumpCardProps, next: PumpCardProps): boolean {
     prev.isGuarded !== next.isGuarded ||
     prev.isAutoSchedule !== next.isAutoSchedule ||
     prev.inMaintenance !== next.inMaintenance ||
-    prev.maintenanceTooltip !== next.maintenanceTooltip ||
-    prev.reliabilityScore !== next.reliabilityScore
+    prev.maintenanceTooltip !== next.maintenanceTooltip
   ) return false;
 
   // Shared flags
