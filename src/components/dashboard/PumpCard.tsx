@@ -46,6 +46,9 @@ export interface PumpCardProps {
   maintenanceActive: boolean;
   voltageEnabled?: boolean;
   currentEnabled?: boolean;
+  /** Score de confiabilidade de comunicação (0..100, % online nos últimos 7 dias).
+   *  null quando não há dados. < 80% é destacado (equipamento problemático). */
+  reliabilityScore?: number | null;
   farms: Farm[];
   sectors: Sector[];
   defaultFarmName?: string | null;
@@ -62,7 +65,7 @@ function PumpCardImpl(props: PumpCardProps) {
   const {
     pump, expanded, refreshing, refreshResult, lastFailed, flashStatus,
     isGuarded, isAutoSchedule, inMaintenance, maintenanceTooltip,
-    userOnline, maintenanceActive, voltageEnabled, currentEnabled,
+    userOnline, maintenanceActive, voltageEnabled, currentEnabled, reliabilityScore,
     farms, sectors, defaultFarmName, guardFarmId, virtualize,
     onToggle, onReset, onRefresh, onOpenDialog, onToggleExpand,
   } = props;
@@ -304,6 +307,16 @@ function PumpCardImpl(props: PumpCardProps) {
                   />
                 ))}
               </span>
+            </span>
+          )}
+          {reliabilityScore != null && (
+            <span
+              className={`flex items-center gap-0.5 text-[9px] font-bold tabular-nums shrink-0 ${
+                reliabilityScore >= 80 ? "text-primary" : reliabilityScore >= 50 ? "text-warning" : "text-destructive"
+              }`}
+              title={`Confiabilidade de comunicação (últimos 7 dias): ${reliabilityScore}%${reliabilityScore < 80 ? " — abaixo de 80%: polling prioritário no agente" : ""}`}
+            >
+              📶 {reliabilityScore}%
             </span>
           )}
           {pump.vazaoMode && pump.vazaoMode !== "off" && (
@@ -671,7 +684,8 @@ function areEqual(prev: PumpCardProps, next: PumpCardProps): boolean {
     prev.isGuarded !== next.isGuarded ||
     prev.isAutoSchedule !== next.isAutoSchedule ||
     prev.inMaintenance !== next.inMaintenance ||
-    prev.maintenanceTooltip !== next.maintenanceTooltip
+    prev.maintenanceTooltip !== next.maintenanceTooltip ||
+    prev.reliabilityScore !== next.reliabilityScore
   ) return false;
 
   // Shared flags
