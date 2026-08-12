@@ -85,12 +85,22 @@ function isRunning(eq: Equipment): boolean {
   return payload[idx] === "1";
 }
 
+// Conversão CV → kW (1 CV ≈ 0,7355 kW). O cadastro grava power_cv e a aba de
+// Configuração exibe o kW "auto"; mas power_kw pode não estar persistido no banco.
+const CV_TO_KW = 0.7355;
+
 function powerOf(eq: Equipment): number {
-  // Preferimos demanda_kw quando > 0; se for 0/null/undefined caímos em power_kw.
-  // Usar `??` aqui era um bug: demanda_kw=0 vencia power_kw=132 e zerava tudo.
+  // Ordem de preferência: demanda_kw (medido) > power_kw (cadastrado) >
+  // power_cv × 0,7355 (derivado). Usar `??` aqui era um bug: demanda_kw=0
+  // vencia power_kw=132 e zerava tudo. Sem o fallback de CV, equipamentos que
+  // só têm power_cv (125 CV) apareciam como "0.0 kW / Potência não informada".
   const d = Number(eq.demanda_kw ?? 0);
   if (d > 0) return d;
-  return Number(eq.power_kw ?? 0);
+  const pk = Number(eq.power_kw ?? 0);
+  if (pk > 0) return pk;
+  const cv = Number(eq.power_cv ?? 0);
+  if (cv > 0) return cv * CV_TO_KW;
+  return 0;
 }
 
 export default function DemandaEnergia() {

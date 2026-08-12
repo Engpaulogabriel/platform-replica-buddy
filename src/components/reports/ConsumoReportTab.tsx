@@ -17,7 +17,10 @@ interface ConsumoReportTabProps {
   selectedPump: string;
 }
 
-type PumpPowerRow = { id: string; name: string; demanda_kw: number | null; power_kw: number | null };
+type PumpPowerRow = { id: string; name: string; demanda_kw: number | null; power_kw: number | null; power_cv: number | null };
+
+// 1 CV ≈ 0,7355 kW — fallback quando só há power_cv cadastrado (senão kWh/custo = 0).
+const CV_TO_KW = 0.7355;
 
 function formatHM(hoursDecimal: number): string {
   const totalMinutes = Math.max(0, Math.round(hoursDecimal * 60));
@@ -51,7 +54,7 @@ export default function ConsumoReportTab({ farmId, fromDate, toDate, selectedPum
       const [{ data: eqs }, { data: farm }] = await Promise.all([
         supabase
           .from("equipments")
-          .select("id, name, demanda_kw, power_kw")
+          .select("id, name, demanda_kw, power_kw, power_cv")
           .eq("farm_id", farmId)
           .in("type", ["poco", "bombeamento"]),
         supabase
@@ -63,7 +66,9 @@ export default function ConsumoReportTab({ farmId, fromDate, toDate, selectedPum
       if (cancelled) return;
       setPumpPowers(((eqs ?? []) as PumpPowerRow[]).map((e) => {
         const d = Number(e.demanda_kw ?? 0);
-        const powerKw = d > 0 ? d : Number(e.power_kw ?? 0);
+        const pk = Number(e.power_kw ?? 0);
+        const cv = Number(e.power_cv ?? 0);
+        const powerKw = d > 0 ? d : pk > 0 ? pk : cv > 0 ? cv * CV_TO_KW : 0;
         return { id: e.id, name: e.name, powerKw };
       }));
       if (farm) setFarmHeader({ name: farm.name ?? "Fazenda", city: farm.city ?? null, state: farm.state ?? null });

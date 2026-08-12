@@ -26,12 +26,20 @@ interface DayPeak {
   totalPumps: number;
 }
 
-type DemandEquipment = { id: string; name: string; power_kw: number | null; demanda_kw: number | null; active: boolean };
+type DemandEquipment = { id: string; name: string; power_kw: number | null; power_cv: number | null; demanda_kw: number | null; active: boolean };
 type RuntimeRow = { equipment_id: string; started_at: string; ended_at: string | null };
 
-function powerOf(e: { demanda_kw: number | null; power_kw: number | null }): number {
+// 1 CV ≈ 0,7355 kW. Fallback quando o cadastro só tem power_cv (ex.: 125 CV) e
+// power_kw/demanda_kw não estão persistidos — antes zerava demanda e instalada.
+const CV_TO_KW = 0.7355;
+
+function powerOf(e: { demanda_kw: number | null; power_kw: number | null; power_cv: number | null }): number {
   const d = Number(e.demanda_kw ?? 0);
-  return d > 0 ? d : Number(e.power_kw ?? 0);
+  if (d > 0) return d;
+  const pk = Number(e.power_kw ?? 0);
+  if (pk > 0) return pk;
+  const cv = Number(e.power_cv ?? 0);
+  return cv > 0 ? cv * CV_TO_KW : 0;
 }
 
 function fmtBR(d: string) {
@@ -66,7 +74,7 @@ export default function DemandReportTab({ farmId, fromDate, toDate }: Props) {
       const [eqRes, cfgRes] = await Promise.all([
         supabase
           .from("equipments")
-          .select("id, name, power_kw, demanda_kw, active, type")
+          .select("id, name, power_kw, power_cv, demanda_kw, active, type")
           .eq("farm_id", farmId)
           .in("type", ["poco", "bombeamento"]),
         supabase
@@ -80,6 +88,7 @@ export default function DemandReportTab({ farmId, fromDate, toDate }: Props) {
         id: e.id,
         name: e.name,
         power_kw: e.power_kw,
+        power_cv: (e as any).power_cv ?? null,
         demanda_kw: e.demanda_kw,
         active: Boolean(e.active),
       })));
