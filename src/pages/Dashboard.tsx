@@ -35,6 +35,7 @@ import { useDashboardEquipment } from "@/hooks/useDashboardEquipment";
 import { BridgeStatusCard } from "@/components/dashboard/BridgeStatusCard";
 import { WaterBalanceCard } from "@/components/dashboard/WaterBalanceCard";
 import { IndicatorsMiniSummary } from "@/components/dashboard/IndicatorsMiniSummary";
+import { WellHoursComplianceAlert } from "@/components/dashboard/WellHoursComplianceAlert";
 import { useRfMeasurement } from "@/hooks/useRfMeasurement";
 import { barsToPercent } from "@/lib/rfSignal";
 import { buildEquipmentFrame } from "@/lib/rfRouting";
@@ -1105,6 +1106,7 @@ const Dashboard = () => {
       </div>
 
       {canViewIndicators && <IndicatorsMiniSummary farmId={farmId} />}
+      <WellHoursComplianceAlert farmId={farmId} />
       <WaterBalanceCard farmId={farmId} pumpStats={waterBalancePumpStats} />
 
 
