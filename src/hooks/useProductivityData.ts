@@ -27,8 +27,9 @@ export interface ProductivityConfig {
   demand_cost_per_kw: number;
   utility_name?: string | null;
   // Premissas do Impacto RENOV (configuráveis por fazenda; 0 = "requer valor").
-  safra_value_per_m3: number;      // R$/m³ da safra (m³ extras irrigados)
-  monthly_salary_regional: number; // salário médio regional (redução de pessoal)
+  valor_safra_r_per_m3: number;    // R$/m³ da safra (m³ extras irrigados)
+  salario_medio_regional: number;  // salário médio regional (redução de pessoal)
+  operadores_reduzidos: number;    // nº operadores reduzidos (0 = usar ceil(poços/4)-1)
 }
 
 export const DEFAULT_PROD_CFG: ProductivityConfig = {
@@ -43,8 +44,9 @@ export const DEFAULT_PROD_CFG: ProductivityConfig = {
   contracted_demand_kw: 0,
   demand_cost_per_kw: 35,
   utility_name: null,
-  safra_value_per_m3: 0,
-  monthly_salary_regional: 0,
+  valor_safra_r_per_m3: 0,
+  salario_medio_regional: 0,
+  operadores_reduzidos: 0,
 };
 
 export interface PumpProductivity {
@@ -142,8 +144,9 @@ export function useProductivityData(args: { from: Date; to: Date }): Productivit
       contracted_demand_kw: Number(cfgData.contracted_demand_kw ?? 0),
       demand_cost_per_kw: Number(cfgData.demand_cost_per_kw ?? DEFAULT_PROD_CFG.demand_cost_per_kw),
       utility_name: cfgData.utility_name ?? null,
-      safra_value_per_m3: Number(cfgData.safra_value_per_m3 ?? 0),
-      monthly_salary_regional: Number(cfgData.monthly_salary_regional ?? 0),
+      valor_safra_r_per_m3: Number(cfgData.valor_safra_r_per_m3 ?? 0),
+      salario_medio_regional: Number(cfgData.salario_medio_regional ?? 0),
+      operadores_reduzidos: Number(cfgData.operadores_reduzidos ?? 0),
     };
     setCfg(finalCfg);
 

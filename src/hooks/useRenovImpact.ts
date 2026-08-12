@@ -85,7 +85,7 @@ export function useRenovImpact(farmId: string | null | undefined): RenovImpact {
           .eq("farm_id", farmId).gte("occurred_at", fromIso).in("action", ["turn_on", "turn_off"]),
         supabase.from("commands").select("created_at,responded_at")
           .eq("farm_id", farmId).gte("created_at", fromIso).not("responded_at", "is", null).limit(2000),
-        supabase.from("farm_productivity_config").select("tariff_peak,tariff_off_peak,manual_travel_minutes_per_trigger,safra_value_per_m3,monthly_salary_regional").eq("farm_id", farmId).maybeSingle(),
+        supabase.from("farm_productivity_config").select("tariff_peak,tariff_off_peak,manual_travel_minutes_per_trigger,valor_safra_r_per_m3,salario_medio_regional,operadores_reduzidos").eq("farm_id", farmId).maybeSingle(),
         supabase.rpc("get_horimetro_daily", { _farm_id: farmId, _from: fromIso, _to: toIso }),
         supabase.from("water_permits" as any).select("regime_hours_per_day").eq("farm_id", farmId).limit(1).maybeSingle(),
         supabase.from("automation_log").select("occurred_at").eq("farm_id", farmId).order("occurred_at", { ascending: true }).limit(1).maybeSingle(),
@@ -125,8 +125,9 @@ export function useRenovImpact(farmId: string | null | undefined): RenovImpact {
     const dTarifa = Math.max(0, tariffPeak - tariffOff);
     const manualTravelMin = Number(cfg?.manual_travel_minutes_per_trigger ?? 0) || 0;
     // Premissas configuráveis por fazenda (farm_productivity_config). 0 = "requer valor".
-    const safraValue = Number(cfg?.safra_value_per_m3 ?? 0) || 0;
-    const salaryRegional = Number(cfg?.monthly_salary_regional ?? 0) || 0;
+    const safraValue = Number(cfg?.valor_safra_r_per_m3 ?? 0) || 0;
+    const salaryRegional = Number(cfg?.salario_medio_regional ?? 0) || 0;
+    const operadoresCfg = Number(cfg?.operadores_reduzidos ?? 0) || 0;
 
     const powerKw = (e: any): number => e.power_kw != null && e.power_kw > 0 ? Number(e.power_kw)
       : e.power_cv != null && e.power_cv > 0 ? Number(e.power_cv) * P.cvToKw : 75;
@@ -205,8 +206,10 @@ export function useRenovImpact(farmId: string | null | undefined): RenovImpact {
     const multasEvitadas = multasOcorrencias * P.fineValue;
 
     // ── #5 PESSOAL (ESTIMADO — premissa) ─────────────────────────────────────
+    // Configurável: se operadores_reduzidos > 0 usa o valor; senão calcula
+    // ceil(poços / wellsPerOperator) − 1 operador remoto.
     const operatorsBefore = Math.ceil(wellCount / P.wellsPerOperator);
-    const pessoalReduzidos = Math.max(0, operatorsBefore - 1);
+    const pessoalReduzidos = operadoresCfg > 0 ? operadoresCfg : Math.max(0, operatorsBefore - 1);
     const pessoalValue = salaryRegional > 0 ? pessoalReduzidos * salaryRegional : null;
 
     // ── #6 MANUTENÇÃO PREVENTIVA (ESTIMADO) ──────────────────────────────────
