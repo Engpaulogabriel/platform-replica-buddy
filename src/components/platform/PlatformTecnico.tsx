@@ -13,6 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { notify } from "@/lib/notify";
 import { Wrench, Plus, CheckCircle2, RefreshCw, Filter } from "lucide-react";
 import OutorgaWellLinks from "@/components/inema/OutorgaWellLinks";
+import WellLevelMeasurements from "@/components/inema/WellLevelMeasurements";
 import {
   PROBLEM_TYPES, PRIORITY_LABEL, STATUS_LABEL, problemLabel, defaultPriorityFor,
   type MaintenanceOrder, type MaintenancePriority, type MaintenanceStatus,
@@ -294,6 +295,9 @@ export default function PlatformTecnico({ isAdmin: _isAdmin }: { isAdmin: boolea
 
       {/* Vínculos de Outorga (poço ↔ equipamento) — edição restrita ao Setor Técnico */}
       <OutorgaWellLinks />
+
+      {/* Registro de Níveis (NE/ND) por poço — monitoramento de outorga INEMA */}
+      <WellLevelMeasurements />
     </div>
   );
 }
