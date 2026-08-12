@@ -1,5 +1,9 @@
 project_id = "vabguxllyguztneumahq"
 
+# well-hours-watchdog: chamada pelo pg_cron (apikey anon). verify_jwt=false p/ evitar 401.
+[functions.well-hours-watchdog]
+verify_jwt = false
+
 [functions.cleanup-agent-logs]
 verify_jwt = false
 
