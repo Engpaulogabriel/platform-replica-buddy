@@ -330,6 +330,14 @@ function ConfigForm({ cfg, onSaved, canEdit, farmId }: { cfg: ProductivityConfig
             <Field label="Custo demanda (R$/kW)" value={v.demand_cost_per_kw} onChange={set("demand_cost_per_kw")} disabled={!canEdit} step="0.01" />
           </div>
         </div>
+        <div>
+          <h4 className="text-sm font-semibold mb-2">Premissas do Impacto RENOV</h4>
+          <p className="text-[11px] text-muted-foreground mb-2">Usadas no painel de Impacto (Indicadores). Deixe 0 se não tiver o valor — o card mostra "requer valor".</p>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            <Field label="Valor da safra (R$/m³)" value={v.safra_value_per_m3} onChange={set("safra_value_per_m3")} disabled={!canEdit} step="0.01" />
+            <Field label="Salário médio regional (R$/mês)" value={v.monthly_salary_regional} onChange={set("monthly_salary_regional")} disabled={!canEdit} step="0.01" />
+          </div>
+        </div>
         {canEdit && (
           <Button onClick={save} disabled={saving}><Save className="w-4 h-4 mr-1.5" />{saving ? "Salvando…" : "Salvar configurações"}</Button>
         )}

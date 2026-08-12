@@ -85,7 +85,7 @@ export function useRenovImpact(farmId: string | null | undefined): RenovImpact {
           .eq("farm_id", farmId).gte("occurred_at", fromIso).in("action", ["turn_on", "turn_off"]),
         supabase.from("commands").select("created_at,responded_at")
           .eq("farm_id", farmId).gte("created_at", fromIso).not("responded_at", "is", null).limit(2000),
-        supabase.from("farm_productivity_config").select("tariff_peak,tariff_off_peak,manual_travel_minutes_per_trigger").eq("farm_id", farmId).maybeSingle(),
+        supabase.from("farm_productivity_config").select("tariff_peak,tariff_off_peak,manual_travel_minutes_per_trigger,safra_value_per_m3,monthly_salary_regional").eq("farm_id", farmId).maybeSingle(),
         supabase.rpc("get_horimetro_daily", { _farm_id: farmId, _from: fromIso, _to: toIso }),
         supabase.from("water_permits" as any).select("regime_hours_per_day").eq("farm_id", farmId).limit(1).maybeSingle(),
         supabase.from("automation_log").select("occurred_at").eq("farm_id", farmId).order("occurred_at", { ascending: true }).limit(1).maybeSingle(),
@@ -124,6 +124,9 @@ export function useRenovImpact(farmId: string | null | undefined): RenovImpact {
     const tariffOff = Number(cfg?.tariff_off_peak ?? 0.55);
     const dTarifa = Math.max(0, tariffPeak - tariffOff);
     const manualTravelMin = Number(cfg?.manual_travel_minutes_per_trigger ?? 0) || 0;
+    // Premissas configuráveis por fazenda (farm_productivity_config). 0 = "requer valor".
+    const safraValue = Number(cfg?.safra_value_per_m3 ?? 0) || 0;
+    const salaryRegional = Number(cfg?.monthly_salary_regional ?? 0) || 0;
 
     const powerKw = (e: any): number => e.power_kw != null && e.power_kw > 0 ? Number(e.power_kw)
       : e.power_cv != null && e.power_cv > 0 ? Number(e.power_cv) * P.cvToKw : 75;
@@ -188,7 +191,7 @@ export function useRenovImpact(farmId: string | null | undefined): RenovImpact {
       const diffMin = Math.max(0, manualMinFor(e) - avgRespMin);
       m3Extra += (diffMin / 60) * Number(e.estimated_flow_m3h);
     }
-    const m3ExtraValue = P.safraValuePerM3 > 0 ? m3Extra * P.safraValuePerM3 : null;
+    const m3ExtraValue = safraValue > 0 ? m3Extra * safraValue : null;
 
     // ── #4 MULTAS EVITADAS (ESTIMADO) ────────────────────────────────────────
     // Dias com desligamento auto/remoto na aproximação da ponta (compliance).
@@ -204,7 +207,7 @@ export function useRenovImpact(farmId: string | null | undefined): RenovImpact {
     // ── #5 PESSOAL (ESTIMADO — premissa) ─────────────────────────────────────
     const operatorsBefore = Math.ceil(wellCount / P.wellsPerOperator);
     const pessoalReduzidos = Math.max(0, operatorsBefore - 1);
-    const pessoalValue = P.monthlySalary > 0 ? pessoalReduzidos * P.monthlySalary : null;
+    const pessoalValue = salaryRegional > 0 ? pessoalReduzidos * salaryRegional : null;
 
     // ── #6 MANUTENÇÃO PREVENTIVA (ESTIMADO) ──────────────────────────────────
     const highWearThreshold = 24 * PERIOD_DAYS * P.highWearRatio; // horas em 30d
