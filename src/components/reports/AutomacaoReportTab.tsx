@@ -17,6 +17,14 @@ interface AutomacaoReportTabProps {
 
 const LOG_PAGE_SIZE = 50;
 
+// Resultado do comando: "OK" para success / executed / ok / null (comando enviado
+// sem erro). Só "Falhou" para fail / failed / timeout / error explícitos. (Mesma
+// regra do resultLabel em reportExport.ts — o agente registra "executed".)
+const isResultOk = (result?: string | null): boolean => {
+  const s = String(result ?? "").trim().toLowerCase();
+  return !(s === "fail" || s === "failed" || s === "timeout" || s === "error");
+};
+
 const SYSTEM_ACTIONS = new Set<string>([
   "Sem resposta",
   "Equipamento religado",
@@ -240,7 +248,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
             <>
               <div className="sm:hidden divide-y divide-border">
                 {pagedLog.map((item) => {
-                  const ok = (item.result ?? "success") === "success";
+                  const ok = isResultOk(item.result);
                   const { cls: actionCls, Icon: ActionIcon } = getActionStyle(item.action);
                   return (
                     <div key={item.id} className="px-4 py-3 space-y-2">
@@ -315,7 +323,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                             )}
                           </TableCell>
                           <TableCell>
-                            {(item.result ?? "success") === "success" ? (
+                            {isResultOk(item.result) ? (
                               <span className="text-[11px] font-medium text-primary">OK</span>
                             ) : (
                               <span className="text-[11px] font-medium text-destructive">Falhou</span>

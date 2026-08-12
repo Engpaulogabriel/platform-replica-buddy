@@ -269,7 +269,9 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
                       <TableCell className="text-right">
                         {r.flow == null
                           ? <span className="text-muted-foreground">— configurar</span>
-                          : `${r.flow.toLocaleString("pt-BR")} m³/h`}
+                          : r.hours > 0
+                            ? `${r.flow.toLocaleString("pt-BR")} m³/h`
+                            : <span className="text-muted-foreground">—</span>}
                       </TableCell>
                       <TableCell className="text-right">{formatHM(r.hours)}</TableCell>
                       <TableCell className="text-right font-semibold">
@@ -367,7 +369,9 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
                       <TableCell>{r.eqName}</TableCell>
                       <TableCell className="text-right">{formatHM(r.hours)}</TableCell>
                       <TableCell className="text-right">
-                        {r.flow == null ? <span className="text-muted-foreground">—</span> : `${r.flow.toLocaleString("pt-BR")} m³/h`}
+                        {r.flow == null || !(r.hours > 0)
+                          ? <span className="text-muted-foreground">—</span>
+                          : `${r.flow.toLocaleString("pt-BR")} m³/h`}
                       </TableCell>
                       <TableCell className="text-right font-semibold">
                         {r.m3 == null ? "—" : `${fmtM3(r.m3)} m³`}
