@@ -19,6 +19,7 @@ type Cycle = {
   attempts?: number | null;
   tsnn?: string | null;
   systemOutage?: boolean;     // queda de sistema (agente/bridge caiu) — não é do equipamento
+  inconsistent?: boolean;     // duração > 48h → dado inconsistente (fora dos totais)
 };
 
 
@@ -47,10 +48,20 @@ function fmtTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-// Padrão 5 min: quedas mais curtas costumam ser apenas o intervalo entre ciclos
-// de polling (o equipamento respondeu no ciclo anterior e no próximo, mas ficou
-// "sem RX" no meio). Ver Problema 2 (Sykue PLC 1301 caindo a cada ~3 min).
-const MIN_DURATION_DEFAULT = 300; // segundos (5 min)
+// Padrão 15 min: só é queda REAL depois de 15 min sem comunicação. Abaixo disso é
+// o intervalo normal entre ciclos de polling / retry (o equipamento respondeu no
+// ciclo anterior e no próximo, mas ficou "sem RX" no meio).
+const MIN_DURATION_DEFAULT = 900; // segundos (15 min)
+
+// Comunicação "recente": se o equipamento comunicou nos últimos 15 min (e depois
+// da queda), ele está ONLINE agora — qualquer queda "em andamento" é falsa (o
+// evento de volta não foi registrado, ex.: agente reiniciou) e é auto-fechada.
+const RECENT_COMM_MS = 15 * 60_000;
+
+// Cap de sanidade: nenhuma bomba fica 48h+ sem comunicar sem ninguém perceber.
+// Quedas acima disso são "dado inconsistente" (agente perdeu o estado) — mostradas
+// com aviso e EXCLUÍDAS do Tempo Total e da Duração Média.
+const INCONSISTENT_MAX_SEC = 48 * 3600; // 48 h
 
 // Queda de sistema: quando uma fração alta dos equipamentos que comunicam cai
 // junta dentro de ±30s (agente/bridge/Starlink reiniciou), NÃO é queda individual
@@ -137,27 +148,29 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
         }
         if (openOffline) {
           const status = equipStatus.get(equip);
-          // Se o equipamento já está online agora, fecha o ciclo usando
-          // last_communication (ou now() como fallback) — evita "Em andamento"
-          // eterno quando o evento de volta nunca foi registrado.
-          if (status?.online) {
-            const closeAt = status.lastComm && new Date(status.lastComm).getTime() > new Date(openOffline.at).getTime()
-              ? status.lastComm
-              : new Date(now).toISOString();
-            const durMs = new Date(closeAt).getTime() - new Date(openOffline.at).getTime();
+          const offlineAtMs = new Date(openOffline.at).getTime();
+          const lastCommMs = status?.lastComm ? new Date(status.lastComm).getTime() : 0;
+          // Equipamento comunicando AGORA = last_communication recente (< 15 min) E
+          // POSTERIOR à queda. Então a queda "em andamento" é FALSA: o evento de volta
+          // nunca foi registrado (agente reiniciou/atualizou e perdeu o estado). Fecha
+          // automaticamente com onlineAt = last_communication. REGRA: nunca mostrar
+          // "em andamento" se o equipamento está online.
+          const commRecent = lastCommMs > offlineAtMs && (now - lastCommMs) < RECENT_COMM_MS;
+          if (commRecent) {
+            const closeAt = new Date(lastCommMs).toISOString();
             cycles.push({
               id: openOffline.id,
               equipment: equip,
               offlineAt: openOffline.at,
               onlineAt: closeAt,
-              durationSec: Math.max(0, Math.round(durMs / 1000)),
+              durationSec: Math.max(0, Math.round((lastCommMs - offlineAtMs) / 1000)),
               ongoing: false,
               autoClosed: true,
               attempts: openOffline.det.tentativas_sem_resposta ?? openOffline.det.tentativas_consecutivas ?? null,
               tsnn: openOffline.det.tsnn ?? null,
             });
           } else {
-            const durMs = now - new Date(openOffline.at).getTime();
+            const durMs = now - offlineAtMs;
             cycles.push({
               id: openOffline.id,
               equipment: equip,
@@ -170,6 +183,12 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
             });
           }
         }
+      }
+
+      // Cap de 48h: qualquer queda acima disso é "dado inconsistente" (agente
+      // perdeu o estado). Marcada com aviso e fora dos totais (Tempo Total/Média).
+      for (const c of cycles) {
+        if (c.durationSec > INCONSISTENT_MAX_SEC) c.inconsistent = true;
       }
 
       // Detecta "quedas de sistema": quando uma fração alta (≥80%) dos
@@ -221,12 +240,16 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
     // Quedas de sistema não entram nas métricas individuais do equipamento.
     const equip = filtered.filter(c => !c.systemOutage);
     const systemOutages = filtered.filter(c => c.systemOutage).length;
-    const total = equip.length;
-    const recovered = equip.filter(c => !c.ongoing);
-    const ongoing = equip.filter(c => c.ongoing).length;
-    const totalDownSec = equip.reduce((s, c) => s + c.durationSec, 0);
+    const inconsistent = equip.filter(c => c.inconsistent).length;
+    // Quedas > 48h (inconsistentes) NÃO contam em nenhuma métrica: são dado ruim
+    // (agente perdeu o estado), não uma queda real do equipamento.
+    const valid = equip.filter(c => !c.inconsistent);
+    const total = valid.length;
+    const recovered = valid.filter(c => !c.ongoing);
+    const ongoing = valid.filter(c => c.ongoing).length;
+    const totalDownSec = valid.reduce((s, c) => s + c.durationSec, 0);
     const avg = recovered.length > 0 ? Math.round(recovered.reduce((s, c) => s + c.durationSec, 0) / recovered.length) : 0;
-    return { total, recovered: recovered.length, ongoing, totalDownSec, avg, systemOutages };
+    return { total, recovered: recovered.length, ongoing, totalDownSec, avg, systemOutages, inconsistent };
   }, [filtered]);
 
   const exportCSV = () => {
@@ -238,9 +261,9 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
         fmtTime(c.offlineAt),
         c.onlineAt ? fmtTime(c.onlineAt) : "—",
         c.equipment,
-        c.systemOutage ? "Queda de sistema" : "Equipamento",
+        c.systemOutage ? "Queda de sistema" : c.inconsistent ? "Dado inconsistente" : "Equipamento",
         c.tsnn ?? "",
-        c.ongoing ? `Em andamento (${fmtDuration(c.durationSec)})` : fmtDuration(c.durationSec),
+        c.inconsistent ? `Dado inconsistente (${fmtDuration(c.durationSec)})` : c.ongoing ? `Em andamento (${fmtDuration(c.durationSec)})` : fmtDuration(c.durationSec),
         c.attempts ?? "",
       ].join(";"));
     }
@@ -267,6 +290,9 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
               {stats.total}
               {stats.systemOutages > 0 && (
                 <span className="text-xs text-info ml-1 font-semibold">+{stats.systemOutages} sistema</span>
+              )}
+              {stats.inconsistent > 0 && (
+                <span className="text-xs text-muted-foreground ml-1 font-semibold">+{stats.inconsistent} inconsist.</span>
               )}
             </p>
           </CardContent>
@@ -345,7 +371,11 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
                         <p className="font-semibold text-foreground truncate">{c.equipment}</p>
                         <p className="text-xs text-muted-foreground">{fmtDate(c.offlineAt)}</p>
                       </div>
-                      {c.systemOutage ? (
+                      {c.inconsistent ? (
+                        <span className="shrink-0 text-[10px] font-bold px-2 py-1 rounded-full bg-muted text-muted-foreground flex items-center gap-1">
+                          ⚠️ INCONSISTENTE
+                        </span>
+                      ) : c.systemOutage ? (
                         <span className="shrink-0 text-[10px] font-bold px-2 py-1 rounded-full bg-info/10 text-info flex items-center gap-1">
                           <Radio className="w-3 h-3" /> SISTEMA
                         </span>
@@ -364,7 +394,9 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
                       <div>Online às: <span className="text-foreground">{c.onlineAt ? fmtTime(c.onlineAt) : "—"}</span></div>
                       <div className="col-span-2">
                         Duração: <span className="text-foreground font-semibold">
-                          {c.ongoing ? `Em andamento (${fmtDuration(c.durationSec)})` : fmtDuration(c.durationSec)}
+                          {c.inconsistent
+                            ? "⚠️ Dado inconsistente (fora do total)"
+                            : c.ongoing ? `Em andamento (${fmtDuration(c.durationSec)})` : fmtDuration(c.durationSec)}
                         </span>
                       </div>
                       {c.tsnn && <div>TSNN: <span className="text-foreground">{c.tsnn}</span></div>}
@@ -390,7 +422,7 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
                   </TableHeader>
                   <TableBody>
                     {filtered.map((c) => (
-                      <TableRow key={c.id} className={`border-border hover:bg-secondary/50 ${c.systemOutage ? "bg-info/5" : ""}`}>
+                      <TableRow key={c.id} className={`border-border hover:bg-secondary/50 ${c.inconsistent ? "bg-muted/40 opacity-70" : c.systemOutage ? "bg-info/5" : ""}`}>
                         <TableCell className="text-foreground text-sm whitespace-nowrap">{fmtDate(c.offlineAt)}</TableCell>
                         <TableCell className="text-foreground text-sm whitespace-nowrap">
                           <span className="inline-flex items-center gap-1">
@@ -411,7 +443,12 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
                         <TableCell className="text-foreground font-medium">{c.equipment}</TableCell>
                         <TableCell className="text-muted-foreground text-xs">{c.tsnn ?? "—"}</TableCell>
                         <TableCell className="text-sm whitespace-nowrap">
-                          {c.systemOutage ? (
+                          {c.inconsistent ? (
+                            <span className="text-muted-foreground font-semibold inline-flex items-center gap-1" title="Duração acima de 48h — dado inconsistente (agente perdeu o estado). Não entra no Tempo Total nem na Média.">
+                              ⚠️ Dado inconsistente
+                              <span className="ml-1 text-[10px] font-normal">({fmtDuration(c.durationSec)})</span>
+                            </span>
+                          ) : c.systemOutage ? (
                             <span className="text-info font-semibold inline-flex items-center gap-1">
                               <Radio className="w-3 h-3" /> Queda de sistema
                               <span className="ml-1 text-[10px] text-muted-foreground font-normal">({fmtDuration(c.durationSec)})</span>
