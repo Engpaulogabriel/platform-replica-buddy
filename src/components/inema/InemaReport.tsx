@@ -156,47 +156,8 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
     return { ...mo, authDaily, authPeriod, pct };
   }), [monitoring, authByEquip, authByPocoNumber, range.days]);
 
-  // Baixar PDF: chama a EDGE FUNCTION (server-side) — não depende de qual versão
-  // do frontend está publicada no Lovable. Se a função falhar (rede/deploy
-  // pendente), cai no gerador local como fallback.
-  const exportPDF = async () => {
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token || !farmId) throw new Error("sem sessão");
-      const res = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-inema-pdf`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-            apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string,
-          },
-          body: JSON.stringify({
-            farm_id: farmId,
-            date_start: range.from.toISOString(),
-            date_end: range.to.toISOString(),
-          }),
-        },
-      );
-      if (!res.ok) throw new Error(`edge ${res.status}`);
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `renov-${agency.agency_acronym.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.pdf`;
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-      notify.ok("Relatório", "PDF exportado.");
-    } catch (_) {
-      // Fallback: geração local (pode estar desatualizada se o Lovable não publicou).
-      await exportPDFLocal();
-    }
-  };
-
   // PDF oficial — DADOS DA OUTORGA vindos de water_permits (não da inema_permits/config).
-  const exportPDFLocal = async () => {
+  const exportPDF = async () => {
     try {
       // Rebusca FRESCA no clique — o PDF nunca depende do estado do componente
       // (evita "—" por timing / estado não carregado). Fallback: usa o state.
