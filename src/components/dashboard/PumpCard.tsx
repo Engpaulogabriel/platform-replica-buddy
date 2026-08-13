@@ -85,6 +85,10 @@ function PumpCardImpl(props: PumpCardProps) {
   // Ordem de manutenção ABERTA para este equipamento → badge automático (não bloqueia).
   const { getForEquipment } = useOpenMaintenance();
   const maint = getForEquipment(pump.id);
+  // "Em manutenção" para fins de COR/BADGE = modo-manutenção (bloqueante) OU
+  // ordem de manutenção aberta (não-bloqueante, criada no Setor Técnico). Ambos
+  // deixam o card AZUL. O bloqueio de operação (Lock/switch) segue só o inMaintenance.
+  const inMaint = inMaintenance || !!maint;
   // Minutos desde a última comunicação real — alimenta o indicador discreto "⏱ Xmin"
   // (instável, sem alarme) e o tooltip de offline. null quando nunca comunicou.
   const minutesSinceComm = pump.lastCommunication
@@ -106,8 +110,10 @@ function PumpCardImpl(props: PumpCardProps) {
   const transitionStuckMs = pump.pendingStartedAt ? (Date.now() - pump.pendingStartedAt) : Infinity;
   const showReset = isActiveTransition && transitionStuckMs >= RESET_STUCK_MS;
 
-  const bg = inMaintenance
-    ? "bg-[#FFF3E0] dark:bg-amber-950/30 border-l-[3px] border-l-amber-500 border-amber-300/60"
+  const bg = inMaint
+    // MANUTENÇÃO = AZUL (ordem aberta ou modo manutenção): o operador vê de cara
+    // quais bombas precisam de atenção — independente de ligada/desligada/offline.
+    ? "bg-info/10 border-info/60 border-l-[3px] border-l-info"
     : isOffline
       // OFFLINE = CINZA (sem comunicação), independente do último estado. Nunca
       // vermelho — vermelho é DESLIGADO comunicando. Restaurado (v3.25.56 quebrou).
@@ -120,8 +126,8 @@ function PumpCardImpl(props: PumpCardProps) {
             ? "bg-primary/25 border-primary/70 shadow-[0_0_0_1px_hsl(var(--primary)/0.3)]"
             : "bg-destructive/20 border-destructive/60";
 
-  const dotColor = inMaintenance
-    ? "bg-muted-foreground"
+  const dotColor = inMaint
+    ? "bg-info"
     : isOffline
       ? "bg-muted-foreground"
       : isCommFail
@@ -136,7 +142,7 @@ function PumpCardImpl(props: PumpCardProps) {
   const cardNode = (
     <div
       className={`flex flex-col gap-1 px-2 py-1.5 rounded-md border-2 ${bg} transition-all duration-300 cursor-pointer select-none ${
-        !inMaintenance && !isOffline && pump.running && !isPending ? "animate-pump-glow" : ""
+        !inMaint && !isOffline && pump.running && !isPending ? "animate-pump-glow" : ""
       }`}
 
       onClick={() => onToggleExpand(pump.id)}
@@ -219,14 +225,10 @@ function PumpCardImpl(props: PumpCardProps) {
           )}
           {maint && (
             <span
-              className={`text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0 flex items-center gap-0.5 border ${
-                maint.priority === "alta"
-                  ? "bg-destructive/20 text-destructive border-destructive/50"
-                  : "bg-warning/20 text-warning border-warning/50"
-              }`}
+              className="text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0 flex items-center gap-0.5 border bg-info/20 text-info border-info/50"
               title={`Manutenção pendente: ${problemLabel(maint.problem_type)}${maint.description ? ` — ${maint.description}` : ""} (prioridade ${maint.priority}). Equipamento pode não estar confiável.`}
             >
-              <Wrench className="w-2.5 h-2.5" /> Manutenção
+              🔧 Manutenção
             </span>
           )}
           {/* Badges LOCAL/AUTO/MANUTENÇÃO ficam na LINHA 2 (abaixo), nunca na linha do nome. */}
@@ -502,9 +504,9 @@ function PumpCardImpl(props: PumpCardProps) {
               LOCAL ganha de AUTO (último acionamento foi no painel físico).
               MANUTENÇÃO é independente — aparece SEMPRE que ativa, junto dos outros. */}
           <div className="ml-auto flex items-center gap-1 shrink-0">
-            {inMaintenance && (
+            {inMaintenance && !maint && (
               <span
-                className="flex items-center gap-0.5 px-1 py-0 rounded bg-orange-500/20 text-orange-600 dark:text-orange-400 font-bold text-[9px] uppercase tracking-wide border border-orange-500/50 shrink-0"
+                className="flex items-center gap-0.5 px-1 py-0 rounded bg-info/20 text-info font-bold text-[9px] uppercase tracking-wide border border-info/50 shrink-0"
                 title={maintenanceTooltip || "Em manutenção"}
               >
                 🔧 MANUTENÇÃO

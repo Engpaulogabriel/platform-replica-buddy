@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { ClipboardList, KeyRound, Stethoscope, Building2, Navigation, Timer, Settings, Users, TrendingUp, ShieldCheck, Cpu, Cable, Radio } from "lucide-react";
+import { ClipboardList, KeyRound, Stethoscope, Building2, Navigation, Timer, Settings, Users, TrendingUp, ShieldCheck, Cpu, Cable, Radio, Wrench } from "lucide-react";
 import RestrictedAuth from "@/components/RestrictedAuth";
 import { Cadastros } from "./Cadastros";
 import { CadastroLoginInner } from "./CadastroLogin";
@@ -16,6 +16,7 @@ import DevicesAdmin from "@/components/DevicesAdmin";
 import HardwareSecurityPanel from "@/components/HardwareSecurityPanel";
 import BridgeConsole from "./BridgeConsole";
 import CommunicationReport from "@/components/CommunicationReport";
+import MaintenanceTab from "@/components/tecnico/MaintenanceTab";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,6 +28,7 @@ const tabs = [
   { value: "equipamentos", label: "Equipamentos", icon: ClipboardList },
   { value: "login", label: "Login", icon: KeyRound },
   { value: "diagnostico", label: "Diagnóstico", icon: Stethoscope },
+  { value: "manutencao", label: "Manutenção", icon: Wrench },
   { value: "fazenda", label: "Fazenda", icon: Building2 },
   { value: "temporizadores", label: "Temporizadores", icon: Timer },
   { value: "sistema", label: "Sistema", icon: Settings },
@@ -89,6 +91,7 @@ const SuporteTecnico = () => {
           <TabsContent value="equipamentos" className="mt-4"><Cadastros /></TabsContent>
           <TabsContent value="login" className="mt-4"><CadastroLoginInner /></TabsContent>
           <TabsContent value="diagnostico" className="mt-4"><Diagnostico /></TabsContent>
+          <TabsContent value="manutencao" className="mt-4"><MaintenanceTab /></TabsContent>
           <TabsContent value="fazenda" className="mt-4"><FazendaContent /></TabsContent>
           <TabsContent value="temporizadores" className="mt-4"><TimersConfig /></TabsContent>
           <TabsContent value="sistema" className="mt-4"><SistemaSettings /></TabsContent>
