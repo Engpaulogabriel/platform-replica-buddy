@@ -189,6 +189,10 @@ function runDecryptedMain(plaintextSource) {
 }
 function fallbackPlaintext(reason) {
   log(`fallback → main.cjs ofuscado (${reason})`);
+  // O loader não tem sessão autenticada (RLS de agent_security_events exige
+  // can_write_farm). Como main.cjs roda no MESMO processo, sinalizamos o motivo
+  // por env; o main.cjs registra o evento fase3_fallback quando conectar (FASE 2).
+  try { process.env.RENOV_FASE3_FALLBACK_REASON = String(reason || "unknown").slice(0, 300); } catch (_) {}
   try { require("./main.cjs"); }
   catch (e) { log(`FATAL: fallback main.cjs falhou: ${e && e.message || e}`); }
 }

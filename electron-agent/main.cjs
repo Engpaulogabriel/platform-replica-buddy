@@ -158,6 +158,7 @@ let credentialsDpapiFailed = false;    // true se credentials.enc existe mas nã
 let farmSecurityPhase = 0;
 const SECURITY_PHASE2_MIN = 2;
 let lastSecurityEventAt = {};          // dedup por tipo (evita flood no banco)
+let fase3FallbackLogged = false;       // one-shot: registra fase3_fallback só 1x por sessão
 
 const LOG_DIR = path.join(app.getPath("userData"), "logs");
 const POLL_INTERVAL_MS = 10_000; // v3.7.8: aumentado de 3s para 10s — comandos manuais chegam via Realtime fast-path; reduz IO no banco em 70%
@@ -1191,6 +1192,13 @@ async function refreshCommTimeout() {
     if (nextPhase !== farmSecurityPhase) {
       farmSecurityPhase = nextPhase;
       pushLog("info", "system", `[SECURITY] security_phase da fazenda = ${farmSecurityPhase}${farmSecurityPhase >= SECURITY_PHASE2_MIN ? " (FASE 2 ATIVA — enforcement OFF)" : " (FASE 2 inativa)"}`);
+    }
+    // FASE 3: o loader.cjs caiu no fallback (main.cjs ofuscado em vez do main.enc
+    // decifrado)? Registra 1x por sessão — aqui supabase/farmId/security_phase já
+    // estão prontos. logSecurityEvent só grava se security_phase >= 2 (Sykue).
+    if (!fase3FallbackLogged && process.env.RENOV_FASE3_FALLBACK_REASON) {
+      fase3FallbackLogged = true;
+      void logSecurityEvent("fase3_fallback", { reason: String(process.env.RENOV_FASE3_FALLBACK_REASON).slice(0, 300) });
     }
   } catch (_) { /* mantém o valor atual; coluna security_phase pode não existir ainda */ }
 }
