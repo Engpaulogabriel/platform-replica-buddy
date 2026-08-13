@@ -85,10 +85,13 @@ function PumpCardImpl(props: PumpCardProps) {
   // Ordem de manutenção ABERTA para este equipamento → badge automático (não bloqueia).
   const { getForEquipment } = useOpenMaintenance();
   const maint = getForEquipment(pump.id);
-  // "Em manutenção" para fins de COR/BADGE = modo-manutenção (bloqueante) OU
-  // ordem de manutenção aberta (não-bloqueante, criada no Setor Técnico). Ambos
-  // deixam o card AZUL. O bloqueio de operação (Lock/switch) segue só o inMaintenance.
-  const inMaint = inMaintenance || !!maint;
+  // Duas cores de manutenção, por ORIGEM:
+  //  • AZUL  = manutenção BLOQUEANTE (equipments.maintenance_mode) — técnico/admin.
+  //  • AMARELO = ordem de manutenção ABERTA (maintenance_orders) — pessoal da fazenda.
+  // O bloqueio de operação (Lock/switch) segue só o inMaintenance (azul).
+  const maintIsBlue = !!inMaintenance;
+  const maintIsYellow = !inMaintenance && !!maint;
+  const inMaint = maintIsBlue || maintIsYellow; // usado só para suprimir o glow
   // Minutos desde a última comunicação real — alimenta o indicador discreto "⏱ Xmin"
   // (instável, sem alarme) e o tooltip de offline. null quando nunca comunicou.
   const minutesSinceComm = pump.lastCommunication
@@ -110,10 +113,12 @@ function PumpCardImpl(props: PumpCardProps) {
   const transitionStuckMs = pump.pendingStartedAt ? (Date.now() - pump.pendingStartedAt) : Infinity;
   const showReset = isActiveTransition && transitionStuckMs >= RESET_STUCK_MS;
 
-  const bg = inMaint
-    // MANUTENÇÃO = AZUL (ordem aberta ou modo manutenção): o operador vê de cara
-    // quais bombas precisam de atenção — independente de ligada/desligada/offline.
+  const bg = maintIsBlue
+    // AZUL = manutenção bloqueante (técnico/admin, maintenance_mode).
     ? "bg-info/10 border-info/60 border-l-[3px] border-l-info"
+    : maintIsYellow
+      // AMARELO = ordem de manutenção aberta (pessoal da fazenda, maintenance_orders).
+      ? "bg-[#FFF3E0] dark:bg-amber-950/30 border-amber-300/60 border-l-[3px] border-l-amber-500"
     : isOffline
       // OFFLINE = CINZA (sem comunicação), independente do último estado. Nunca
       // vermelho — vermelho é DESLIGADO comunicando. Restaurado (v3.25.56 quebrou).
@@ -126,8 +131,10 @@ function PumpCardImpl(props: PumpCardProps) {
             ? "bg-primary/25 border-primary/70 shadow-[0_0_0_1px_hsl(var(--primary)/0.3)]"
             : "bg-destructive/20 border-destructive/60";
 
-  const dotColor = inMaint
+  const dotColor = maintIsBlue
     ? "bg-info"
+    : maintIsYellow
+      ? "bg-amber-500"
     : isOffline
       ? "bg-muted-foreground"
       : isCommFail
@@ -225,7 +232,11 @@ function PumpCardImpl(props: PumpCardProps) {
           )}
           {maint && (
             <span
-              className="text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0 flex items-center gap-0.5 border bg-info/20 text-info border-info/50"
+              className={`text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded shrink-0 flex items-center gap-0.5 border ${
+                maintIsBlue
+                  ? "bg-info/20 text-info border-info/50"
+                  : "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-400/50"
+              }`}
               title={`Manutenção pendente: ${problemLabel(maint.problem_type)}${maint.description ? ` — ${maint.description}` : ""} (prioridade ${maint.priority}). Equipamento pode não estar confiável.`}
             >
               🔧 Manutenção
