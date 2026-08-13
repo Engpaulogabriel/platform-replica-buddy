@@ -146,12 +146,18 @@ const SECURITY_PHASE2_ENFORCEMENT = false;
 // %ProgramData%\Renov\ — se a pasta for copiada p/ outro PC, o DPAPI falha ao
 // decifrar (chave atrelada à máquina) e o clone não obtém credenciais.
 const CREDENTIALS_ENC_FILE = path.join("C:\\ProgramData", "Renov", "credentials.enc");
-const AGENT_TOKEN_TTL_MS = 5 * 60 * 1000;      // TTL do token (servidor manda 300s)
-const AGENT_TOKEN_REFRESH_SKEW_MS = 90 * 1000; // renova ~90s antes de expirar
+const AGENT_TOKEN_TTL_MS = 10 * 60 * 1000;     // TTL do token (servidor manda 600s)
+const AGENT_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000; // renova ~5min antes de expirar → refresh a cada ~5min
 let agentToken = null;                 // JWT rotativo atual (em memória)
 let agentTokenExpiresAt = 0;           // epoch ms de expiração
 let lastTokenRefreshAt = 0;
 let credentialsDpapiFailed = false;    // true se credentials.enc existe mas não decifra
+// FASE 2 só ATIVA quando farms.security_phase >= 2 (lido em refreshCommTimeout).
+// Enquanto < 2, o agente NÃO rotaciona token nem grava agent_security_events —
+// comporta-se exatamente como antes (anon+config). Testar só na Sykue.
+let farmSecurityPhase = 0;
+const SECURITY_PHASE2_MIN = 2;
+let lastSecurityEventAt = {};          // dedup por tipo (evita flood no banco)
 
 const LOG_DIR = path.join(app.getPath("userData"), "logs");
 const POLL_INTERVAL_MS = 10_000; // v3.7.8: aumentado de 3s para 10s — comandos manuais chegam via Realtime fast-path; reduz IO no banco em 70%
@@ -1167,7 +1173,7 @@ async function refreshCommTimeout() {
   try {
     const { data, error } = await supabase
       .from("farms")
-      .select("comm_timeout_minutes")
+      .select("comm_timeout_minutes, security_phase")
       .eq("id", farmId)
       .maybeSingle();
     if (error || !data) return;
@@ -1179,7 +1185,34 @@ async function refreshCommTimeout() {
         commTimeoutMs = next;
       }
     }
-  } catch (_) { /* mantém o valor atual */ }
+    // FASE 2 gate — coluna nova; se não existir (banco antigo), fica 0.
+    const phase = Number(data.security_phase);
+    const nextPhase = Number.isFinite(phase) ? phase : 0;
+    if (nextPhase !== farmSecurityPhase) {
+      farmSecurityPhase = nextPhase;
+      pushLog("info", "system", `[SECURITY] security_phase da fazenda = ${farmSecurityPhase}${farmSecurityPhase >= SECURITY_PHASE2_MIN ? " (FASE 2 ATIVA — enforcement OFF)" : " (FASE 2 inativa)"}`);
+    }
+  } catch (_) { /* mantém o valor atual; coluna security_phase pode não existir ainda */ }
+}
+
+// Grava um evento na trilha agent_security_events. NÃO-FATAL e só quando a FASE 2
+// está ativa (security_phase >= 2). Dedup por tipo (no máx 1 a cada 60s) para não
+// floodar o banco. Enforcement OFF: isto NUNCA bloqueia nada — só registra.
+async function logSecurityEvent(eventType, details) {
+  try {
+    if (farmSecurityPhase < SECURITY_PHASE2_MIN) return;
+    if (!supabase || !farmId) return;
+    const now = Date.now();
+    if (lastSecurityEventAt[eventType] && now - lastSecurityEventAt[eventType] < 60_000) return;
+    lastSecurityEventAt[eventType] = now;
+    await supabase.from("agent_security_events").insert({
+      farm_id: farmId,
+      event_type: eventType,
+      details: details || {},
+      agent_version: AGENT_VERSION,
+    });
+    pushLog("warn", "system", `[SECURITY] evento registrado: ${eventType}`);
+  } catch (_) { /* trilha é best-effort — nunca afeta a operação */ }
 }
 
 // v3.25.63 — Desligamento PROGRAMADO não é acionamento LOCAL. Cache das regras
@@ -3046,6 +3079,8 @@ function readCredentialsEnc() {
   } catch (e) {
     // Existe mas não decifra → provavelmente copiado de outra máquina (DPAPI machine-bound).
     console.error("[CREDS] credentials.enc não decifrou (DPAPI):", e.message);
+    // Trilha de segurança (enforcement OFF — só registra; a leitura cai no fallback).
+    void logSecurityEvent("dpapi_failed", { file: "credentials.enc", error: String(e && e.message || e) });
     return { __dpapiFailed: true };
   }
 }
@@ -3101,6 +3136,9 @@ async function refreshAgentToken(cfg, opts = {}) {
   try {
     const force = !!opts.force;
     const now = Date.now();
+    // FASE 2 gate: só rotaciona token quando a fazenda está em security_phase >= 2
+    // (Sykue). Nas demais, comporta-se como antes (não chama agent-auth).
+    if (farmSecurityPhase < SECURITY_PHASE2_MIN) return agentToken;
     // Já temos token válido e longe de expirar? Não faz nada (rate-limit implícito).
     if (!force && agentToken && agentTokenExpiresAt - now > AGENT_TOKEN_REFRESH_SKEW_MS) return agentToken;
     if (!force && now - lastTokenRefreshAt < 20_000) return agentToken; // no máx a cada 20s
@@ -3126,6 +3164,15 @@ async function refreshAgentToken(cfg, opts = {}) {
       // 403 = licença/clone; demais = rede. Ambos NÃO-FATAIS aqui (FASE 2 off).
       const reason = (result && result.reason) || `http_${resp.status}`;
       try { pushLog("warn", "system", `[AGENT-AUTH] sem token novo (${reason}) — segue com anon`); } catch (_) {}
+      // Trilha de segurança (enforcement OFF — só registra). O anti-clone da edge
+      // devolve reason = fingerprint_mismatch | clone_detected.
+      if (reason === "fingerprint_mismatch" || reason === "clone_detected") {
+        void logSecurityEvent(reason, { source: "agent-auth", divergence: result?.divergence ?? null });
+      }
+      // Token expirado E não renovou → registra token_expired (uma vez por janela).
+      if (agentToken && agentTokenExpiresAt > 0 && now >= agentTokenExpiresAt) {
+        void logSecurityEvent("token_expired", { reason, expired_for_ms: now - agentTokenExpiresAt });
+      }
       if (SECURITY_PHASE2_ENFORCEMENT && resp.status === 403) {
         // Em enforcement, um 403 explícito de licença é a ÚNICA condição de parada.
         try { pushLog("error", "system", `[AGENT-AUTH] 403 em enforcement: ${reason}`); } catch (_) {}
@@ -3133,7 +3180,7 @@ async function refreshAgentToken(cfg, opts = {}) {
       return agentToken;
     }
     agentToken = result.token;
-    agentTokenExpiresAt = now + (Number(result.expires_in || 300) * 1000);
+    agentTokenExpiresAt = now + (Number(result.expires_in || 600) * 1000);
     return agentToken;
   } catch (e) {
     try { pushLog("warn", "system", `[AGENT-AUTH] refresh falhou: ${e.message} — segue com anon`); } catch (_) {}

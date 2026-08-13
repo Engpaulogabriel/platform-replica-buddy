@@ -4,7 +4,7 @@
 // fingerprint do hardware + o token atual (se houver). O servidor:
 //   1. localiza o device_licenses ativo por machine_id_hash
 //   2. (se veio current_token) valida assinatura+exp+jti e confere o fingerprint
-//   3. emite um NOVO JWT HS256 com TTL de 5 min (jti novo = rotação)
+//   3. emite um NOVO JWT HS256 com TTL de 10 min (jti novo = rotação; agente renova ~5 min antes)
 //   4. grava current_token_jti/expires_at/last_seen no device_licenses
 //
 // Anti-clone: hardware divergente tentando usar o token de um device →
@@ -21,7 +21,7 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
-const TTL_SECONDS = 300; // 5 min
+const TTL_SECONDS = 600; // 10 min (agente renova ~5 min antes → refresh a cada ~5 min)
 
 function fingerprintDivergence(stored: any, incoming: any): number {
   // conta quantos componentes fortes divergem (cpu, disk_serial, uuid)
@@ -33,6 +33,64 @@ function fingerprintDivergence(stored: any, incoming: any): number {
     if (a && b && a !== b) n++;
   }
   return n;
+}
+
+// Trilha de segurança (append-only). Best-effort — nunca quebra a resposta.
+async function logSecurityEvent(supabase: any, farmId: string | null, eventType: string, details: any) {
+  try {
+    await supabase.from("agent_security_events").insert({
+      farm_id: farmId, event_type: eventType, details: details ?? {},
+    });
+  } catch (_) { /* trilha é best-effort */ }
+}
+
+// Alerta WhatsApp para os admins da fazenda quando um CLONE é detectado.
+// Best-effort: sem whatsapp_config/destinatário, só ignora.
+async function sendCloneAlert(supabase: any, farmId: string | null, info: any) {
+  try {
+    const { data: cfg } = await supabase.from("whatsapp_config")
+      .select("api_token, phone_number_id")
+      .not("api_token", "is", null).not("phone_number_id", "is", null)
+      .order("updated_at", { ascending: false }).limit(1).maybeSingle();
+    if (!cfg?.api_token || !cfg?.phone_number_id) return;
+
+    let farmName = "Fazenda";
+    if (farmId) {
+      const { data: f } = await supabase.from("farms").select("name").eq("id", farmId).maybeSingle();
+      farmName = f?.name ?? farmName;
+    }
+    // Destinatários: operadores admin/super_admin da fazenda (por farm_id OU
+    // default_farm_id). Colunas reais: is_active, role, receive_alerts.
+    const { data: ops } = await supabase.from("whatsapp_operators")
+      .select("phone, role, farm_id, default_farm_id, receive_alerts")
+      .eq("is_active", true);
+    const recipients = ((ops ?? []) as any[])
+      .filter((o) => o.phone && o.receive_alerts !== false
+        && ["admin", "super_admin"].includes(String(o.role ?? "").toLowerCase())
+        && (o.farm_id === farmId || o.default_farm_id === farmId))
+      .map((o) => String(o.phone).replace(/\D/g, ""));
+    if (recipients.length === 0) return;
+
+    const params = [
+      "🚨 POSSÍVEL CLONE DO AGENTE",
+      farmName,
+      "Token/licença usados em hardware diferente (fingerprint divergente).",
+      "Verifique o PC do agente. Enforcement OFF — segue operando.",
+    ].map((s) => String(s).replace(/[\r\n\t]+/g, " ").slice(0, 1000));
+
+    for (const to of recipients) {
+      await fetch(`https://graph.facebook.com/v20.0/${cfg.phone_number_id}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${cfg.api_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messaging_product: "whatsapp", to, type: "template",
+          template: { name: "alerta_equipamento", language: { code: "pt_BR" },
+            components: [{ type: "body", parameters: params.map((p) => ({ type: "text", text: p })) }] },
+        }),
+      }).catch(() => {});
+    }
+    void info;
+  } catch (_) { /* alerta é best-effort */ }
 }
 
 Deno.serve(async (req) => {
@@ -74,7 +132,22 @@ Deno.serve(async (req) => {
         .update({ last_fingerprint_check: new Date().toISOString() })
         .eq("id", dev.id);
     });
-    return json({ ok: false, reason: "fingerprint_mismatch", divergence: diverge }, 403);
+    // CLONE = apresentou um token ATIVO válido (jti bate) mas de outro hardware
+    // (token copiado p/ outro PC). Só divergência de HW sem token válido =
+    // fingerprint_mismatch (troca de peça / re-imagem). Ambos 403 (não-fatal no agente).
+    let isClone = false;
+    if (currentToken) {
+      try {
+        const { payload } = await jwtVerify(currentToken, secret);
+        if (payload?.jti && payload.jti === dev.current_token_jti) isClone = true;
+      } catch { /* token inválido/expirado → não é replay */ }
+    }
+    const reason = isClone ? "clone_detected" : "fingerprint_mismatch";
+    await logSecurityEvent(supabase, dev.farm_id, reason, {
+      divergence: diverge, ip, agent_version: agentVersion, device_id: dev.id,
+    });
+    if (isClone) await sendCloneAlert(supabase, dev.farm_id, { device_id: dev.id, ip });
+    return json({ ok: false, reason, divergence: diverge }, 403);
   }
 
   // 3) valida token atual (best-effort — não é obrigatório p/ re-emitir; só telemetria)
