@@ -10,6 +10,8 @@ import { LineChart, Line, ReferenceLine, XAxis, YAxis, CartesianGrid, Tooltip, R
 import { Zap, Download, FileSpreadsheet, AlertTriangle, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { notifyReport } from "@/lib/notify";
+import { guardExport, watermarkPdf, currentUserTag } from "@/lib/securityClient";
+import { toast } from "sonner";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -236,7 +238,9 @@ export default function DemandReportTab({ farmId, fromDate, toDate }: Props) {
     );
   }
 
-  function exportCsv() {
+  async function exportCsv() {
+    const g = await guardExport("csv", `relatorio-demanda-${fromDate}_${toDate}.csv`);
+    if (!g.allowed) { toast.error(`Limite de CSVs por dia atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
     const head = ["Data", "Demanda Pico (kW)", "Bombas no Pico", "% da Contratada", "Status"];
     const lines = dailyPeaks.map((d) => {
       const pct = contractedKw > 0 ? `${((d.peakKw / contractedKw) * 100).toFixed(1)}%` : "—";
@@ -251,7 +255,9 @@ export default function DemandReportTab({ farmId, fromDate, toDate }: Props) {
     notifyReport.exported("CSV", "Demanda");
   }
 
-  function exportPdf() {
+  async function exportPdf() {
+    const g = await guardExport("pdf", `relatorio-demanda-${fromDate}_${toDate}.pdf`);
+    if (!g.allowed) { toast.error(`Limite de PDFs por hora atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
     const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
     const w = doc.internal.pageSize.getWidth();
     doc.setFillColor(66, 147, 80);
@@ -280,6 +286,7 @@ export default function DemandReportTab({ farmId, fromDate, toDate }: Props) {
       headStyles: { fillColor: [66, 147, 80], textColor: 255 },
       alternateRowStyles: { fillColor: [245, 245, 245] },
     });
+    watermarkPdf(doc, currentUserTag());
     doc.save(`relatorio-demanda-${fromDate}_${toDate}.pdf`);
     notifyReport.exported("PDF", "Demanda");
   }

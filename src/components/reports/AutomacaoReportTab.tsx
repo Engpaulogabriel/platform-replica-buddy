@@ -7,6 +7,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAutomationLog, loadAutomationLogRange, type AutomationLogEntry } from "@/lib/automationLog";
 import { exportAutomacaoCSV, exportAutomacaoPDF } from "@/lib/reportExport";
 import { notifyReport } from "@/lib/notify";
+import { guardExport } from "@/lib/securityClient";
+import { toast } from "sonner";
 
 interface AutomacaoReportTabProps {
   farmId: string | null;
@@ -204,14 +206,18 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
               </p>
             </div>
             <div className="flex gap-2 shrink-0">
-              <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={() => {
+              <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={async () => {
+                const g = await guardExport("csv", "relatorio-automacao.csv");
+                if (!g.allowed) { toast.error(`Limite de CSVs por dia atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
                 const mapped = filteredLog.map(r => ({ ...r, origin: getOriginLabel(r.origin), user: getUserLabel(r.user) }));
                 exportAutomacaoCSV(mapped);
                 notifyReport.exported("CSV", "Automação");
               }}>
                 <Download className="w-3.5 h-3.5" /> CSV
               </Button>
-              <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={() => {
+              <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={async () => {
+                const g = await guardExport("pdf", "relatorio-automacao.pdf");
+                if (!g.allowed) { toast.error(`Limite de PDFs por hora atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
                 const mapped = filteredLog.map(r => ({ ...r, origin: getOriginLabel(r.origin), user: getUserLabel(r.user), result: r.result ?? "success" }));
                 exportAutomacaoPDF(mapped, farmHeader);
                 notifyReport.exported("PDF", "Automação");

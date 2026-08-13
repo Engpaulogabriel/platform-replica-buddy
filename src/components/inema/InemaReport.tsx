@@ -8,6 +8,8 @@
 // Fonte: water_permits/_wells/_conditions (outorgas) + equipments + horímetro.
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { guardExport, watermarkPdf, currentUserTag } from "@/lib/securityClient";
+import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -159,6 +161,9 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
   // PDF oficial — DADOS DA OUTORGA vindos de water_permits (não da inema_permits/config).
   const exportPDF = async () => {
     try {
+      // Limite de exportação (anti-scraping) — role-aware; admin 3x.
+      const g = await guardExport("pdf", "relatorio-inema.pdf");
+      if (!g.allowed) { toast.error(`Limite de PDFs por hora atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
       // Rebusca FRESCA no clique — o PDF nunca depende do estado do componente
       // (evita "—" por timing / estado não carregado). Fallback: usa o state.
       let src: Permit[] = permits;
@@ -269,6 +274,7 @@ export function InemaReport({ farmId }: { farmId: string | null }) {
       doc.setFontSize(8); doc.setTextColor(120);
       doc.text("Volume captado estimado por horas × vazão nominal (medição indireta). Nível estático/dinâmico não medido pela telemetria.", 30, h - 30);
       doc.text(`Gerado em ${new Date().toLocaleString("pt-BR")} — Gestor de Bombas Renov.`, 30, h - 18);
+      watermarkPdf(doc, currentUserTag());
       doc.save(`renov-${agency.agency_acronym.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.pdf`);
       notify.ok("Relatório", "PDF exportado.");
     } catch (_) {

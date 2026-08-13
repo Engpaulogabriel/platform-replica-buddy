@@ -1,6 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import renovLogo from "@/assets/renov-logo.png";
+import { watermarkPdf, currentUserTag } from "@/lib/securityClient";
 
 export interface FarmHeaderInfo {
   name: string;
@@ -288,6 +289,7 @@ export async function exportAutomacaoPDF(data: AutomacaoExportRow[], farm: FarmH
   }));
 
   applyFooterToAllPages(doc);
+  watermarkPdf(doc, currentUserTag());
   doc.save("relatorio-automacao.pdf");
 }
 
@@ -358,6 +360,7 @@ export async function exportHorimetroPDF(data: HorimetroPumpReport[], farm: Farm
   }
 
   applyFooterToAllPages(doc);
+  watermarkPdf(doc, currentUserTag());
   doc.save("relatorio-horimetro.pdf");
 }
 
@@ -396,6 +399,7 @@ export async function exportDemandaPDF(
   }));
 
   applyFooterToAllPages(doc);
+  watermarkPdf(doc, currentUserTag());
   doc.save("relatorio-demanda-energia.pdf");
 }
 

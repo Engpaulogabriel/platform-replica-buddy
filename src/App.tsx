@@ -1,8 +1,9 @@
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { AuthProvider } from "@/contexts/AuthContext";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { AuthProvider, useAuth } from "@/contexts/AuthContext";
+import { logActivity, setUserTag } from "@/lib/securityClient";
 import { MasterManagerProvider } from "@/contexts/MasterManagerContext";
 import { LanguageProvider } from "@/contexts/LanguageContext";
 import { ThemeProvider } from "@/contexts/ThemeContext";
@@ -17,7 +18,17 @@ import { AppLayout } from "@/components/AppLayout";
 import { MasterPasswordGate } from "@/components/MasterPasswordGate";
 import { IrrigacaoGuard } from "@/components/IrrigacaoGuard";
 import AlterarSenha from "./pages/AlterarSenha";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect } from "react";
+
+// Auditoria de navegação + tag do usuário p/ watermark. Roda dentro do
+// BrowserRouter + AuthProvider. Best-effort (fail-open no securityClient).
+function ActivityTracker() {
+  const location = useLocation();
+  const { user } = useAuth();
+  useEffect(() => { setUserTag(user?.email ?? user?.id ?? null); }, [user]);
+  useEffect(() => { logActivity(location.pathname); }, [location.pathname]);
+  return null;
+}
 import { lazyWithRetry } from "@/lib/lazyWithRetry";
 import { Loader2 } from "lucide-react";
 
@@ -104,6 +115,7 @@ const App = () => {
                   <MasterManagerProvider>
                   <UserOnlineProvider>
                   <NoInternetBanner />
+                  <ActivityTracker />
                   <NotificationProvider>
                     <Routes>
                       <Route path="/login" element={<Login />} />

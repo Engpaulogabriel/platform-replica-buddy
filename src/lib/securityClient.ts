@@ -10,6 +10,12 @@
 //     avise o usuário e não gere. Depois de gerar o PDF, aplique watermarkPdf(doc, email).
 import { supabase } from "@/integrations/supabase/client";
 
+// Tag do usuário logado (email/id) para o watermark. Setada pelo App em auth change,
+// para os exporters (inclusive libs) lerem de forma síncrona.
+let _userTag = "?";
+export function setUserTag(tag: string | null | undefined): void { _userTag = (tag && String(tag)) || "?"; }
+export function currentUserTag(): string { return _userTag; }
+
 function getSessionId(): string {
   try {
     let sid = sessionStorage.getItem("renov_sid");

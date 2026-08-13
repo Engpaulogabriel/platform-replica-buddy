@@ -7,6 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { WifiOff, Wifi, Radio, Download, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { guardExport } from "@/lib/securityClient";
+import { toast } from "sonner";
 
 type Cycle = {
   id: string;
@@ -252,7 +254,9 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
     return { total, recovered: recovered.length, ongoing, totalDownSec, avg, systemOutages, inconsistent };
   }, [filtered]);
 
-  const exportCSV = () => {
+  const exportCSV = async () => {
+    const g = await guardExport("csv", `historico-comunicacao_${fromDate}_a_${toDate}.csv`);
+    if (!g.allowed) { toast.error(`Limite de CSVs por dia atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
     const header = ["Data", "Hora Offline", "Hora Online", "Equipamento", "Tipo", "TSNN", "Duração", "Tentativas"];
     const lines = [header.join(";")];
     for (const c of filtered) {
