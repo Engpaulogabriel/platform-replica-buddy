@@ -81,3 +81,13 @@ verify_jwt = false
 
 
 
+
+# api-rate-limiter: guarda por request (client). verify_jwt=false — a identidade
+# vem do claim sub do JWT e a whitelist trata service_role/agente; precisa poder
+# devolver 403 (UA de IA) e 429 sem o gateway barrar antes.
+[functions.api-rate-limiter]
+verify_jwt = false
+
+# security-anomaly-watchdog: chamada pelo pg_cron (apikey anon). verify_jwt=false.
+[functions.security-anomaly-watchdog]
+verify_jwt = false

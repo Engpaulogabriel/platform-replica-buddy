@@ -3,6 +3,7 @@
 # IMPORTANTE: só tem efeito se o HOST (Lovable/Cloudflare) honrar o arquivo _headers.
 # Verifique após deploy no DevTools → Network → resposta do documento.
 /*
+  X-Robots-Tag: noindex, nofollow, noarchive, nosnippet
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: strict-origin-when-cross-origin
