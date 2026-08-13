@@ -12,8 +12,10 @@
 -- que, se a decifragem falhar, o loader cai no main.cjs obfuscado (não brica).
 --
 -- ⚠️ storage_path é RELATIVO ao bucket agent-releases — NÃO prefixe "agent-releases/"
---    (foi o bug de "Object not found" da 3.25.64). Suba o app.asar em
---    agent-releases/3.25.66/app.asar (key = 3.25.66/app.asar).
+--    (foi o bug de "Object not found" da 3.25.64). Suba DOIS arquivos no bucket:
+--      • agent-releases/3.25.66/app.asar   (loader como entry; hash vai no agent_releases)
+--      • agent-releases/3.25.66/main.enc   (código cifrado; o loader baixa por OTA via
+--        agent-asar-key → decifra em memória → cacheia selado local. NÃO vai em resources/.)
 -- ============================================================================
 
 -- 1) RELEASE (storage-based; is_latest=false — não mexe no que a frota recebe)

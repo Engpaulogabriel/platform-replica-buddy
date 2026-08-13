@@ -82,5 +82,19 @@ Deno.serve(async (req) => {
     .update({ last_seen_at: new Date().toISOString(), last_fingerprint_check: new Date().toISOString() })
     .eq("id", dev.id);
 
-  return json({ ok: true, aes_key: keyRow.aes_key, algo: keyRow.algo ?? "aes-256-gcm", version });
+  // 5) OTA do main.enc: signed URL do artefato cifrado em Storage
+  //    (agent-releases/<version>/main.enc). O loader baixa isto no 1º boot da
+  //    versão, decifra com aes_key e guarda o CÓDIGO em cache local selado. Se o
+  //    objeto não existir (build antigo empacotou main.enc em resources/), enc_url
+  //    vem null e o loader cai no resources/ como fonte. createSignedUrl NÃO valida
+  //    existência — download 404 → loader trata como ausente.
+  let enc_url: string | null = null;
+  try {
+    const { data: signed } = await supabase.storage
+      .from("agent-releases")
+      .createSignedUrl(`${version}/main.enc`, 86400);
+    enc_url = signed?.signedUrl ?? null;
+  } catch { enc_url = null; }
+
+  return json({ ok: true, aes_key: keyRow.aes_key, algo: keyRow.algo ?? "aes-256-gcm", version, enc_url });
 });

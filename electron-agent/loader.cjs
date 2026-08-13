@@ -1,23 +1,28 @@
-// loader.cjs — Bootstrap da FASE 3 (asar/main cifrado AES-256-GCM).
+// loader.cjs — Bootstrap da FASE 3 (D-corrigido): código cifrado, OTA + cache local.
 // ═══════════════════════════════════════════════════════════════════════════
-// ⚠️  NÃO é o entry-point da frota. package.json.main continua = main.cjs. Este
-//     loader só é usado num BUILD PILOTO (com package.json.main=loader.cjs e
-//     main.enc empacotado em resources). Mantém main.cjs puro como FALLBACK.
+// ⚠️  NÃO é o entry-point da frota. package.json.main só vira loader.cjs no BUILD
+//     PILOTO (RENOV_ENCRYPT_ASAR=1). Mantém main.cjs OFUSCADO no asar como FALLBACK.
 //
-// O que faz (mínimo, roda ANTES do app.whenReady):
-//   1. calcula o fingerprint do hardware (idêntico ao getMachineFingerprint do main)
-//   2. obtém a chave AES da versão:
-//        a) do cache local embrulhado por KEK derivado do fingerprint (OFFLINE ok)
-//        b) senão, do endpoint agent-asar-key (valida fingerprint+token no servidor)
-//      e re-embrulha no cache (machine-bound: copiar a pasta p/ outro PC → KEK
-//      diferente → cache não abre; e o servidor rejeita fingerprint divergente)
-//   3. decifra main.enc EM MEMÓRIA e o executa (Module._compile)
-//   4. QUALQUER falha → fallback para require('./main.cjs') (asar puro), para
-//      NUNCA brickar: a resiliência (nunca morre por falta de nuvem) é preservada
-//      pelo cache offline + pelo fallback.
+// Fluxo (roda ANTES do app.whenReady → NÃO pode usar safeStorage do Electron):
+//   1. Tenta o CACHE LOCAL selado do código (%ProgramData%\Renov\main.enc.cache).
+//   2. Se abre (selo bate com este hardware/usuário) e a versão confere → executa
+//      o código EM MEMÓRIA (Module._compile). OFFLINE OK.
+//   3. Cache ausente/inválido/versão nova:
+//      a) COM internet → agent-asar-key valida device_license+fingerprint e devolve
+//         a chave AES + signed URL do main.enc (OTA); baixa e decifra em memória.
+//      b) Reсifra o CÓDIGO para este hardware e grava o cache local (nunca .js puro).
+//      c) Executa em memória.
+//   4. SEM internet e SEM cache → fallback require('./main.cjs') (ofuscado, no asar).
 //
-// Segurança: a chave nunca fica em disco em claro (cache é AES-GCM sob KEK do
-// fingerprint). O anon key/URL embutidos aqui são públicos (mesmos do main).
+// Selo do cache (machine/usuário-bound, disponível pré-app-ready), com verificação
+// de round-trip no write e degradação segura:
+//   [0x01] DPAPI (ProtectedData, CurrentUser) — "mesmo mecanismo" do credentials.enc,
+//          via PowerShell porque o safeStorage exige app.whenReady.
+//   [0x02] KEK = scrypt(fingerprint) + AES-256-GCM (puro Node) — fallback se o DPAPI
+//          não estiver disponível/consistente nesta máquina.
+// Copiar a pasta p/ outro PC/usuário → DPAPI/KEK não abre → cache miss → re-baixa
+// (se online) ou fallback. NUNCA grava código em texto claro em disco. NUNCA brica.
+// Compatível com a FASE 2 (fingerprint idêntico ao getMachineFingerprint do main).
 // ═══════════════════════════════════════════════════════════════════════════
 const fs = require("fs");
 const os = require("os");
@@ -30,6 +35,7 @@ const SUPABASE_ANON = process.env.RENOV_SUPABASE_ANON
   || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRueXVrZ2ZlZHJlZHZ4cHpqcHF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2ODU1OTQsImV4cCI6MjA5MjI2MTU5NH0.OSg44w0CRVvD-f6Ts_U9DVeQkQ-4c37passKEK5X0kk";
 const KEK_SALT = "renov-asar-kek-v1";
 const CACHE_DIR = path.join("C:\\ProgramData", "Renov");
+const CODE_CACHE = path.join(CACHE_DIR, "main.enc.cache"); // código selado (DPAPI/KEK)
 
 function log(msg) { try { console.log(`[LOADER] ${msg}`); } catch (_) {} }
 
@@ -52,10 +58,8 @@ function machineFingerprint() {
   return { hash, fingerprint: { cpu: cpuId, disk_serial: diskSerial, uuid, mac_addresses: macs, hostname: os.hostname(), os: process.platform, arch: process.arch } };
 }
 
-// KEK de 32 bytes derivado do fingerprint (machine-bound, disponível pré-app-ready).
-function deriveKek(machineIdHash) {
-  return crypto.scryptSync(machineIdHash, KEK_SALT, 32);
-}
+// ── Cripto base ────────────────────────────────────────────────────────────
+function deriveKek(machineIdHash) { return crypto.scryptSync(machineIdHash, KEK_SALT, 32); }
 function aesGcmSeal(key, plaintextBuf) {
   const iv = crypto.randomBytes(12);
   const c = crypto.createCipheriv("aes-256-gcm", key, iv);
@@ -71,24 +75,89 @@ function aesGcmOpen(key, sealed) {
   return Buffer.concat([d.update(ct), d.final()]);
 }
 
-function cacheFileFor(version) {
-  return path.join(CACHE_DIR, `asar-key-${String(version).replace(/[^0-9a-zA-Z.\-]/g, "_")}.wrap`);
+// ── DPAPI (ProtectedData / CurrentUser) via PowerShell (pré-app-ready) ───────
+// safeStorage exige app.whenReady; aqui usamos o MESMO DPAPI por baixo, direto.
+// Dados trafegam em base64 por stdin/stdout (memória/pipe) — nunca em disco.
+function runPs(script, inputB64) {
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  const out = execSync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`, {
+    input: inputB64, timeout: 8000, maxBuffer: 48 * 1024 * 1024, windowsHide: true,
+  });
+  return out.toString("ascii").trim();
 }
-function readCachedKey(version, kek) {
+const PS_PROTECT =
+  "$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::ASCII;Add-Type -AssemblyName System.Security;" +
+  "$i=[Console]::In.ReadToEnd();$b=[Convert]::FromBase64String($i.Trim());" +
+  "$p=[System.Security.Cryptography.ProtectedData]::Protect($b,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);" +
+  "[Console]::Out.Write([Convert]::ToBase64String($p))";
+const PS_UNPROTECT =
+  "$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::ASCII;Add-Type -AssemblyName System.Security;" +
+  "$i=[Console]::In.ReadToEnd();$b=[Convert]::FromBase64String($i.Trim());" +
+  "$p=[System.Security.Cryptography.ProtectedData]::Unprotect($b,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);" +
+  "[Console]::Out.Write([Convert]::ToBase64String($p))";
+
+function dpapiProtect(buf) {
   try {
-    const f = cacheFileFor(version);
-    if (!fs.existsSync(f)) return null;
-    return aesGcmOpen(kek, fs.readFileSync(f)); // 32 bytes
-  } catch (_) { return null; } // copiado de outro PC / corrompido → ignora
+    if (process.platform !== "win32") return null;
+    const o = runPs(PS_PROTECT, buf.toString("base64"));
+    return o ? Buffer.from(o, "base64") : null;
+  } catch (_) { return null; }
 }
-function writeCachedKey(version, kek, keyBuf) {
+function dpapiUnprotect(buf) {
   try {
-    fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(cacheFileFor(version), aesGcmSeal(kek, keyBuf));
-  } catch (_) {}
+    if (process.platform !== "win32") return null;
+    const o = runPs(PS_UNPROTECT, buf.toString("base64"));
+    return o ? Buffer.from(o, "base64") : null;
+  } catch (_) { return null; }
 }
 
-async function fetchKeyFromServer(version, fp) {
+// Sela um buffer para ESTE hardware/usuário. DPAPI primeiro (com verificação de
+// round-trip: garante que o que gravo consigo reabrir NESTA máquina), senão KEK.
+function localSeal(buf, fp) {
+  const prot = dpapiProtect(buf);
+  if (prot) {
+    const back = dpapiUnprotect(prot);
+    if (back && back.equals(buf)) return Buffer.concat([Buffer.from([1]), prot]);
+    log("DPAPI round-trip falhou — usando KEK do fingerprint");
+  }
+  return Buffer.concat([Buffer.from([2]), aesGcmSeal(deriveKek(fp.hash), buf)]);
+}
+function localOpen(sealed, fp) {
+  try {
+    if (!sealed || sealed.length < 2) return null;
+    const tag = sealed[0];
+    const rest = sealed.subarray(1);
+    if (tag === 1) return dpapiUnprotect(rest);       // copiado p/ outro user/PC → null
+    if (tag === 2) return aesGcmOpen(deriveKek(fp.hash), rest); // fingerprint diferente → throw → null
+    return null;
+  } catch (_) { return null; }
+}
+
+// ── Cache do CÓDIGO (selado; versão embutida no cabeçalho) ───────────────────
+function readCodeCache(version, fp) {
+  try {
+    if (!fs.existsSync(CODE_CACHE)) return null;
+    const opened = localOpen(fs.readFileSync(CODE_CACHE), fp);
+    if (!opened) return null; // selo não abre (outro PC/usuário) → miss
+    const s = opened.toString("utf8");
+    const nl = s.indexOf("\n");
+    if (nl < 0) return null;
+    if (s.slice(0, nl) !== version) { // OTA: versão nova → invalida o cache
+      try { fs.unlinkSync(CODE_CACHE); } catch (_) {}
+      return null;
+    }
+    return s.slice(nl + 1);
+  } catch (_) { return null; }
+}
+function writeCodeCache(version, fp, code) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(CODE_CACHE, localSeal(Buffer.from(`${version}\n${code}`, "utf8"), fp));
+  } catch (_) { /* cache é best-effort */ }
+}
+
+// ── Servidor: chave AES + signed URL do main.enc (OTA) ───────────────────────
+async function fetchKeyAndUrl(version, fp) {
   try {
     const resp = await fetch(`${SUPABASE_URL}/functions/v1/agent-asar-key`, {
       method: "POST",
@@ -97,19 +166,18 @@ async function fetchKeyFromServer(version, fp) {
     });
     const j = await resp.json().catch(() => ({}));
     if (!resp.ok || !j || j.ok !== true || !j.aes_key) { log(`servidor não entregou chave (${(j && j.reason) || resp.status})`); return null; }
-    return Buffer.from(j.aes_key, "base64");
-  } catch (e) { log(`fetch chave falhou: ${e.message}`); return null; }
+    return { key: Buffer.from(j.aes_key, "base64"), encUrl: j.enc_url || null };
+  } catch (e) { log(`fetch chave/url falhou: ${e.message}`); return null; }
+}
+async function downloadBytes(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) { log(`download main.enc HTTP ${r.status}`); return null; }
+    return Buffer.from(await r.arrayBuffer());
+  } catch (e) { log(`download main.enc falhou: ${e.message}`); return null; }
 }
 
-async function getAesKey(version, fp) {
-  const kek = deriveKek(fp.hash);
-  const cached = readCachedKey(version, kek);
-  if (cached && cached.length === 32) { log("chave AES via cache (offline ok)"); return cached; }
-  const fromServer = await fetchKeyFromServer(version, fp);
-  if (fromServer && fromServer.length === 32) { writeCachedKey(version, kek, fromServer); log("chave AES via servidor + cache atualizado"); return fromServer; }
-  return null;
-}
-
+// ── Execução em memória / fallback ───────────────────────────────────────────
 function runDecryptedMain(plaintextSource) {
   const Module = require("module");
   const asarDir = path.join(process.resourcesPath || __dirname, "app.asar");
@@ -119,32 +187,44 @@ function runDecryptedMain(plaintextSource) {
   m.paths = Module._nodeModulePaths(path.dirname(filename));
   m._compile(plaintextSource, filename);
 }
-
 function fallbackPlaintext(reason) {
-  log(`fallback → main.cjs puro (${reason})`);
+  log(`fallback → main.cjs ofuscado (${reason})`);
   try { require("./main.cjs"); }
   catch (e) { log(`FATAL: fallback main.cjs falhou: ${e && e.message || e}`); }
 }
 
 (async () => {
   try {
-    const encPath = path.join(process.resourcesPath || __dirname, "main.enc");
-    if (!fs.existsSync(encPath)) return fallbackPlaintext("main.enc ausente");
-
     let version = "0.0.0";
     try { version = require("./package.json").version || version; } catch (_) {}
-
     const fp = machineFingerprint();
-    const key = await getAesKey(version, fp);
-    if (!key) return fallbackPlaintext("sem chave (servidor+cache)");
 
-    const sealed = fs.readFileSync(encPath); // [12 iv][ct][16 tag]
-    let source;
-    try { source = aesGcmOpen(key, sealed).toString("utf8"); }
+    // 1-2) CACHE LOCAL (offline ok)
+    const cached = readCodeCache(version, fp);
+    if (cached) { log("código via cache local selado (offline ok)"); return runDecryptedMain(cached); }
+
+    // 3a) ONLINE: chave + main.enc (OTA); fallback de fonte = resources/ (build antigo)
+    const srv = await fetchKeyAndUrl(version, fp);
+    let key = srv && srv.key ? srv.key : null;
+    let encBytes = null;
+    if (srv && srv.encUrl) encBytes = await downloadBytes(srv.encUrl);
+    if (!encBytes) {
+      const bundled = path.join(process.resourcesPath || __dirname, "main.enc");
+      if (fs.existsSync(bundled)) { encBytes = fs.readFileSync(bundled); log("main.enc via resources/ (bundled)"); }
+    }
+    if (!key || !encBytes) return fallbackPlaintext("sem chave/main.enc e sem cache (offline)");
+
+    // 3b) decifra em memória
+    let code;
+    try { code = aesGcmOpen(key, encBytes).toString("utf8"); }
     catch (e) { return fallbackPlaintext(`decrypt main.enc falhou: ${e.message}`); }
 
-    log("main.enc decifrado — executando lógica de negócio");
-    runDecryptedMain(source);
+    // 3b') re-sela o CÓDIGO para este hardware e grava o cache (nunca .js puro)
+    writeCodeCache(version, fp, code);
+
+    // 3c) executa em memória
+    log("main.enc decifrado (OTA) — executando; cache local selado atualizado");
+    runDecryptedMain(code);
   } catch (e) {
     fallbackPlaintext(`erro inesperado: ${e && e.message || e}`);
   }
