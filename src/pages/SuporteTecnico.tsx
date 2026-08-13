@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { ClipboardList, KeyRound, Stethoscope, Building2, Navigation, Timer, Settings, Users, TrendingUp, ShieldCheck, Cpu, Cable, Radio, Wrench } from "lucide-react";
+import { ClipboardList, KeyRound, Stethoscope, Building2, Navigation, Timer, Settings, Users, TrendingUp, ShieldCheck, Cpu, Cable, Radio, Wrench, ShieldAlert } from "lucide-react";
 import RestrictedAuth from "@/components/RestrictedAuth";
 import { Cadastros } from "./Cadastros";
 import { CadastroLoginInner } from "./CadastroLogin";
@@ -17,6 +17,8 @@ import HardwareSecurityPanel from "@/components/HardwareSecurityPanel";
 import BridgeConsole from "./BridgeConsole";
 import CommunicationReport from "@/components/CommunicationReport";
 import MaintenanceTab from "@/components/tecnico/MaintenanceTab";
+import SecurityEventsPanel from "@/components/tecnico/SecurityEventsPanel";
+import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -47,6 +49,13 @@ const SuporteTecnico = () => {
   const { startRestrictedTour } = useGuidedTour();
   const farmId = useDefaultFarmId();
   const pendingAccessCount = useFarmAccessPendingCount();
+  const { role } = useFarmAccess();
+  // Aba Segurança (eventos do agente) só para platform_admin e owner.
+  const canViewSecurity = role === "platform_admin" || role === "owner";
+  const shownTabs = useMemo(
+    () => (canViewSecurity ? [...tabs, { value: "seguranca", label: "Segurança", icon: ShieldAlert }] : tabs),
+    [canViewSecurity],
+  );
 
   const defaults = useMemo(() => {
     const today = new Date();
@@ -73,7 +82,7 @@ const SuporteTecnico = () => {
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <TabsList data-tour="suporte-tabs" className="bg-secondary border border-border flex-wrap h-auto">
-            {tabs.map((tab) => (
+            {shownTabs.map((tab) => (
               <TabsTrigger
                 key={tab.value}
                 value={tab.value}
@@ -92,6 +101,9 @@ const SuporteTecnico = () => {
           <TabsContent value="login" className="mt-4"><CadastroLoginInner /></TabsContent>
           <TabsContent value="diagnostico" className="mt-4"><Diagnostico /></TabsContent>
           <TabsContent value="manutencao" className="mt-4"><MaintenanceTab /></TabsContent>
+          {canViewSecurity && (
+            <TabsContent value="seguranca" className="mt-4"><SecurityEventsPanel /></TabsContent>
+          )}
           <TabsContent value="fazenda" className="mt-4"><FazendaContent /></TabsContent>
           <TabsContent value="temporizadores" className="mt-4"><TimersConfig /></TabsContent>
           <TabsContent value="sistema" className="mt-4"><SistemaSettings /></TabsContent>
