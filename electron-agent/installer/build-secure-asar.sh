@@ -106,6 +106,10 @@ restore() {
   [ -f "$EXE_STASH" ] && mv "$EXE_STASH" "$EXE_APP"
   # FASE 3: remove o ofuscado temporario se o build abortou antes de cifrar
   [ -f "${OBF_TMP:-}" ] && [ "${RENOV_ENCRYPT_ASAR:-0}" != "1" ] && rm -f "$OBF_TMP"
+  # FASE 3 piloto: reverte o entry-point no FONTE (o asar ja foi empacotado com
+  # loader.cjs dentro). O fonte volta a main=main.cjs e sem loader.cjs em app/.
+  rm -f "$APP_DIR/loader.cjs"
+  node -e "try{const fs=require('fs');const p='$APP_DIR/package.json';const d=JSON.parse(fs.readFileSync(p,'utf8'));if(d.main!=='main.cjs'){d.main='main.cjs';fs.writeFileSync(p,JSON.stringify(d,null,2)+'\n');}}catch(_){}" 2>/dev/null || true
   return 0
 }
 trap restore EXIT
@@ -136,6 +140,21 @@ echo "[build-secure] node --check OK (ofuscado)"
 OBF_TMP="$AGENT_DIR/.main.obf.tmp"
 if [ "${RENOV_ENCRYPT_ASAR:-0}" = "1" ]; then
   cp "$MAIN_APP" "$OBF_TMP"
+fi
+
+# --- 4c) FASE 3 build PILOTO: entry-point do asar vira loader.cjs ----------
+# Automatiza o corte que antes era manual. Com RENOV_ENCRYPT_ASAR=1 o asar passa a
+# ter loader.cjs como main (decifra main.enc no boot); main.cjs OFUSCADO fica no
+# asar como FALLBACK (loader cai em require('./main.cjs') se a decifragem falhar →
+# nunca brica; ver enforcement OFF). Sem a env, o build e NORMAL (main=main.cjs).
+# O fonte e revertido pelo trap restore() apos o pack.
+if [ "${RENOV_ENCRYPT_ASAR:-0}" = "1" ]; then
+  if [ ! -f "$AGENT_DIR/loader.cjs" ]; then
+    echo "[build-secure] ERRO FASE 3: $AGENT_DIR/loader.cjs ausente"; exit 6
+  fi
+  cp "$AGENT_DIR/loader.cjs" "$APP_DIR/loader.cjs"
+  node -e "const fs=require('fs');const p='$APP_DIR/package.json';const d=JSON.parse(fs.readFileSync(p,'utf8'));d.main='loader.cjs';fs.writeFileSync(p,JSON.stringify(d,null,2)+'\n');"
+  echo "[build-secure] FASE 3: entry-point do asar = loader.cjs (main.cjs obfuscado = fallback)"
 fi
 
 # --- 5) .py e .exe NUNCA entram no asar (movidos, nao deletados) ----------
@@ -233,8 +252,11 @@ if [ "${RENOV_ENCRYPT_ASAR:-0}" = "1" ]; then
   echo " REGISTRE a chave acima em agent_release_keys (version='$SRC_VER'):"
   echo "   INSERT INTO agent_release_keys(version,aes_key) VALUES('$SRC_VER','<chave>')"
   echo "   ON CONFLICT (version) DO UPDATE SET aes_key=EXCLUDED.aes_key;"
-  echo " No build PILOTO: package.json main=loader.cjs; empacote main.enc +"
-  echo " package.json (texto puro, nao-secreto) em resources; NAO inclua main.cjs"
-  echo " puro se quiser 'sem plaintext em disco'. NUNCA suba a chave junto do artefato."
+  echo " ENTRY-POINT ja cortado AUTOMATICAMENTE: o app.asar acima ja tem"
+  echo " loader.cjs como main (main.cjs obfuscado fica como fallback)."
+  echo " FALTA (manual): 1) empacotar main.enc em resources/ (ao lado do app.asar;"
+  echo " o loader le de process.resourcesPath); 2) registrar a chave em"
+  echo " agent_release_keys; 3) registrar o sha256 do app.asar em agent_releases."
+  echo " NUNCA suba a chave AES junto do artefato."
   echo "==========================================================="
 fi
