@@ -24,10 +24,21 @@ function getSessionId(): string {
   } catch { return "no-session"; }
 }
 
+// device_id PERSISTENTE (localStorage) — chave do rate limit POR DISPOSITIVO.
+// Distingue cada celular/PC mesmo usando a MESMA conta e atrás do mesmo IP (NAT
+// da fazenda). Sobrevive a reload; some se limparem o storage (gera outro).
+function getDeviceId(): string {
+  try {
+    let did = localStorage.getItem("renov_device_id");
+    if (!did) { did = crypto.randomUUID(); localStorage.setItem("renov_device_id", did); }
+    return did;
+  } catch { return "no-device"; }
+}
+
 async function call(body: Record<string, unknown>): Promise<any> {
   try {
     const { data } = await supabase.functions.invoke("api-rate-limiter", {
-      body: { ...body, session_id: getSessionId() },
+      body: { ...body, session_id: getSessionId(), device_id: getDeviceId() },
     });
     return data ?? { ok: true };
   } catch {

@@ -62,8 +62,10 @@ doc.save(fileName);
 
 ## 5) Verificação
 - `SELECT * FROM user_activity_log ORDER BY created_at DESC LIMIT 20;` (após navegar).
-- Rate: dispare >300 chamadas/min de `action:'rate'` → 429 + linha `flag='rate_limited'`.
-- Export: gere 11 PDFs em 1h (não-admin) → o 11º volta `allowed:false`.
+- Rate (POR DEVICE): >300 chamadas/min de `action:'rate'` do MESMO device_id → 429.
+  Outro device na mesma conta segue livre (limite independente).
+- Export (por CONTA): 31 PDFs em 1h (não-admin) → o 31º volta `allowed:false`.
+  platform_admin: nunca bloqueia.
 - Anomalia: navegue >50 paths em 5 min → WhatsApp ao super_admin (dedup 1h).
 - UA de IA: `curl -H 'User-Agent: GPTBot' .../functions/v1/api-rate-limiter` → 403 vazio.
 

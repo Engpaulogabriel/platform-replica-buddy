@@ -1,8 +1,9 @@
 // security-anomaly-watchdog — varredura periódica (pg_cron a cada 5 min).
 // ───────────────────────────────────────────────────────────────────────────
-// Regras (alerta WhatsApp aos super_admins, com dedup de 1h por usuário/regra):
-//   • > 50 páginas DISTINTAS em 5 min  → 'burst_navigation'
-//   • > 5 PDFs em 10 min                → 'export_burst'
+// Regras (alerta WhatsApp aos super_admins, com dedup de 1h por usuário/regra).
+// Limiares elevados 3x p/ login COMPARTILHADO (vários operadores, 1 conta):
+//   • > 150 páginas DISTINTAS em 5 min → 'burst_navigation'
+//   • > 15 PDFs em 10 min               → 'export_burst'
 // (rate_limited 3x já é alertado inline no api-rate-limiter.)
 // Fail-safe: qualquer erro só loga; nunca afeta a plataforma.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -44,7 +45,7 @@ Deno.serve(async (req) => {
       pathsByUser.get(a.user_id)!.add(a.path);
     }
     for (const [userId, set] of pathsByUser) {
-      if (set.size > 50 && !(await alertedRecently(userId, "burst_navigation"))) {
+      if (set.size > 150 && !(await alertedRecently(userId, "burst_navigation"))) {
         await markAlerted(userId, "burst_navigation");
         await alertSuperAdmins(supabase, "⚠️ Navegação anômala (possível bot)",
           "Plataforma RENOV", `Usuário ${userId.slice(0, 8)} acessou ${set.size} páginas distintas em 5 min.`,
@@ -64,7 +65,7 @@ Deno.serve(async (req) => {
       pdfByUser.set(e.user_id, (pdfByUser.get(e.user_id) ?? 0) + 1);
     }
     for (const [userId, n] of pdfByUser) {
-      if (n > 5 && !(await alertedRecently(userId, "export_burst"))) {
+      if (n > 15 && !(await alertedRecently(userId, "export_burst"))) {
         await markAlerted(userId, "export_burst");
         await alertSuperAdmins(supabase, "⚠️ Exportação em massa (possível bot)",
           "Plataforma RENOV", `Usuário ${userId.slice(0, 8)} exportou ${n} PDFs em 10 min.`,

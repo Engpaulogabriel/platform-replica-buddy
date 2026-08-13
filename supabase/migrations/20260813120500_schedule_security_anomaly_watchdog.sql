@@ -1,6 +1,7 @@
 -- Agenda o security-anomaly-watchdog no pg_cron (a cada 5 min) ───────────────
 -- Varre user_activity_log / export_log e alerta super_admins no WhatsApp:
---   > 50 páginas distintas em 5 min · > 5 PDFs em 10 min (dedup 1h por usuário).
+--   > 150 páginas distintas em 5 min · > 15 PDFs em 10 min (dedup 1h por usuário).
+--   Limiares altos p/ login compartilhado (vários operadores, 1 conta).
 -- Requer config.toml [functions.security-anomaly-watchdog] verify_jwt = false.
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;

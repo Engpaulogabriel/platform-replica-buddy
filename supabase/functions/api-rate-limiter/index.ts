@@ -2,9 +2,11 @@
 // ───────────────────────────────────────────────────────────────────────────
 // action:
 //   'log'    → registra em user_activity_log (path, method, ip, ua, session).
-//   'rate'   → check_and_bump_rate_limit (300/min api · 30/min export). 429 se
-//              estourar; registra flag 'rate_limited'; WhatsApp na 3ª reincidência.
-//   'export' → check_export_limit (10 pdf/h · 30 csv/dia; admin 3x) + export_log.
+//   'rate'   → check_and_bump_rate_limit POR DISPOSITIVO (300/min api · 30/min
+//              export, chave user_id+device_id). 429 se estourar; flag 'rate_limited';
+//              WhatsApp na 3ª reincidência do device.
+//   'export' → check_export_limit por CONTA (30 pdf/h · 100 csv/dia; platform_admin
+//              ilimitado) + export_log.
 //
 // COBERTURA (honesto): só cobre o que o client roteia por AQUI. Leituras diretas
 // ao PostgREST não passam. A contenção de massa é a RLS. verify_jwt=false: a
@@ -17,6 +19,8 @@ import {
   userIdFromReq, clientIp, alertSuperAdmins,
 } from "../_shared/security.ts";
 
+// Limites POR DISPOSITIVO (chave user_id + device_id/ip). Login compartilhado:
+// cada device tem limite próprio, então os valores ORIGINAIS bastam.
 const RATE_API_PER_MIN = 300;
 const RATE_EXPORT_PER_MIN = 30;
 
@@ -35,6 +39,10 @@ Deno.serve(async (req) => {
   try { body = await req.json(); } catch { /* vazio */ }
   const action = String(body?.action ?? "log");
   const userId = userIdFromReq(req);
+  // Chave de DISPOSITIVO: device_id do localStorage (distingue devices atrás do
+  // mesmo NAT/IP da fazenda) ou, na falta, o IP. Rate limit é por (user_id + este).
+  const deviceKey = (typeof body?.device_id === "string" && body.device_id)
+    ? String(body.device_id).slice(0, 64) : (clientIp(req) ?? "unknown");
   const supabase = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey!);
 
   try {
@@ -43,7 +51,7 @@ Deno.serve(async (req) => {
       const endpoint = isExport ? "export" : "api";
       const limit = isExport ? RATE_EXPORT_PER_MIN : RATE_API_PER_MIN;
       const { data: r } = await supabase.rpc("check_and_bump_rate_limit", {
-        _user_id: userId, _endpoint: endpoint, _limit: limit, _window_seconds: 60,
+        _user_id: userId, _endpoint: endpoint, _ip: deviceKey, _limit: limit, _window_seconds: 60,
       });
       const res = (r ?? {}) as any;
       if (res.allowed === false) {
