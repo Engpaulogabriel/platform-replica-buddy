@@ -109,7 +109,9 @@ function PumpCardImpl(props: PumpCardProps) {
   const bg = inMaintenance
     ? "bg-[#FFF3E0] dark:bg-amber-950/30 border-l-[3px] border-l-amber-500 border-amber-300/60"
     : isOffline
-      ? "bg-destructive/10 border-destructive/50"
+      // OFFLINE = CINZA (sem comunicação), independente do último estado. Nunca
+      // vermelho — vermelho é DESLIGADO comunicando. Restaurado (v3.25.56 quebrou).
+      ? "bg-muted/60 border-muted-foreground/30 opacity-70 grayscale"
       : isCommFail
         ? "bg-destructive/25 border-destructive/70"
         : isTransitioning
@@ -121,7 +123,7 @@ function PumpCardImpl(props: PumpCardProps) {
   const dotColor = inMaintenance
     ? "bg-muted-foreground"
     : isOffline
-      ? "bg-destructive"
+      ? "bg-muted-foreground"
       : isCommFail
         ? "bg-destructive animate-pulse"
         : isTransitioning
