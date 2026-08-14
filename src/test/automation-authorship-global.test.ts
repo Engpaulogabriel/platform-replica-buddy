@@ -267,6 +267,42 @@ describe("formatos de last_changed_by — 'Nome' vs 'Nome|user:<UUID>'", () => {
     expect(f2.somente_nome).toBe(1);   // só nome não vira autoria
   });
 
+  it("formato REAL de produção: 'Nome Sobrenome|user:<UUID>' + remote-desired", async () => {
+    // shape exatamente como observado no banco (nome com espaço, origem remote-desired)
+    await db.query(`UPDATE public.equipments
+                      SET last_changed_by = $1, last_actuation_origin = 'remote-desired' WHERE id = $2`,
+      [`Nome Sobrenome|user:${UB}`, E1]);
+    await raw(db, { farm: F1, equip: E1, name: "BOMBA 1", on: true, origin: "remote", actor: "Telemetria RF" });
+
+    await db.exec(mig("20260814200300_command_audit_and_authorship_backfill.sql"));
+    const r = (await rows(db, E1))[0];
+    expect(r.user_id).toBe(UB);
+    expect(r.src).toBe("last_changed_by_uuid");
+    expect(r.user_email).toBe("b@ex.com");
+    expect(r.actor_label).toBe("Usuario B");   // nome vem de profiles, não da string
+    expect(r.metodo).toBe("Telemetria RF");    // método saiu da coluna Usuário
+  });
+
+  it("só o evento remoto MAIS RECENTE é atribuído por last_changed_by", async () => {
+    // last_changed_by descreve só a ÚLTIMA atuação: creditar os anteriores à
+    // mesma pessoa seria atribuir a terceiros uma ação que não foi deles.
+    await db.query(`UPDATE public.equipments
+                      SET last_changed_by = $1, last_actuation_origin = 'remote-desired' WHERE id = $2`,
+      [`Nome Sobrenome|user:${UB}`, E1]);
+    const t0 = new Date(Date.now() - 6 * 3600_000).toISOString();
+    const t1 = new Date(Date.now() - 1 * 3600_000).toISOString();
+    await raw(db, { farm: F1, equip: E1, name: "BOMBA 1", on: false, origin: "remote", at: t0 });
+    await raw(db, { farm: F1, equip: E1, name: "BOMBA 1", on: true,  origin: "remote", at: t1 });
+
+    await db.exec(mig("20260814200300_command_audit_and_authorship_backfill.sql"));
+    const r = await rows(db, E1);
+    expect(r[0].user_id).toBeNull();   // o ANTERIOR não é atribuído
+    expect(r[1].user_id).toBe(UB);     // só o mais recente
+    const p = await db.query<any>(
+      `SELECT count(*)::int n FROM public.authorship_pending_review WHERE resolved_at IS NULL`);
+    expect(Number(p.rows[0].n)).toBe(1);  // o anterior vira pendência, não invenção
+  });
+
   it("backfill usa o UUID do formato real e ignora o de só nome", async () => {
     await db.query(`UPDATE public.equipments
                       SET last_changed_by = $1, last_actuation_origin = 'remote-desired' WHERE id = $2`,

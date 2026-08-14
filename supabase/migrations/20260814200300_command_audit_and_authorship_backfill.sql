@@ -229,10 +229,19 @@ BEGIN
      AND ( p.id::text = al.details->>'user_id'
         OR (al.details->>'user_email' IS NOT NULL AND p.email = al.details->>'user_email') );
 
-  -- 5.3 PRIORIDADE 3 — equipments.last_changed_by no formato "...|user:<UUID>".
-  --     Exige: procedência remota declarada, mesmo equipamento, janela coerente,
-  --     UUID existente em profiles e NENHUM comando posterior que tenha
-  --     sobrescrito o estado. O UUID é a prova; nome isolado nunca atribui.
+  -- 5.3 PRIORIDADE 3 — equipments.last_changed_by no formato "...|user:<UUID>"
+  --     (formato real observado em produção, ex.: "Nome Sobrenome|user:<UUID>"
+  --     com last_actuation_origin='remote-desired').
+  --
+  --     LIMITE SEMÂNTICO DECISIVO: last_changed_by é campo de ESTADO ATUAL —
+  --     descreve SÓ a ÚLTIMA atuação daquele equipamento. Atribuir com ele todos
+  --     os eventos remotos de uma janela creditaria à mesma pessoa atuações de
+  --     terceiros. Por isso só o evento remoto MAIS RECENTE de cada equipamento
+  --     pode ser atribuído por esta via; os anteriores viram pendência.
+  --
+  --     Exige ainda: procedência remota declarada, mesmo equipamento/fazenda,
+  --     UUID existente em profiles e nenhum comando posterior de outro autor.
+  --     O UUID é a prova; nome isolado nunca atribui.
   UPDATE public.automation_log al
      SET user_id     = p.id,
          user_email  = COALESCE(al.user_email, p.email),
@@ -249,7 +258,18 @@ BEGIN
      AND al.equipment_id = e.id
      AND al.farm_id = e.farm_id
      AND lower(COALESCE(e.last_actuation_origin,'')) IN ('remote','remote-desired','remote-cmd','remote_desired','remote_cmd')
-     AND al.occurred_at > now() - interval '30 days'
+     -- só o evento remoto MAIS RECENTE do equipamento: é o único que
+     -- last_changed_by de fato descreve
+     AND al.id = (
+       SELECT a2.id FROM public.automation_log a2
+        WHERE a2.equipment_id = al.equipment_id
+          AND a2.noise_reason IS NULL
+          AND a2.action IN ('turn_on','turn_off','pump_on','pump_off')
+          AND a2.origin = 'remote'::public.event_origin
+        ORDER BY a2.occurred_at DESC, a2.created_at DESC, a2.id DESC
+        LIMIT 1)
+     -- teto de idade: um campo de estado atual não descreve história remota
+     AND al.occurred_at > now() - interval '90 days'
      AND NOT EXISTS (
        SELECT 1 FROM public.command_audit ca2
         WHERE ca2.equipment_id = al.equipment_id
