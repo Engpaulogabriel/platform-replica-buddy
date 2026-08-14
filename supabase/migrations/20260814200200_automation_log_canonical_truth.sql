@@ -421,11 +421,12 @@ END $$;
 -- ── 7) COMPENSAÇÃO do que 20260814200000/100 esconderam ─────────────────────
 -- 7.1 Comandos remotos rebaixados a status_read por result<>'success'. A ação
 --     original é recuperável pelo frame gravado em details (trg_log_manual_command).
+--     Ainda NÃO desmarcamos: em 7.3 decidimos se a linha é a oficial ou se serve
+--     apenas para atribuir a linha física que já existe (evita linha duplicada).
 UPDATE public.automation_log
    SET action = CASE
          WHEN details->>'frame' ~ '\{0*1\}' THEN 'turn_on'::public.event_action
-         ELSE 'turn_off'::public.event_action END,
-       noise_reason = NULL
+         ELSE 'turn_off'::public.event_action END
  WHERE action = 'status_read'::public.event_action
    AND noise_reason = 'not_confirmed'
    AND details ? 'frame';
@@ -436,7 +437,77 @@ DELETE FROM public.automation_log
  WHERE action = 'status_read'::public.event_action
    AND noise_reason = 'reading_origin';
 
--- 7.3 HISTÓRICO: linhas físicas que o AGENTE declarou como comando remoto
+-- 7.3 RECUPERAÇÃO DA AUTORIA REAL (é isto que traz de volta os religamentos
+--     remotos da manhã de 14/08). A limpeza anterior marcou como duplicada
+--     justamente a linha que carregava o USUÁRIO: a física confirmou o estado e
+--     ficou oficial; a do comando chegou depois e virou 'repeated_state'.
+--     Aqui a linha marcada é usada para ATRIBUIR a oficial — sem criar segunda
+--     linha e sem inventar nada: exige usuário/WhatsApp real e correlação forte
+--     (mesma fazenda, mesmo equipamento, mesmo estado, ±180 s).
+WITH marcada AS (
+  SELECT n.id AS noise_id, n.farm_id, n.equipment_id, n.origin, n.user_id, n.user_email,
+         n.actor_label, n.source_device, n.details, n.occurred_at,
+         (CASE WHEN n.action IN ('turn_on','pump_on') THEN 1 ELSE 0 END) AS st
+    FROM public.automation_log n
+   WHERE n.noise_reason IN ('repeated_state','not_confirmed')
+     AND n.action IN ('turn_on','turn_off','pump_on','pump_off')
+     AND n.equipment_id IS NOT NULL
+     AND ( (n.origin = 'remote'::public.event_origin
+            AND (n.user_id IS NOT NULL OR lower(COALESCE(n.source_device,'')) LIKE 'whatsapp:%'))
+        OR (n.origin = 'auto'::public.event_origin AND COALESCE(n.actor_label,'') <> '') )
+),
+alvo AS (
+  SELECT DISTINCT ON (m.noise_id) m.*, o.id AS official_id,
+         public.automation_attribution_rank(o.origin, o.user_id, o.source_device, o.actor_label) AS rank_of
+    FROM marcada m
+    JOIN public.automation_log o
+      ON o.farm_id = m.farm_id
+     AND o.equipment_id = m.equipment_id
+     AND o.noise_reason IS NULL
+     AND o.action IN ('turn_on','turn_off','pump_on','pump_off')
+     AND (CASE WHEN o.action IN ('turn_on','pump_on') THEN 1 ELSE 0 END) = m.st
+     AND o.occurred_at BETWEEN m.occurred_at - interval '180 seconds'
+                           AND m.occurred_at + interval '180 seconds'
+   ORDER BY m.noise_id, abs(extract(epoch FROM (o.occurred_at - m.occurred_at)))
+)
+UPDATE public.automation_log o
+   SET origin        = a.origin,
+       user_id       = COALESCE(a.user_id, o.user_id),
+       user_email    = COALESCE(a.user_email, o.user_email),
+       actor_label   = COALESCE(a.actor_label, o.actor_label),
+       source_device = COALESCE(a.source_device, o.source_device),
+       result        = 'success'::public.event_result,
+       details       = COALESCE(o.details, '{}'::jsonb) || jsonb_build_object(
+                         'attribution_recovered_from', a.noise_id,
+                         'attribution_source', 'linha_de_comando_marcada',
+                         'command_id', COALESCE(a.details->>'command_id', o.details->>'command_id'))
+  FROM alvo a
+ WHERE o.id = a.official_id
+   AND public.automation_attribution_rank(a.origin, a.user_id, a.source_device, a.actor_label) > a.rank_of;
+
+-- 7.3b Linha de comando marcada que NÃO tem oficial correspondente: a transição
+--      inteira ficou escondida. Ela vira a linha oficial (é a única evidência).
+UPDATE public.automation_log n
+   SET noise_reason = NULL,
+       result       = 'success'::public.event_result,
+       details      = COALESCE(n.details, '{}'::jsonb)
+                      || jsonb_build_object('attribution_source', 'linha_de_comando_restaurada')
+ WHERE n.noise_reason IN ('repeated_state','not_confirmed')
+   AND n.action IN ('turn_on','turn_off','pump_on','pump_off')
+   AND n.equipment_id IS NOT NULL
+   AND n.origin = 'remote'::public.event_origin
+   AND (n.user_id IS NOT NULL OR lower(COALESCE(n.source_device,'')) LIKE 'whatsapp:%')
+   AND NOT EXISTS (
+     SELECT 1 FROM public.automation_log o
+      WHERE o.farm_id = n.farm_id AND o.equipment_id = n.equipment_id
+        AND o.noise_reason IS NULL
+        AND o.action IN ('turn_on','turn_off','pump_on','pump_off')
+        AND (CASE WHEN o.action IN ('turn_on','pump_on') THEN 1 ELSE 0 END)
+          = (CASE WHEN n.action IN ('turn_on','pump_on') THEN 1 ELSE 0 END)
+        AND o.occurred_at BETWEEN n.occurred_at - interval '180 seconds'
+                              AND n.occurred_at + interval '180 seconds');
+
+-- 7.4 HISTÓRICO: linhas físicas que o AGENTE declarou como comando remoto
 --     (details.origin='remote-cmd'/'remote-desired') mas cujo `commands` já foi
 --     apagado por delete_finished_command — sem command_id e sem user_id.
 --     A evidência TÉCNICA é suficiente para dizer que foi REMOTO; ela NÃO é
@@ -460,19 +531,31 @@ UPDATE public.automation_log al
 -- Autoria histórica SÓ com vínculo confiável: mesmo equipamento, mesma janela e
 -- last_changed_by apontando para um usuário real da plataforma. Sem isso, fica
 -- sem ator — nunca uma pessoa inventada.
+-- Casamento por texto (full_name/email) só é aceito quando é ÚNICO: dois perfis
+-- homônimos tornariam a atribuição ambígua, e atribuir a pessoa errada é pior do
+-- que deixar sem autoria.
+WITH unico AS (
+  -- o HAVING abaixo garante um único perfil; array_agg evita min(uuid), inexistente
+  SELECT e.id AS equipment_id, (array_agg(p.id))[1] AS user_id,
+         (array_agg(p.email))[1] AS email, (array_agg(p.full_name))[1] AS full_name
+    FROM public.equipments e
+    JOIN public.profiles p
+      ON p.full_name = e.last_changed_by OR p.email = e.last_changed_by
+   WHERE e.last_changed_by IS NOT NULL
+   GROUP BY e.id
+  HAVING count(DISTINCT p.id) = 1
+)
 UPDATE public.automation_log al
-   SET user_id     = p.id,
-       user_email  = p.email,
-       actor_label = COALESCE(al.actor_label, p.full_name, p.email),
+   SET user_id     = u.user_id,
+       user_email  = u.email,
+       actor_label = COALESCE(al.actor_label, u.full_name, u.email),
        details     = al.details || jsonb_build_object(
                        'attribution_unavailable', false,
                        'attribution_source', 'last_changed_by')
-  FROM public.equipments e
-  JOIN public.profiles p ON p.full_name = e.last_changed_by OR p.email = e.last_changed_by
- WHERE al.equipment_id = e.id
+  FROM unico u
+ WHERE al.equipment_id = u.equipment_id
    AND (al.details->>'attribution_backfilled')::boolean IS TRUE
-   AND al.user_id IS NULL
-   AND e.last_changed_by IS NOT NULL;
+   AND al.user_id IS NULL;
 
 -- Registro de auditoria técnica do que ficou sem autoria (só ali aparece a frase).
 INSERT INTO public.agent_technical_events (farm_id, equipment_id, equipment_name, kind, occurred_at, details)

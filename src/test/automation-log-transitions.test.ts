@@ -366,6 +366,70 @@ describe("transição confirmada sem atribuição — Origem em apuração", () 
   });
 });
 
+// Cenário exato relatado: a limpeza anterior marcou como duplicada justamente a
+// linha que carregava o usuário. O backfill precisa devolver os religamentos.
+describe("CASO REAL Semear 14/08 — 13 religamentos remotos voltam ao relatório", () => {
+  const POCOS = Array.from({ length: 13 }, (_, i) =>
+    `66666666-0000-0000-0000-0000000000${String(i + 10).padStart(2, "0")}`);
+
+  it("13 religamentos voltam como Ligada / Remoto / usuário real / OK — sem duplicar", async () => {
+    await db.query(`INSERT INTO public.profiles (id,email,full_name) VALUES ($1,$2,$3)`,
+      [USER_A, "paulo@renov.com.br", "Paulo Gabriel"]);
+
+    // estado gravado como estava DEPOIS do hotfix anterior:
+    //  • linha física oficial (telemetria, sem autoria)
+    //  • linha do comando com o usuário, marcada como 'repeated_state'
+    await db.exec(`ALTER TABLE public.automation_log DISABLE TRIGGER trg_enforce_automation_log_state_change`);
+    for (const p of POCOS) {
+      await db.query(`INSERT INTO public.equipments (id,farm_id,name,last_confirmed_state) VALUES ($1,$2,$3,1)`,
+        [p, SEMEAR, `POÇO ${p.slice(-2)}`]);
+      await insert(db, SEMEAR, p, "POÇO", {
+        at: "07:19", on: true, origin: "system", actor: "Telemetria RF", details: { origin: "remote-cmd" } });
+      await insert(db, SEMEAR, p, "POÇO", {
+        at: "07:19", on: true, origin: "remote", user: USER_A, actor: "Paulo Gabriel" });
+    }
+    await db.query(
+      `UPDATE public.automation_log SET noise_reason='repeated_state' WHERE origin='remote' AND farm_id=$1`, [SEMEAR]);
+    await db.exec(`ALTER TABLE public.automation_log ENABLE TRIGGER trg_enforce_automation_log_state_change`);
+
+    // antes: 13 linhas oficiais, todas sem usuário
+    const antes = await db.query<{ n: number }>(
+      `SELECT count(*)::int n FROM public.automation_log
+        WHERE farm_id=$1 AND noise_reason IS NULL AND user_id IS NOT NULL`, [SEMEAR]);
+    expect(Number(antes.rows[0].n)).toBe(0);
+
+    await db.exec(mig("20260814200200_automation_log_canonical_truth.sql"));
+
+    const r = await db.query<any>(
+      `SELECT action::text, origin::text, user_id, user_email, actor_label, result::text
+         FROM public.automation_log
+        WHERE farm_id=$1 AND noise_reason IS NULL
+          AND action IN ('turn_on','turn_off','pump_on','pump_off')`, [SEMEAR]);
+
+    expect(r.rows).toHaveLength(13);                                   // uma linha por poço
+    expect(r.rows.every((x: any) => x.action === "turn_on")).toBe(true);   // Ligada
+    expect(r.rows.every((x: any) => x.origin === "remote")).toBe(true);    // Remoto
+    expect(r.rows.every((x: any) => x.user_id === USER_A)).toBe(true);     // usuário real
+    expect(r.rows.every((x: any) => x.actor_label === "Paulo Gabriel")).toBe(true);
+    expect(r.rows.every((x: any) => x.result === "success")).toBe(true);   // OK
+  });
+
+  it("não reintroduz polling, eco, OFF/OFF nem telemetria RF como evento", async () => {
+    await db.exec(`ALTER TABLE public.automation_log DISABLE TRIGGER trg_enforce_automation_log_state_change`);
+    await db.query(`INSERT INTO public.equipments (id,farm_id,name,last_confirmed_state) VALUES ($1,$2,$3,0)`,
+      [POCOS[0], SEMEAR, "POÇO 10"]);
+    await insert(db, SEMEAR, POCOS[0], "POÇO 10", { at: "07:19", on: true, origin: "local" });
+    await insert(db, SEMEAR, POCOS[0], "POÇO 10", { at: "07:20", on: true, origin: "local" });      // ON/ON
+    await insert(db, SEMEAR, POCOS[0], "POÇO 10", { at: "07:21", on: false, origin: "reading" });   // polling
+    await insert(db, SEMEAR, POCOS[0], "POÇO 10", { at: "07:30", on: false, origin: "local" });
+    await insert(db, SEMEAR, POCOS[0], "POÇO 10", { at: "07:31", on: false, origin: "local" });     // OFF/OFF
+    await db.exec(`ALTER TABLE public.automation_log ENABLE TRIGGER trg_enforce_automation_log_state_change`);
+
+    await db.exec(mig("20260814200200_automation_log_canonical_truth.sql"));
+    expect(await official(db, POCOS[0])).toEqual(["07:19 ON", "07:30 OFF"]);
+  });
+});
+
 describe("backfill histórico não inventa usuário", () => {
   it("promove a Remoto pela evidência técnica, mas deixa a autoria indisponível", async () => {
     // linha de 14/08 com details.origin='remote-cmd', sem command_id e sem user_id
