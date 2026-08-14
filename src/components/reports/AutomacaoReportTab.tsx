@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Bot, ChevronLeft, ChevronRight, Download, Eye, FileText, Hand, MessageCircle, Monitor, Power, Radio, RefreshCw, Server, WifiOff } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { useAutomationLog, loadAutomationLogRange, type AutomationLogEntry } from "@/lib/automationLog";
+import { useAutomationLog, loadAutomationLogRange, loadTechnicalReadings, type AutomationLogEntry, type TechnicalReading } from "@/lib/automationLog";
 import { exportAutomacaoCSV, exportAutomacaoPDF } from "@/lib/reportExport";
 import { notifyReport } from "@/lib/notify";
 import { guardExport } from "@/lib/securityClient";
@@ -154,6 +154,25 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
     return { from: parsedRange.from.getTime(), to: parsedRange.to.getTime() };
   }, [parsedRange]);
 
+  // Telemetria técnica (status_read) — conjunto SEPARADO, carregado só sob demanda.
+  // Nunca é mesclado ao histórico oficial.
+  const [readings, setReadings] = useState<TechnicalReading[]>([]);
+  const [loadingReadings, setLoadingReadings] = useState(false);
+  useEffect(() => {
+    if (!showReadings || !farmId || !parsedRange) { setReadings([]); return; }
+    let cancelled = false;
+    setLoadingReadings(true);
+    loadTechnicalReadings(farmId, parsedRange.from.toISOString(), parsedRange.to.toISOString())
+      .then((rs) => { if (!cancelled) setReadings(rs); })
+      .finally(() => { if (!cancelled) setLoadingReadings(false); });
+    return () => { cancelled = true; };
+  }, [showReadings, farmId, parsedRange]);
+
+  const filteredReadings = useMemo(
+    () => (selectedPump === "all" ? readings : readings.filter((r) => r.pump === selectedPump)),
+    [readings, selectedPump],
+  );
+
   const automationLog = useMemo<AutomationLogEntry[]>(() => {
     if (!farmId) return [];
     return rawAutomationLog
@@ -163,9 +182,11 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
         return t >= rangeBounds.from && t <= rangeBounds.to;
       })
       .filter((e) => {
+        // Histórico OFICIAL: só transição confirmada. Leitura técnica não é
+        // filtrada aqui — ela nem chega, porque a query já exclui status_read e
+        // noise_reason. O checkbox tem seção própria (telemetria separada).
         const isSystem = SYSTEM_ACTIONS.has(e.action) || e.origin === "Sistema";
         if (isSystem) return false;
-        if (!showReadings && e.action === "Leitura OK") return false;
         return e.origin === "Remoto" || e.origin === "Manual" || e.origin === "WhatsApp"
           || e.origin === "Automático"; // desligamento programado (origin='auto')
       });
@@ -235,7 +256,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                 onChange={(e) => setShowReadings(e.target.checked)}
                 className="accent-primary"
               />
-              Mostrar leituras de status (ruidoso)
+              Mostrar telemetria técnica em seção separada (não entra no histórico)
             </label>
           </div>
         </CardHeader>
@@ -391,6 +412,57 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
           )}
         </CardContent>
       </Card>
+
+      {/* TELEMETRIA TÉCNICA — seção SEPARADA. Nunca se mistura ao histórico
+          oficial: são leituras de estado (polling/eco/reconexão) e comandos que
+          não confirmaram, mantidos apenas para diagnóstico. */}
+      {showReadings && (
+        <Card className="bg-card border-border max-w-full overflow-x-clip">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-muted-foreground flex items-center gap-1.5">
+              <Radio className="w-4 h-4" /> Telemetria técnica ({filteredReadings.length})
+            </CardTitle>
+            <p className="text-[11px] text-muted-foreground">
+              Leituras de estado e tentativas não confirmadas. <strong>Não são eventos operacionais</strong> e
+              não entram no histórico, no CSV nem no PDF.
+            </p>
+          </CardHeader>
+          <CardContent className="p-0">
+            {loadingReadings ? (
+              <div className="px-6 py-8 text-center text-sm text-muted-foreground">Carregando telemetria…</div>
+            ) : filteredReadings.length === 0 ? (
+              <div className="px-6 py-8 text-center text-sm text-muted-foreground">
+                Nenhuma leitura técnica no período.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table className="text-xs">
+                  <TableHeader><TableRow>
+                    <TableHead>Data</TableHead><TableHead>Hora</TableHead><TableHead>Equipamento</TableHead>
+                    <TableHead>Estado lido</TableHead><TableHead>Motivo</TableHead>
+                  </TableRow></TableHeader>
+                  <TableBody>
+                    {filteredReadings.slice(0, 300).map((r) => (
+                      <TableRow key={r.id} className="opacity-80">
+                        <TableCell className="whitespace-nowrap">{r.date}</TableCell>
+                        <TableCell className="whitespace-nowrap">{r.time}</TableCell>
+                        <TableCell>{r.pump}</TableCell>
+                        <TableCell>{r.observed === "on" ? "Ligada" : r.observed === "off" ? "Desligada" : "—"}</TableCell>
+                        <TableCell className="text-muted-foreground">{r.noiseReason ?? (r.ok ? "leitura" : "sem resposta")}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                {filteredReadings.length > 300 && (
+                  <p className="px-4 py-2 text-[11px] text-muted-foreground">
+                    Mostrando as 300 mais recentes de {filteredReadings.length}.
+                  </p>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

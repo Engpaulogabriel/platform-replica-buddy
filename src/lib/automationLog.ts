@@ -356,11 +356,11 @@ const classifyAction = (r: DbRow): { action: AutomationAction; origin: Automatio
     return { action: "Equipamento religado", origin: "Sistema" };
   }
 
-  // Leituras periódicas — por AÇÃO (status_read) OU por ORIGEM (reading).
-  // BUG corrigido: linhas origin='reading' com action turn_on/turn_off são
-  // OBSERVAÇÕES de estado (o agente registrando que a bomba está ligada/desligada),
-  // NÃO comandos. Antes caíam no ramo de comando → originFromDb('reading')='Remoto'
-  // → apareciam no relatório como comando "Remoto" pelo actor_label 'Acionamento Local'.
+  // Leituras periódicas. A partir de 20260814200000 a FONTE garante que
+  // observação de telemetria nunca chega como turn_on/turn_off: o trigger
+  // rebaixa para status_read + noise_reason. O ramo `origin === 'reading'`
+  // continua aqui só para o histórico anterior à limpeza — não é mais o
+  // remendo visual que mascarava o defeito da fonte.
   if (r.action === "status_read" || r.origin === "reading") {
     if (r.result === "timeout" || r.result === "fail") {
       return { action: "Sem resposta", origin: "Sistema" };
@@ -495,11 +495,15 @@ export async function startAutomationLogSync(): Promise<void> {
   // equipamentos menos ativos ficam sem histórico no mini-relatório.
   // Comandos reais são ~2 ordens de grandeza mais raros, então 500 cobre
   // meses de operação por equipamento.
+  // `noise_reason IS NULL` = só TRANSIÇÃO CONFIRMADA. Polling, eco, retry,
+  // reconexão e comando não confirmado ficam de fora — marcados na fonte, não
+  // escondidos aqui.
   const { data: rows } = await supabase
     .from("automation_log")
     .select("*")
     .eq("farm_id", ctx.farmId)
     .in("action", ["turn_on", "turn_off", "pump_on", "pump_off"])
+    .is("noise_reason", null)
     .order("occurred_at", { ascending: false })
     .limit(500);
 
@@ -560,6 +564,7 @@ export async function loadAutomationLogRange(
         .select("*")
         .eq("farm_id", farmId)
         .in("action", ["turn_on", "turn_off", "pump_on", "pump_off"])
+        .is("noise_reason", null)   // histórico OFICIAL: só transição confirmada
         .gte("occurred_at", fromIso)
         .lte("occurred_at", toIso)
         .order("occurred_at", { ascending: false })
@@ -572,6 +577,66 @@ export async function loadAutomationLogRange(
     if (collected.length) useAutomationLog.getState().bulkUpsertRemote(collected);
   } catch (e) {
     console.warn("[automationLog] loadAutomationLogRange falhou:", e);
+  }
+}
+
+/** Uma leitura técnica de telemetria. NÃO é evento operacional e NUNCA entra no
+ *  histórico oficial — existe só para o checkbox "leituras de status". */
+export interface TechnicalReading {
+  id: string;
+  ts: string;
+  date: string;
+  time: string;
+  pump: string;
+  equipmentId?: string;
+  /** 'on' | 'off' | null — estado observado, quando a linha carrega essa informação */
+  observed: "on" | "off" | null;
+  ok: boolean;
+  /** por que não é transição: reading_origin | not_confirmed | repeated_state | no_equipment */
+  noiseReason: string | null;
+}
+
+/**
+ * Carrega a TELEMETRIA TÉCNICA (status_read) num conjunto SEPARADO. Deliberadamente
+ * não usa o store do histórico: leitura técnica não pode se misturar ao relatório
+ * oficial — só é exibida numa seção própria, quando o usuário pede.
+ */
+export async function loadTechnicalReadings(
+  farmId: string,
+  fromIso: string,
+  toIso: string,
+  limit = 2000,
+): Promise<TechnicalReading[]> {
+  if (!farmId || !fromIso || !toIso) return [];
+  try {
+    const { data: rows, error } = await supabase
+      .from("automation_log")
+      .select("id, equipment_id, equipment_name, occurred_at, result, new_state, noise_reason")
+      .eq("farm_id", farmId)
+      .eq("action", "status_read")
+      .gte("occurred_at", fromIso)
+      .lte("occurred_at", toIso)
+      .order("occurred_at", { ascending: false })
+      .limit(limit);
+    if (error || !rows) return [];
+    return (rows as any[]).map((r) => {
+      const d = new Date(r.occurred_at);
+      const st = String(r.new_state ?? "").toLowerCase();
+      return {
+        id: String(r.id),
+        ts: d.toISOString(),
+        date: formatDate(d),
+        time: formatTime(d),
+        pump: r.equipment_name ?? "—",
+        equipmentId: r.equipment_id ?? undefined,
+        observed: st === "on" || st === "1" ? "on" : st === "off" || st === "0" ? "off" : null,
+        ok: !["fail", "timeout", "error"].includes(String(r.result ?? "").toLowerCase()),
+        noiseReason: r.noise_reason ?? null,
+      } as TechnicalReading;
+    });
+  } catch (e) {
+    console.warn("[automationLog] loadTechnicalReadings falhou:", e);
+    return [];
   }
 }
 
