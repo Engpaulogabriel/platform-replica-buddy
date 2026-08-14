@@ -21,7 +21,7 @@ import { notify } from "@/lib/notify";
 
 import { LazyVisible } from "@/components/LazyVisible";
 import { usePermission } from "@/contexts/MasterManagerContext";
-import { useCanViewTechnicalTelemetry } from "@/hooks/useTechnicalTelemetry";
+import { useCanViewTechnicalTelemetry, useShowTechnicalTimes } from "@/hooks/useTechnicalTelemetry";
 import type { Pump } from "./PumpTable";
 
 
@@ -103,8 +103,13 @@ function PumpCardImpl(props: PumpCardProps) {
   // `pump.communicationStatus`, calculado pela regra real de 15 minutos. O que
   // some é o NÚMERO, nunca o estado.
   const canViewTechnical = useCanViewTechnicalTelemetry();
+  // TEMPOS TÉCNICOS: ocultos por padrão para TODOS, inclusive platform_admin.
+  // Só aparecem quando a chave "Exibir tempos técnicos nos cards" (Setor
+  // Técnico) estiver ligada — e mesmo assim apenas para admin/técnico.
+  // `showTechnicalTimes` já combina as duas condições.
+  const showTimes = useShowTechnicalTimes();
   const minutesSinceComm =
-    canViewTechnical && pump.lastCommunication
+    showTimes && pump.lastCommunication
       ? Math.max(0, Math.floor((Date.now() - new Date(pump.lastCommunication).getTime()) / 60_000))
       : null;
 
@@ -254,7 +259,7 @@ function PumpCardImpl(props: PumpCardProps) {
           )}
           {/* Idade da leitura: EXCLUSIVO de platform_admin e técnico. Para
               qualquer outro perfil este elemento não chega a existir. */}
-          {canViewTechnical && minutesSinceComm != null && !isOffline && (
+          {showTimes && minutesSinceComm != null && !isOffline && (
             <span
               data-testid="technical-comm-age"
               className="text-[9px] font-medium tabular-nums px-1 py-0.5 rounded bg-muted text-muted-foreground border border-border shrink-0"

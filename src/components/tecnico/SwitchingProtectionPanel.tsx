@@ -36,7 +36,7 @@ export function SwitchingProtectionPanel() {
     if (!farmId) { setRows([]); setLoading(false); return; }
     setLoading(true);
     const { data, error } = await supabase.rpc("switching_protection_list", { _farm_id: farmId });
-    if (error) notify.error("Não foi possível carregar as proteções.");
+    if (error) notify.fail("Proteções", "não foi possível carregar");
     setRows((data as Row[]) ?? []);
     setLoading(false);
   }, [farmId]);
@@ -54,23 +54,21 @@ export function SwitchingProtectionPanel() {
       _seconds: row.seconds ?? 30,
     });
     setSaving(null);
-    if (error) { notify.error("Não foi possível alterar a proteção deste poço."); return; }
-    notify.success(next
-      ? `Proteção ativada em ${row.equipment_name}.`
-      : `Proteção desativada em ${row.equipment_name}.`);
+    if (error) { notify.fail("Proteção", `não foi possível alterar ${row.equipment_name}`); return; }
+    notify.ok("Proteção", `${next ? "ativada" : "desativada"} em ${row.equipment_name}`);
     void load();
   };
 
   const setSeconds = async (row: Row, secs: number) => {
     if (!Number.isFinite(secs) || secs < 1 || secs > 600) {
-      notify.error("Use um valor entre 1 e 600 segundos."); return;
+      notify.fail("Proteção", "use um valor entre 1 e 600 segundos"); return;
     }
     setSaving(row.equipment_id);
     const { error } = await supabase.rpc("set_switching_protection", {
       _equipment_id: row.equipment_id, _enabled: row.enabled, _seconds: secs,
     });
     setSaving(null);
-    if (error) { notify.error("Não foi possível alterar a janela."); return; }
+    if (error) { notify.fail("Proteção", "não foi possível alterar a janela"); return; }
     void load();
   };
 

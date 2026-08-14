@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SwitchingProtectionPanel } from "@/components/tecnico/SwitchingProtectionPanel";
+import { TechnicalDisplaySettings } from "@/components/tecnico/TechnicalDisplaySettings";
 import { useCanViewTechnicalTelemetry } from "@/hooks/useTechnicalTelemetry";
 import { Badge } from "@/components/ui/badge";
 import { ClipboardList, KeyRound, Stethoscope, Building2, Navigation, Timer, Settings, Users, TrendingUp, ShieldCheck, Cpu, Cable, Radio, Wrench, ShieldAlert } from "lucide-react";
@@ -125,7 +126,11 @@ const SuporteTecnico = () => {
             <TabsContent value="autoria" className="mt-4"><AuthorshipReconciliationQueue /></TabsContent>
           )}
           {canViewProtections && (
-            <TabsContent value="protecoes" className="mt-4"><SwitchingProtectionPanel /></TabsContent>
+            <TabsContent value="protecoes" className="mt-4 space-y-4">
+              {/* Chave de exibição — desligada por padrão, só para staff técnico. */}
+              <TechnicalDisplaySettings />
+              <SwitchingProtectionPanel />
+            </TabsContent>
           )}
           <TabsContent value="fazenda" className="mt-4"><FazendaContent /></TabsContent>
           <TabsContent value="temporizadores" className="mt-4"><TimersConfig /></TabsContent>

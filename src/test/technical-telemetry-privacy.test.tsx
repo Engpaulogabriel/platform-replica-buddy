@@ -13,8 +13,17 @@ vi.mock("@/contexts/MasterManagerContext", () => ({ usePermission: () => true })
 // ── Banco falso: controla APENAS quem está em platform_admins/platform_support.
 const membership = { admin: false, support: false };
 vi.mock("@/contexts/AuthContext", () => ({ useAuth: () => ({ user: { id: "u1" } }) }));
+vi.mock("@/lib/realtimeKillSwitch", () => ({
+  getRealtimeChannel: () => ({ on: () => ({ subscribe: () => ({}) }) }),
+  removeRealtimeChannel: async () => {},
+}));
 vi.mock("@/integrations/supabase/client", () => ({
   supabase: {
+    // Este arquivo isola a dimensão PERMISSÃO. A chave "Exibir tempos técnicos"
+    // fica LIGADA aqui de propósito, para provar que, mesmo ligada, quem não é
+    // staff técnico continua sem ver nada. O padrão desligado é coberto em
+    // technical-times-key.test.tsx.
+    rpc: async () => ({ data: true, error: null }),
     from: (table: string) => ({
       select: () => ({
         eq: () => ({

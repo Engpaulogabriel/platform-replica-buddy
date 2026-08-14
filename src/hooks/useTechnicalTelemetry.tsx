@@ -15,19 +15,26 @@
 //
 // FALHA FECHADA: enquanto carrega, e em qualquer erro, o valor é `false`. Se a
 // consulta falhar, o usuário comum não passa a ver dado técnico por acidente.
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getRealtimeChannel, removeRealtimeChannel } from "@/lib/realtimeKillSwitch";
 import { useAuth } from "@/contexts/AuthContext";
 
 export interface TechnicalTelemetryAccess {
   /** true SOMENTE para platform_admin ou técnico cadastrado em platform_support. */
   canViewTechnicalTelemetry: boolean;
+  /** Chave "Exibir tempos técnicos nos cards". DESLIGADA por padrão. */
+  showTechnicalTimes: boolean;
   loading: boolean;
+  /** Liga/desliga a chave. Só funciona para staff técnico. */
+  setShowTechnicalTimes: (v: boolean) => Promise<void>;
 }
 
 const FAIL_CLOSED: TechnicalTelemetryAccess = {
   canViewTechnicalTelemetry: false,
+  showTechnicalTimes: false,
   loading: true,
+  setShowTechnicalTimes: async () => {},
 };
 
 const Ctx = createContext<TechnicalTelemetryAccess>(FAIL_CLOSED);
@@ -38,36 +45,69 @@ const Ctx = createContext<TechnicalTelemetryAccess>(FAIL_CLOSED);
  */
 export function TechnicalTelemetryProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
-  const [state, setState] = useState<TechnicalTelemetryAccess>(FAIL_CLOSED);
+  const [canView, setCanView] = useState(false);
+  const [showTimes, setShowTimes] = useState(false);   // DESLIGADA por padrão
+  const [loading, setLoading] = useState(true);
+
+  // Escrita: valida o papel no servidor e atualiza a tela na hora (sem F5).
+  const setShowTechnicalTimes = useCallback(async (v: boolean) => {
+    if (!user?.id) return;
+    const { error } = await supabase.rpc("set_technical_display_pref", { _show: v });
+    if (error) throw error;
+    setShowTimes(v);
+  }, [user?.id]);
 
   useEffect(() => {
     let cancelled = false;
     if (!user?.id) {
-      setState({ canViewTechnicalTelemetry: false, loading: false });
+      setCanView(false); setShowTimes(false); setLoading(false);
       return;
     }
-    setState(FAIL_CLOSED);
+    setCanView(false); setShowTimes(false); setLoading(true);
+
     (async () => {
       try {
         // platform_admin OU técnico. As duas tabelas deixam o próprio usuário
         // ler a própria linha (policy `user_id = auth.uid()`).
-        const [admin, support] = await Promise.all([
+        const [admin, support, pref] = await Promise.all([
           supabase.from("platform_admins").select("user_id").eq("user_id", user.id).maybeSingle(),
           supabase.from("platform_support").select("user_id").eq("user_id", user.id).maybeSingle(),
+          supabase.rpc("get_technical_display_pref"),
         ]);
         if (cancelled) return;
-        setState({
-          canViewTechnicalTelemetry: Boolean(admin.data) || Boolean(support.data),
-          loading: false,
-        });
+        setCanView(Boolean(admin.data) || Boolean(support.data));
+        setShowTimes(pref.data === true);
+        setLoading(false);
       } catch {
-        if (!cancelled) setState({ canViewTechnicalTelemetry: false, loading: false });
+        if (!cancelled) { setCanView(false); setShowTimes(false); setLoading(false); }
       }
     })();
     return () => { cancelled = true; };
   }, [user?.id]);
 
-  return <Ctx.Provider value={state}>{children}</Ctx.Provider>;
+  // A chave muda sem F5, inclusive em outra aba do mesmo usuário.
+  useEffect(() => {
+    if (!user?.id) return;
+    const ch = getRealtimeChannel(`tdp:${user.id}`)
+      ?.on("postgres_changes",
+        { event: "*", schema: "public", table: "technical_display_prefs",
+          filter: `user_id=eq.${user.id}` },
+        (payload: { new?: { show_technical_times?: boolean } }) => {
+          setShowTimes(payload.new?.show_technical_times === true);
+        })
+      .subscribe();
+    return () => { if (ch) removeRealtimeChannel(ch); };
+  }, [user?.id]);
+
+  const value: TechnicalTelemetryAccess = {
+    canViewTechnicalTelemetry: canView,
+    // A chave só vale para quem tem permissão. Cliente com linha ligada
+    // continua sem ver nada — as duas condições precisam ser verdadeiras.
+    showTechnicalTimes: canView && showTimes,
+    loading,
+    setShowTechnicalTimes,
+  };
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
 /** Acesso completo (inclui `loading`). */
@@ -81,6 +121,15 @@ export function useTechnicalTelemetryAccess(): TechnicalTelemetryAccess {
  */
 export function useCanViewTechnicalTelemetry(): boolean {
   return useContext(Ctx).canViewTechnicalTelemetry;
+}
+
+/**
+ * Tempos técnicos (idade da leitura, "sem comunicação há X", contadores).
+ * Exige as DUAS coisas: ser staff técnico E ter a chave ligada. Falso por
+ * padrão, para todo mundo, inclusive platform_admin.
+ */
+export function useShowTechnicalTimes(): boolean {
+  return useContext(Ctx).showTechnicalTimes;
 }
 
 export default useCanViewTechnicalTelemetry;
