@@ -199,19 +199,12 @@ export function useCadastrosCloud() {
     reloadDebounceRef.current = setTimeout(() => { void refresh(); }, 250);
   }, [refresh]);
 
-  // Refetch ao voltar para a aba/janela ou recuperar conexão
-  useEffect(() => {
-    const onFocus = () => { if (document.visibilityState === "visible") void refresh(); };
-    const onOnline = () => { void refresh(); };
-    window.addEventListener("visibilitychange", onFocus);
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("online", onOnline);
-    return () => {
-      window.removeEventListener("visibilitychange", onFocus);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("online", onOnline);
-    };
-  }, [refresh]);
+  // NOTA: os listeners de visibilitychange/focus/online que existiam AQUI foram
+  // consolidados no efeito de boot abaixo (visibilityHandler). Aquele conjunto só
+  // chamava refresh(); o consolidado também RE-INSCREVE o canal quando ele não
+  // está `joined` — que é o caso do Safari com a aba suspensa, em que o socket
+  // morre sem emitir CLOSED. Manter os dois causava refresh duplicado a cada
+  // retorno de aba.
 
   // Boot: pega farm + role + dados + assina realtime (com reconexão automática + poller fallback)
   useEffect(() => {
