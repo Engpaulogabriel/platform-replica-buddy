@@ -49,6 +49,9 @@ export interface AutomationLogEntry {
   /** Resultado do comando. Comandos "Manual" (acionamento físico no equipamento)
    *  nunca falham. Por padrão, sucesso. */
   result?: "success" | "fail";
+  /** Método de confirmação FÍSICA (ex.: "Confirmado por telemetria RF").
+   *  Detalhe técnico — vai em tooltip, NUNCA na coluna Usuário. */
+  confirmationMethod?: string | null;
   /** true = já confirmado pela nuvem (insert OK ou veio via Realtime). */
   synced?: boolean;
 }
@@ -285,8 +288,38 @@ const originFromDb = (o: DbOrigin): AutomationOrigin =>
 const actionToDb = (a: AutomationAction): DbAction =>
   a === "Ligada" ? "turn_on" : "turn_off";
 
+/** Rótulos que descrevem o MÉTODO DE CONFIRMAÇÃO FÍSICA, não um ator humano.
+ *  "Telemetria RF" é como o servidor soube que a bomba mudou — nunca quem mandou.
+ *  Nenhum destes pode aparecer na coluna Usuário. */
+const TECHNICAL_ACTOR_PATTERNS = [
+  "telemetria rf", "telemetria", "rf", "agent", "agente", "serial", "serial-bridge",
+  "bridge", "system", "sistema", "cloud", "auto-trigger",
+];
+
+/** true quando o texto é método técnico e não autoria humana. */
+export const isTechnicalActorLabel = (label?: string | null): boolean => {
+  const s = String(label ?? "").trim().toLowerCase();
+  if (!s) return false;
+  return TECHNICAL_ACTOR_PATTERNS.some((p) => s === p || s.startsWith(`${p} `) || s.startsWith(`${p}-`));
+};
+
+/** Método de confirmação física, para tooltip/detalhe — nunca para a coluna Usuário. */
+export const resolveConfirmationMethod = (r: DbRow): string | null => {
+  const label = (r as DbRow & { actor_label?: string | null }).actor_label;
+  if (isTechnicalActorLabel(label)) {
+    if (String(label).trim().toLowerCase().startsWith("telemetria")) return "Confirmado por telemetria RF";
+    return `Confirmado por ${String(label).trim()}`;
+  }
+  const src = (r.source_device ?? "").toLowerCase();
+  if (src === "serial-bridge") return "Confirmado por telemetria RF";
+  if (src === "auto-trigger") return "Confirmado por telemetria RF";
+  return null;
+};
+
+/** actor_label HUMANO. Rótulo técnico é descartado aqui, não na renderização. */
 const getActorLabel = (r: DbRow): string | null => {
   const actorLabel = (r as DbRow & { actor_label?: string | null }).actor_label;
+  if (isTechnicalActorLabel(actorLabel)) return null;
   return actorLabel && actorLabel.trim() ? actorLabel.trim() : null;
 };
 
@@ -326,6 +359,12 @@ const resolveUser = (r: DbRow): string => {
     return "Automação";
   }
   if (src === "agent-restart" || src === "ota-update") return "Agente";
+
+  // REMOTO sem autoria humana recuperada: a coluna Usuário NUNCA recebe o método
+  // técnico ("Telemetria RF" e afins). Fica "Em apuração" até o backfill preencher
+  // user_id/actor_label — e aí o nome aparece sozinho, sem mudança de código.
+  if (r.origin === "remote") return "Em apuração";
+
   if (r.origin === "local") return "Local (painel)";
   return "Sistema";
 };
@@ -396,6 +435,7 @@ const rowToEntry = (r: DbRow): AutomationLogEntry => {
     origin,
     user: resolveUser(r),
     result: (["fail", "failed", "timeout", "error"].includes(String(r.result)) ? "fail" : "success"),
+    confirmationMethod: resolveConfirmationMethod(r),
     synced: true,
   };
 };

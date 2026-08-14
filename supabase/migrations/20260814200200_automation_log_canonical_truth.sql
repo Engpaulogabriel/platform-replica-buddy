@@ -93,6 +93,16 @@ $$;
 -- Quem tem a evidência mais forte sobre QUEM causou a transição.
 --   4 remoto/WhatsApp com usuário identificado · 3 automação · 2 local (TX
 --   espontâneo) · 1 telemetria/sistema/leitura (sem autoria).
+-- ── 3.0) RÓTULO TÉCNICO ≠ ATOR HUMANO ───────────────────────────────────────
+-- 'Telemetria RF' descreve COMO o servidor soube que a bomba mudou, não QUEM
+-- mandou. Preservá-lo num COALESCE fazia o método técnico aparecer na coluna
+-- Usuário do relatório. Nunca pode ser tratado como autoria.
+CREATE OR REPLACE FUNCTION public.is_technical_actor_label(_label text)
+RETURNS boolean LANGUAGE sql IMMUTABLE SET search_path = public AS $$
+  SELECT lower(btrim(COALESCE(_label,''))) ~
+         '^(telemetria|telemetria rf|rf|agent|agente|serial|serial-bridge|bridge|system|sistema|cloud|auto-trigger)([ -].*)?$';
+$$;
+
 CREATE OR REPLACE FUNCTION public.automation_attribution_rank(
   _origin public.event_origin, _user_id uuid, _source_device text, _actor text)
 RETURNS int LANGUAGE sql IMMUTABLE SET search_path = public AS $$
@@ -263,7 +273,13 @@ BEGIN
          SET origin          = NEW.origin,
              user_id         = COALESCE(NEW.user_id, user_id),
              user_email      = COALESCE(NEW.user_email, user_email),
-             actor_label     = COALESCE(NEW.actor_label, actor_label),
+             -- rótulo técnico ('Telemetria RF') NUNCA sobrevive como autoria
+             actor_label     = CASE
+                                 WHEN NEW.actor_label IS NOT NULL
+                                      AND NOT public.is_technical_actor_label(NEW.actor_label)
+                                   THEN NEW.actor_label
+                                 WHEN public.is_technical_actor_label(actor_label) THEN NULL
+                                 ELSE actor_label END,
              source_device   = COALESCE(NEW.source_device, source_device),
              client_event_id = COALESCE(client_event_id, NEW.client_event_id),
              details         = COALESCE(details, '{}'::jsonb)
@@ -474,7 +490,12 @@ UPDATE public.automation_log o
    SET origin        = a.origin,
        user_id       = COALESCE(a.user_id, o.user_id),
        user_email    = COALESCE(a.user_email, o.user_email),
-       actor_label   = COALESCE(a.actor_label, o.actor_label),
+       actor_label   = CASE
+                         WHEN a.actor_label IS NOT NULL
+                              AND NOT public.is_technical_actor_label(a.actor_label)
+                           THEN a.actor_label
+                         WHEN public.is_technical_actor_label(o.actor_label) THEN NULL
+                         ELSE o.actor_label END,
        source_device = COALESCE(a.source_device, o.source_device),
        result        = 'success'::public.event_result,
        details       = COALESCE(o.details, '{}'::jsonb) || jsonb_build_object(
@@ -566,6 +587,17 @@ SELECT farm_id, equipment_id, equipment_name, 'state_conflict', occurred_at,
   FROM public.automation_log
  WHERE (details->>'attribution_backfilled')::boolean IS TRUE
    AND (details->>'attribution_unavailable')::boolean IS TRUE;
+
+-- 7.3c SANEAMENTO DO RÓTULO: linhas que ficaram com método técnico no lugar do
+--      ator ("Telemetria RF" na coluna Usuário do relatório). O método vira
+--      details.confirmation_method e o ator fica NULL — o frontend mostra
+--      "Em apuração" até o backfill preencher a autoria real.
+UPDATE public.automation_log
+   SET actor_label = NULL,
+       details     = COALESCE(details, '{}'::jsonb)
+                     || jsonb_build_object('confirmation_method', actor_label)
+ WHERE action IN ('turn_on','turn_off','pump_on','pump_off')
+   AND public.is_technical_actor_label(actor_label);
 
 -- 7.4 Reaplica o cânone sobre a janela recompensada e reconcilia o estado.
 SELECT public.audit_automation_log_integrity(interval '30 days');

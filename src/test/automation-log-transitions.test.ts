@@ -431,6 +431,68 @@ describe("CASO REAL Semear 14/08 — 13 religamentos remotos voltam ao relatóri
 });
 
 // Atribuição por last_changed_by só vale quando o casamento com profiles é ÚNICO.
+// "Telemetria RF" confirma o ESTADO; nunca pode ocupar o lugar do ator.
+describe("Telemetria RF é método, nunca usuário", () => {
+  it("remote + Telemetria RF na linha física → usuário HUMANO preservado", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "07:19", on: true, origin: "system", actor: "Telemetria RF",
+      source: "serial-bridge", details: { origin: "remote-cmd" } });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "07:19", on: true, origin: "remote", user: USER_A, actor: "Paulo Gabriel" });
+
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("remote");
+    expect(a.actor_label).toBe("Paulo Gabriel");   // ator humano venceu
+    expect(a.user_id).toBe(USER_A);
+    expect(await official(db, POCO20)).toHaveLength(1);
+  });
+
+  it("comando remoto SEM ator não deixa 'Telemetria RF' virar autoria", async () => {
+    // trg_log_manual_command grava actor_label=NULL para remoto; o COALESCE
+    // antigo preservava o rótulo técnico da linha física — era o bug relatado.
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "08:00", on: true, origin: "system", actor: "Telemetria RF",
+      details: { origin: "remote-cmd" } });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "08:00", on: true, origin: "remote", user: USER_A, actor: null });
+
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("remote");
+    expect(a.user_id).toBe(USER_A);
+    expect(a.actor_label).toBeNull();              // NUNCA "Telemetria RF"
+  });
+
+  it("telemetria posterior NÃO sobrescreve user_id/actor_label já atribuídos", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "09:00", on: true, origin: "system", details: { origin: "remote-cmd" } });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "09:00", on: true, origin: "remote", user: USER_A, actor: "Paulo Gabriel" });
+    // nova telemetria do mesmo estado chegando depois (rank 1)
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "09:01", on: true, origin: "system", actor: "Telemetria RF", details: { origin: "remote-cmd" } });
+
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("remote");
+    expect(a.user_id).toBe(USER_A);
+    expect(a.actor_label).toBe("Paulo Gabriel");
+  });
+
+  it("backfill limpa 'Telemetria RF' que já ficou gravado como ator", async () => {
+    await db.exec(`ALTER TABLE public.automation_log DISABLE TRIGGER trg_enforce_automation_log_state_change`);
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "07:19", on: true, origin: "remote", actor: "Telemetria RF", details: { origin: "remote-cmd" } });
+    await db.exec(`ALTER TABLE public.automation_log ENABLE TRIGGER trg_enforce_automation_log_state_change`);
+
+    await db.exec(mig("20260814200200_automation_log_canonical_truth.sql"));
+
+    const r = await db.query<any>(
+      `SELECT actor_label, details->>'confirmation_method' metodo
+         FROM public.automation_log WHERE equipment_id='${POCO20}' AND noise_reason IS NULL`);
+    expect(r.rows[0].actor_label).toBeNull();               // saiu da coluna Usuário
+    expect(r.rows[0].metodo).toBe("Telemetria RF");         // virou detalhe técnico
+  });
+});
+
 describe("backfill por last_changed_by — só com casamento único", () => {
   const USER_B = "44444444-0000-0000-0000-00000000000b";
 

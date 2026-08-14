@@ -309,7 +309,13 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                         </div>
                         <div className="col-span-2">
                           <span className="block text-muted-foreground">Usuário</span>
-                          <span className="font-medium text-foreground">{getUserLabel(item.user)}</span>
+                          {/* só autoria humana; método físico vai no title */}
+                          <span className="font-medium text-foreground" title={item.confirmationMethod ?? undefined}>
+                            {getUserLabel(item.user)}
+                          </span>
+                          {item.confirmationMethod && (
+                            <span className="block text-[10px] text-muted-foreground">{item.confirmationMethod}</span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -350,9 +356,13 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                               </span>
                             </div>
                           </TableCell>
-                          <TableCell className="text-muted-foreground text-sm">
+                          {/* Coluna Usuário = SÓ autoria humana. O método de confirmação
+                              física ("Telemetria RF") vive no tooltip, nunca aqui. */}
+                          <TableCell className="text-muted-foreground text-sm" title={item.confirmationMethod ?? undefined}>
                             {getUserLabel(item.user) === "Sistema" ? (
                               <span className="text-warning font-medium">Sistema</span>
+                            ) : getUserLabel(item.user) === "Em apuração" ? (
+                              <span className="text-warning font-medium italic">Em apuração</span>
                             ) : (
                               <span className="text-foreground">{getUserLabel(item.user)}</span>
                             )}
