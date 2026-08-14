@@ -616,6 +616,10 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
             localAckAt: (e as { local_ack_at?: string | null }).local_ack_at ?? null,
             commandBlockedUntil: e.command_blocked_until ?? null,
             lastCommunication: e.last_communication,
+            commandLockUntil: (e as { command_lock_until?: string | null }).command_lock_until
+              ? new Date((e as { command_lock_until?: string }).command_lock_until!).getTime() : undefined,
+            lastConfirmedTransitionAt: (e as { last_confirmed_transition_at?: string | null }).last_confirmed_transition_at
+              ? new Date((e as { last_confirmed_transition_at?: string }).last_confirmed_transition_at!).getTime() : undefined,
             lastReading: formatTimestamp(e.last_communication),
             signalRF: online ? signalBarsToPercent(e.last_signal_bars) : 0,
             voltage: 0,
@@ -816,6 +820,10 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
             actuationOrigin: newActuationOrigin,
             commandBlockedUntil: newCommandBlockedUntil,
             lastCommunication: cloudEq.last_communication,
+            commandLockUntil: (cloudEq as { command_lock_until?: string | null }).command_lock_until
+              ? new Date((cloudEq as { command_lock_until?: string }).command_lock_until!).getTime() : undefined,
+            lastConfirmedTransitionAt: (cloudEq as { last_confirmed_transition_at?: string | null }).last_confirmed_transition_at
+              ? new Date((cloudEq as { last_confirmed_transition_at?: string }).last_confirmed_transition_at!).getTime() : undefined,
             lastReading: newLastReading,
             signalRF: newSignalRF,
             voltage: 0,

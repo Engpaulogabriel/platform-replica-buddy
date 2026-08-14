@@ -57,6 +57,11 @@ export interface Pump {
   commandUnconfirmedAt?: number;
   /** Marca temporal da última sincronização aceita — descarta evento atrasado. */
   lastSyncAt?: number;
+  /** Proteção de comutação: instante (ms) até quando novos comandos remotos são
+   *  recusados pelo SERVIDOR. Espelho de equipments.command_lock_until. */
+  commandLockUntil?: number;
+  /** Horário da última confirmação física de mudança de estado. */
+  lastConfirmedTransitionAt?: number;
   /**
    * timestamp (ms) de quando o usuário recebeu confirmação do comando manual.
    * Enquanto a nuvem não publicar uma `last_communication` posterior a este valor,

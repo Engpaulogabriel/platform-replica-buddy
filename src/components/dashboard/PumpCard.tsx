@@ -3,7 +3,7 @@
 // Extraído de PumpTable e envolto em React.memo com comparator por valor:
 // toggle/refresh em 1 bomba NÃO re-renderiza as outras 28.
 // ─────────────────────────────────────────────────────────────────────────────
-import { memo, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Switch } from "@/components/ui/switch";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -116,6 +116,25 @@ function PumpCardImpl(props: PumpCardProps) {
   // marca offline: timeout de comando significa "não confirmado", não "sem
   // comunicação". Some sozinho quando uma confirmação física nova chegar.
   const commandUnconfirmed = !!pump.commandUnconfirmedAt && !isTransitioning;
+
+  // ── Proteção de comutação (server-side) ───────────────────────────────────
+  // O card só ESPELHA equipments.command_lock_until, que chega por Realtime.
+  // O bloqueio real é do banco: o navegador nunca é a fonte de verdade.
+  // `tickNow` re-renderiza a cada segundo só enquanto a trava está ativa, para
+  // a contagem regressiva liberar sozinha, sem F5.
+  const lockUntil = pump.commandLockUntil ?? 0;
+  const [tickNow, setTickNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!lockUntil || Date.now() >= lockUntil) return;
+    const t = setInterval(() => setTickNow(Date.now()), 1_000);
+    return () => clearInterval(t);
+  }, [lockUntil]);
+  const lockSecondsLeft = lockUntil > tickNow ? Math.ceil((lockUntil - tickNow) / 1000) : 0;
+  const switchingLocked = lockSecondsLeft > 0;
+  const lastConfirmedLabel = pump.lastConfirmedTransitionAt
+    ? new Date(pump.lastConfirmedTransitionAt).toLocaleTimeString("pt-BR",
+        { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : null;
 
   const bg = maintIsBlue
     // AZUL = manutenção bloqueante (técnico/admin, maintenance_mode).
@@ -234,6 +253,17 @@ function PumpCardImpl(props: PumpCardProps) {
               ⏱ {minutesSinceComm}min
             </span>
           )}
+          {switchingLocked && (
+            <span
+              data-testid="switching-lock"
+              className="inline-flex items-center gap-1 text-[9px] font-medium tracking-wide px-1 py-0.5 rounded bg-muted text-muted-foreground border border-border shrink-0"
+              title={`Proteção de comutação: novos comandos remotos ficam bloqueados por alguns segundos após cada mudança confirmada.${lastConfirmedLabel ? ` Última confirmação às ${lastConfirmedLabel}.` : ""}`}
+            >
+              <Lock className="w-3 h-3" />
+              Proteção de comutação · {lockSecondsLeft}s
+              {lastConfirmedLabel ? ` · ${lastConfirmedLabel}` : ""}
+            </span>
+          )}
           {commandUnconfirmed && (
             <span
               className="text-[9px] font-medium tracking-wide px-1 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 shrink-0"
@@ -290,6 +320,8 @@ function PumpCardImpl(props: PumpCardProps) {
                   maintenanceActive ||
                   isOffline ||
                   inAutoMode ||
+                  // proteção de comutação: espelho do bloqueio server-side
+                  switchingLocked ||
                   pump.pending === "turning_off" ||
                   pump.pending === "resetting" ||
                   (!!pump.commandBlockedUntil && new Date(pump.commandBlockedUntil).getTime() > Date.now())
