@@ -114,6 +114,12 @@ interface State {
   sectors: CloudSector[];
   lastSyncAt: number | null;
   realtimeConnected: boolean;
+  /** Saúde da assinatura para o indicador técnico (não afeta bomba alguma):
+   *  connected = recebendo; reconnecting = caiu e está tentando;
+   *  degraded = não foi possível restabelecer após várias tentativas. */
+  realtimeHealth: "connected" | "reconnecting" | "degraded";
+  /** Horário da última leitura FÍSICA aplicada (mudança em equipments). */
+  lastPhysicalReadAt: number | null;
 }
 
 const MAX_SAIDAS = 6;
@@ -151,6 +157,8 @@ export function useCadastrosCloud() {
     sectors: [],
     lastSyncAt: null,
     realtimeConnected: false,
+    realtimeHealth: "reconnecting",
+    lastPhysicalReadAt: null,
   });
 
   const farmIdRef = useRef<string | null>(null);
@@ -211,7 +219,7 @@ export function useCadastrosCloud() {
     let channel: ReturnType<typeof supabase.channel> | null = null;
     let broadcastChannel: ReturnType<typeof supabase.channel> | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let fallbackPoller: ReturnType<typeof setInterval> | null = null;
+    let visibilityHandler: (() => void) | null = null;
     let reconnectAttempts = 0;
 
     const handleEquipmentChange = (payload: any) => {
@@ -238,12 +246,16 @@ export function useCadastrosCloud() {
           const merged = { ...s.equipments[idx], ...next };
           const arr = s.equipments.slice();
           arr[idx] = merged;
-          return { ...s, equipments: arr, lastSyncAt: Date.now() };
+          return { ...s, equipments: arr, lastSyncAt: Date.now(), lastPhysicalReadAt: Date.now() };
         });
       } else {
         scheduleReload();
       }
     };
+
+    // Após esta quantidade de tentativas sem sucesso, o indicador passa a
+    // "Dados podem estar atrasados". A reinscrição continua tentando.
+    const MAX_RECONNECT_BEFORE_DEGRADED = 4;
 
     const subscribePostgresChanges = (farmId: string) => {
       if (cancelled) return;
@@ -256,7 +268,11 @@ export function useCadastrosCloud() {
         .subscribe((status) => {
           if (cancelled) { try { void supabase.removeChannel(ch); } catch { /* ignore */ } return; }
           const ok = status === "SUBSCRIBED";
-          setState((s) => (s.realtimeConnected === ok ? s : { ...s, realtimeConnected: ok }));
+          setState((s) => (s.realtimeConnected === ok && s.realtimeHealth === (ok ? "connected" : s.realtimeHealth)
+            ? s
+            : { ...s, realtimeConnected: ok,
+                realtimeHealth: ok ? "connected"
+                  : (reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED ? "degraded" : "reconnecting") }));
           if (ok) {
             reconnectAttempts = 0;
             // Sincroniza estado pós-reconexão
@@ -265,6 +281,10 @@ export function useCadastrosCloud() {
             // Reconexão com backoff exponencial: 2s, 4s, 8s, 16s, máx 30s
             const delay = Math.min(2000 * Math.pow(2, reconnectAttempts), 30_000);
             reconnectAttempts += 1;
+            setState((s) => {
+              const h = reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED ? "degraded" : "reconnecting";
+              return s.realtimeHealth === h ? s : { ...s, realtimeHealth: h };
+            });
             if (import.meta.env.DEV) {
               console.warn(`[useCadastrosCloud] realtime ${status} — reconectando em ${delay}ms (tentativa ${reconnectAttempts})`);
             }
@@ -283,7 +303,7 @@ export function useCadastrosCloud() {
 
     const boot = async () => {
       if (!user) {
-        setState({ loading: false, error: null, farmId: null, isAdmin: false, plcs: [], equipments: [], sectors: [], lastSyncAt: null, realtimeConnected: false });
+        setState({ loading: false, error: null, farmId: null, isAdmin: false, plcs: [], equipments: [], sectors: [], lastSyncAt: null, realtimeConnected: false, realtimeHealth: "reconnecting", lastPhysicalReadAt: null });
         return;
       }
       try {
@@ -368,21 +388,39 @@ export function useCadastrosCloud() {
                   last_outputs_state: p.outputs ?? arr[idx].last_outputs_state,
                   last_communication: p.timestamp ?? arr[idx].last_communication,
                 };
-                return { ...s, equipments: arr, lastSyncAt: Date.now() };
+                return { ...s, equipments: arr, lastSyncAt: Date.now(), lastPhysicalReadAt: Date.now() };
               });
             })
             .subscribe();
           broadcastChannel = bch;
           if (cancelled) { try { void supabase.removeChannel(bch); } catch { /* ignore */ } broadcastChannel = null; }
 
-          // Poller de segurança (fallback): refetch leve a cada 60s.
-          // Realtime (postgres_changes + broadcast) é o canal primário; este
-          // poll só existe p/ o caso do WebSocket cair em rede instável.
-          fallbackPoller = setInterval(() => {
+          // ── Safari/aba em segundo plano ───────────────────────────────────
+          // O WebSocket costuma ser suspenso quando a aba sai de foco; ao voltar,
+          // eventos perdidos NÃO chegam sozinhos — era isso que obrigava o F5.
+          // Ao retornar: reconcilia UMA vez a fazenda ativa e, se o canal não
+          // estiver conectado, reinscreve. Sem reload e sem polling.
+          let lastWake = 0;
+          visibilityHandler = () => {
             if (cancelled) return;
-            if (document.visibilityState !== "visible") return;
-            void refresh();
-          }, 60_000);
+            if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+            const now = Date.now();
+            if (now - lastWake < 1_000) return;   // coalescing: visibility + focus juntos
+            lastWake = now;
+            void refresh();                        // reconciliação única da fazenda ativa
+            const st = (channel as { state?: string } | null)?.state;
+            if (st !== "joined") subscribePostgresChanges(farmId);   // sem duplicar canal
+          };
+          if (typeof document !== "undefined") {
+            document.addEventListener("visibilitychange", visibilityHandler);
+            window.addEventListener("focus", visibilityHandler);
+            window.addEventListener("online", visibilityHandler);
+          }
+
+          // POLLING DE REDE REMOVIDO. Antes havia um setInterval de 60s chamando
+          // refresh() — polling contínuo de API. A recuperação agora é por EVENTO:
+          // reconexão do canal (SUBSCRIBED), retorno da aba (visibilitychange/
+          // focus), volta da internet (online) e timeout de um comando específico.
         } catch (subErr) {
           console.warn("[useCadastrosCloud] realtime subscribe falhou:", subErr);
         }
@@ -395,7 +433,11 @@ export function useCadastrosCloud() {
     return () => {
       cancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (fallbackPoller) clearInterval(fallbackPoller);
+      if (visibilityHandler && typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", visibilityHandler);
+        window.removeEventListener("focus", visibilityHandler);
+        window.removeEventListener("online", visibilityHandler);
+      }
       if (channel) { try { void supabase.removeChannel(channel); } catch { /* ignore */ } }
       if (broadcastChannel) { try { void supabase.removeChannel(broadcastChannel); } catch { /* ignore */ } }
       if (reloadDebounceRef.current) clearTimeout(reloadDebounceRef.current);
