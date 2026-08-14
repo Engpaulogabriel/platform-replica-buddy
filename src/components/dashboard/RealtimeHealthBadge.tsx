@@ -3,7 +3,7 @@
 // nenhuma bomba. Serve para o operador técnico saber se a tela está recebendo
 // leitura ao vivo, sem precisar apertar F5 para descobrir.
 import { Radio, RefreshCw, AlertTriangle } from "lucide-react";
-import { useFarmAccess } from "@/hooks/useFarmAccess";
+import { useCanViewTechnicalTelemetry } from "@/hooks/useTechnicalTelemetry";
 
 export type RealtimeHealth = "connected" | "reconnecting" | "degraded";
 
@@ -19,9 +19,11 @@ const hhmm = (ts?: number | null) =>
   ts ? new Date(ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : null;
 
 export function RealtimeHealthBadge({ health, lastPhysicalReadAt, forceVisible }: RealtimeHealthBadgeProps) {
-  const { role } = useFarmAccess();
-  const canSee = forceVisible || role === "platform_admin" || role === "owner";
-  if (!canSee) return null;
+  // Status do Realtime é diagnóstico técnico: platform_admin e técnico apenas.
+  // `owner` foi REMOVIDO daqui — administrador de fazenda não vê saúde de
+  // conexão nem horário de leitura.
+  const canSee = useCanViewTechnicalTelemetry();
+  if (!forceVisible && !canSee) return null;
 
   const t = hhmm(lastPhysicalReadAt);
 

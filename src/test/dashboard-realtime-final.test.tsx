@@ -97,14 +97,14 @@ describe("badge montado no header do Dashboard", () => {
 
   it("visível para admin, oculto para operador", async () => {
     vi.resetModules();
-    vi.doMock("@/hooks/useFarmAccess", () => ({ useFarmAccess: () => ({ role: "platform_admin" }) }));
+    vi.doMock("@/hooks/useTechnicalTelemetry", () => ({ useCanViewTechnicalTelemetry: () => true }));
     const { RealtimeHealthBadge: A } = await import("@/components/dashboard/RealtimeHealthBadge");
     const { unmount } = render(<A health="connected" lastPhysicalReadAt={Date.now()} />);
     expect(screen.getByTestId("realtime-health")).toBeTruthy();
     unmount();
 
     vi.resetModules();
-    vi.doMock("@/hooks/useFarmAccess", () => ({ useFarmAccess: () => ({ role: "operator" }) }));
+    vi.doMock("@/hooks/useTechnicalTelemetry", () => ({ useCanViewTechnicalTelemetry: () => false }));
     const { RealtimeHealthBadge: B } = await import("@/components/dashboard/RealtimeHealthBadge");
     render(<B health="connected" />);
     expect(screen.queryByTestId("realtime-health")).toBeNull();

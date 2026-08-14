@@ -5,6 +5,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-route
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { logActivity, setUserTag } from "@/lib/securityClient";
 import { MasterManagerProvider } from "@/contexts/MasterManagerContext";
+import { TechnicalTelemetryProvider } from "@/hooks/useTechnicalTelemetry";
 import { LanguageProvider } from "@/contexts/LanguageContext";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { PlanProvider } from "@/contexts/PlanContext";
@@ -112,6 +113,10 @@ const App = () => {
             <PlanProvider>
               <BrowserRouter>
                 <AuthProvider>
+                  {/* Resolve UMA vez quem pode ver telemetria técnica (platform_admin
+                      ou técnico em platform_support). Falha fechada: sem isso,
+                      ninguém vê tempo de comunicação. */}
+                  <TechnicalTelemetryProvider>
                   <MasterManagerProvider>
                   <UserOnlineProvider>
                   <NoInternetBanner />
@@ -155,6 +160,7 @@ const App = () => {
                   </NotificationProvider>
                   </UserOnlineProvider>
                   </MasterManagerProvider>
+                  </TechnicalTelemetryProvider>
                 </AuthProvider>
 
               </BrowserRouter>

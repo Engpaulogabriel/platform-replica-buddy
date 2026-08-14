@@ -7,7 +7,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { Switch } from "@/components/ui/switch";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
-  Droplets, Bot, AlertTriangle, Signal, XCircle, RotateCcw, RefreshCw,
+  Droplets, Bot, AlertTriangle, Signal, XCircle, RotateCcw, RefreshCw, MoreHorizontal,
   CheckCircle2, MapPin, Layers, Tractor, Zap, ZapOff, MessageCircle, Lock,
   Hand, Info, Wrench,
 } from "lucide-react";
@@ -21,6 +21,7 @@ import { notify } from "@/lib/notify";
 
 import { LazyVisible } from "@/components/LazyVisible";
 import { usePermission } from "@/contexts/MasterManagerContext";
+import { useCanViewTechnicalTelemetry } from "@/hooks/useTechnicalTelemetry";
 import type { Pump } from "./PumpTable";
 
 
@@ -91,10 +92,21 @@ function PumpCardImpl(props: PumpCardProps) {
   const maintIsBlue = !!inMaintenance;
   const maintIsYellow = !inMaintenance && !!maint;
   const inMaint = maintIsBlue || maintIsYellow; // usado só para suprimir o glow
-  // TEMPO TÉCNICO REMOVIDO DO CARD OPERACIONAL. Minutos desde a última
-  // comunicação, horários de leitura e latência não são informação de operação:
-  // poluem o card e expõem diagnóstico a qualquer usuário. Diagnóstico de tempo
-  // vive no Setor Técnico (platform_admin/owner), fora daqui.
+  // ── TEMPO TÉCNICO: SOMENTE platform_admin E TÉCNICO ───────────────────────
+  // Minutos desde a última comunicação, horário de leitura, latência, RX/TX e
+  // barras de sinal são DIAGNÓSTICO, não operação. Só quem é `platform_admins`
+  // ou `platform_support` enxerga. Para todos os demais (owner, admin de
+  // fazenda, supervisor, gestor, operador, viewer) o elemento NÃO É CRIADO no
+  // DOM — não é escondido por CSS, não existe title nem aria-label.
+  //
+  // A cor Offline continua igual para todo mundo: quem decide é
+  // `pump.communicationStatus`, calculado pela regra real de 15 minutos. O que
+  // some é o NÚMERO, nunca o estado.
+  const canViewTechnical = useCanViewTechnicalTelemetry();
+  const minutesSinceComm =
+    canViewTechnical && pump.lastCommunication
+      ? Math.max(0, Math.floor((Date.now() - new Date(pump.lastCommunication).getTime()) / 60_000))
+      : null;
 
   // ── Badge de origem LOCAL ─────────────────────────────────────────────────
   // Só em estado ESTÁVEL: NUNCA durante uma transição (Ligando/Desligando). Um pump
@@ -237,9 +249,26 @@ function PumpCardImpl(props: PumpCardProps) {
           {isOffline && (
             <span
               className="text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded bg-destructive/20 text-destructive border border-destructive/50 shrink-0"
-              title="Sem comunicação com o equipamento."
+              // O title só ganha tempo para admin/técnico. Para os demais fica a
+              // frase operacional pura, sem minutos e sem horário.
+              title={
+                minutesSinceComm != null
+                  ? `Sem comunicação há ${minutesSinceComm} min.`
+                  : "Sem comunicação com o equipamento."
+              }
             >
               ⚠️ Offline
+            </span>
+          )}
+          {/* Idade da leitura: EXCLUSIVO de platform_admin e técnico. Para
+              qualquer outro perfil este elemento não chega a existir. */}
+          {canViewTechnical && minutesSinceComm != null && !isOffline && (
+            <span
+              data-testid="technical-comm-age"
+              className="text-[9px] font-medium tabular-nums px-1 py-0.5 rounded bg-muted text-muted-foreground border border-border shrink-0"
+              title={`Diagnóstico técnico: sem nova comunicação há ${minutesSinceComm} min.`}
+            >
+              ⏱ {minutesSinceComm}min
             </span>
           )}
           {switchingLocked && (
@@ -325,8 +354,11 @@ function PumpCardImpl(props: PumpCardProps) {
       </div>
       <div className="flex items-center gap-2 h-4">
         <div className="flex items-center gap-2">
-          {pump.signalRF != null && (
+          {/* Barras de sinal RF são diagnóstico de rádio — na lista de dados
+              técnicos restritos. Perfil comum não renderiza o elemento. */}
+          {canViewTechnical && pump.signalRF != null && (
             <span
+              data-testid="technical-signal-rf"
               className="flex items-center gap-1"
               title={
                 isOffline
@@ -358,44 +390,25 @@ function PumpCardImpl(props: PumpCardProps) {
           )}
           <Popover>
             <PopoverTrigger asChild>
+              {/* ÍCONE DE CARREGAMENTO/REFRESH REMOVIDO DO CARD.
+                  Antes este botão era um RefreshCw que mudava de cor conforme o
+                  estado da COMUNICAÇÃO — e em `isUnstable` ficava AZUL
+                  (`text-info`, hue 210). Numa fazenda com latência isso pintava
+                  vários poços de azul, invadindo a cor que pertence só à
+                  manutenção técnica, e ainda expunha polling como estado visual.
+
+                  Agora é um acesso neutro aos detalhes: sem spinner, sem
+                  animação, sem semântica de cor. `refreshing`/`refreshResult`
+                  continuam existindo como ESTADO INTERNO e aparecem apenas
+                  dentro do popover, que o usuário abre por vontade própria. */}
               <button
                 onClick={(e) => e.stopPropagation()}
-                className={`flex items-center shrink-0 transition-colors hover:text-primary ${
-                  isOffline
-                    ? "text-muted-foreground"
-                    : refreshing
-                      ? lastFailed ? "text-destructive" : "text-warning"
-                      : refreshResult === "success"
-                        ? "text-primary"
-                        : refreshResult === "fail" || lastFailed
-                          ? "text-destructive"
-                          : isUnstable
-                            ? "text-info"
-                            : "text-primary"
-                }`}
-                title={
-                  refreshing
-                    ? "Atualizando leitura da bomba..."
-                    : refreshResult === "success"
-                      ? "Leitura confirmada com sucesso"
-                      : refreshResult === "fail" || lastFailed
-                        ? "Falha na última leitura — clique para tentar novamente"
-                        : "Atualizar status (faz nova leitura na bomba)"
-                }
+                data-testid="pump-details-trigger"
+                className="flex items-center shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+                title="Ver detalhes do poço"
+                aria-label="Ver detalhes do poço"
               >
-                {/* Spinner do ícone de refresh SÓ no refresh MANUAL (não em pending/
-                    transição). A transição "Ligando…/Desligando…" é mostrada como
-                    TEXTO (span pendingLabel abaixo), não como spinner eterno — assim
-                    o desligamento forçado não deixa o ícone girando para sempre. */}
-                {refreshing ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : refreshResult === "success" ? (
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                ) : refreshResult === "fail" || lastFailed ? (
-                  <AlertTriangle className="w-3.5 h-3.5 animate-pulse" />
-                ) : (
-                  <RefreshCw className="w-3.5 h-3.5" />
-                )}
+                <MoreHorizontal className="w-3.5 h-3.5" />
               </button>
             </PopoverTrigger>
             <PopoverContent side="top" align="end" className="w-[320px] p-0 text-xs overflow-hidden">
@@ -552,7 +565,7 @@ function PumpCardImpl(props: PumpCardProps) {
             )}
             {showTech && (
               <span
-                className="flex items-center gap-0.5 px-1 py-0 rounded bg-sky-500/20 text-sky-600 dark:text-sky-400 font-bold text-[9px] uppercase tracking-wide border border-sky-500/40 shrink-0"
+                className="flex items-center gap-0.5 px-1 py-0 rounded bg-secondary text-secondary-foreground font-bold text-[9px] uppercase tracking-wide border border-border shrink-0"
                 title="Acionado pelo Suporte Técnico (Terminal Serial) — não é a botoeira local"
                 aria-label="Acionado pelo suporte técnico"
               >
@@ -572,7 +585,7 @@ function PumpCardImpl(props: PumpCardProps) {
             )}
             {inAutoMode && !isOffline && (
               <span
-                className="flex items-center gap-0.5 px-1 py-0 rounded bg-info/20 text-info font-bold text-[9px] uppercase tracking-wide border border-info/40 shrink-0"
+                className="flex items-center gap-0.5 px-1 py-0 rounded bg-secondary text-secondary-foreground font-bold text-[9px] uppercase tracking-wide border border-border shrink-0"
                 title="Bomba em modo Automático — controlada por programação"
                 aria-label="Modo automático"
               >

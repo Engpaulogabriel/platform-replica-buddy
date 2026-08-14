@@ -5,7 +5,7 @@ import { render, screen, act } from "@testing-library/react";
 import fs from "node:fs"; import path from "node:path";
 import { RealtimeHealthBadge } from "@/components/dashboard/RealtimeHealthBadge";
 
-vi.mock("@/hooks/useFarmAccess", () => ({ useFarmAccess: () => ({ role: "platform_admin" }) }));
+vi.mock("@/hooks/useTechnicalTelemetry", () => ({ useCanViewTechnicalTelemetry: () => true }));
 
 const REPO = path.resolve(__dirname, "../..");
 const CAD = fs.readFileSync(path.join(REPO, "src/hooks/useCadastrosCloud.ts"), "utf8");
@@ -120,7 +120,7 @@ describe("indicador técnico", () => {
 
   it("não renderiza nada para quem não é admin/owner", async () => {
     vi.resetModules();
-    vi.doMock("@/hooks/useFarmAccess", () => ({ useFarmAccess: () => ({ role: "operator" }) }));
+    vi.doMock("@/hooks/useTechnicalTelemetry", () => ({ useCanViewTechnicalTelemetry: () => false }));
     const { RealtimeHealthBadge: Badge } = await import("@/components/dashboard/RealtimeHealthBadge");
     render(<Badge health="connected" />);
     expect(screen.queryByTestId("realtime-health")).toBeNull();
