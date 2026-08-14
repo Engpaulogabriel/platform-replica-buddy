@@ -356,7 +356,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
     try {
       const { data, error } = await supabase
         .from("equipments")
-        .select("id,last_outputs_state,last_communication,desired_running,pending_command_id,last_actuation_origin,updated_at")
+        .select("id,last_outputs_state,last_communication,desired_running,last_actuation_origin,updated_at")
         .in("id", unique);
       if (error || !data) return;
       setPumps((prev) => {
@@ -515,7 +515,15 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
               running = cloudRunning;
             }
 
-          } else if (cloudRunning === desiredRunning && !manualCmdFresh) {
+          } else if (cloudRunning === desiredRunning) {
+            // CONFIRMAÇÃO FÍSICA VENCE SEMPRE — correção do sintoma 4.
+            // Antes havia `&& !manualCmdFresh` aqui: mesmo com a bomba já
+            // confirmando o estado pedido, a pendência NÃO era limpa enquanto a
+            // linha em `commands` seguisse pending/sent (até 120s). Era por isso
+            // que o toast "status atualizado (resposta real da bomba)"
+            // (PumpTable.tsx:229, disparado pela mudança de last_communication)
+            // aparecia com o card ainda preso em "Desligando…". O anti-oscilação
+            // de leitura intermediária já é feito por applyConfirmedOffLatch.
             // ✅ Realidade física JÁ alcançou o desejo → libera de imediato.
             // Exceção: se existe comando manual fresh na tabela `commands`
             // (pending/sent, <90s), NÃO liberamos — o Electron pode estar
@@ -670,7 +678,15 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
                 pending = undefined;
                 running = cloudRunning;
               }
-            } else if (cloudRunning === desiredRunning && !manualCmdFresh) {
+            } else if (cloudRunning === desiredRunning) {
+            // CONFIRMAÇÃO FÍSICA VENCE SEMPRE — correção do sintoma 4.
+            // Antes havia `&& !manualCmdFresh` aqui: mesmo com a bomba já
+            // confirmando o estado pedido, a pendência NÃO era limpa enquanto a
+            // linha em `commands` seguisse pending/sent (até 120s). Era por isso
+            // que o toast "status atualizado (resposta real da bomba)"
+            // (PumpTable.tsx:229, disparado pela mudança de last_communication)
+            // aparecia com o card ainda preso em "Desligando…". O anti-oscilação
+            // de leitura intermediária já é feito por applyConfirmedOffLatch.
               // ✅ Realidade física já alcançou o desejo → libera de imediato.
               // Enquanto houver comando manual fresh (<90s), NÃO liberamos —
               // last_confirmed_state pode ser leitura intermediária do reforço.
