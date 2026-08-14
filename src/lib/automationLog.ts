@@ -385,13 +385,13 @@ const resolveUser = (r: DbRow): string => {
   }
   if (src === "agent-restart" || src === "ota-update") return "Agente";
 
-  // REMOTO sem autoria humana recuperada: a coluna Usuário NUNCA recebe o método
-  // técnico ("Telemetria RF" e afins). Fica "Em apuração" até o backfill preencher
-  // user_id/actor_label — e aí o nome aparece sozinho, sem mudança de código.
-  if (r.origin === "remote") return AUTHORSHIP_UNDER_REVIEW;
+  // FASE B: não existe mais rótulo provisório. Um remoto sem autoria humana não
+  // chega ao relatório oficial — o guarda server-side o desvia para a fila
+  // administrativa. Se aparecer aqui, devolvemos vazio em vez de inventar texto.
+  if (r.origin === "remote") return "";
 
   if (r.origin === "local") return "Local (painel)";
-  return "Sistema";
+  return "";
 };
 
 /** Classifica a linha do banco em uma das ações apresentadas no Relatório.

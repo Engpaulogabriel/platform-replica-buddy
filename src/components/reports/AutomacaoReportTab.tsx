@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Bot, ChevronLeft, ChevronRight, Download, Eye, FileText, Hand, MessageCircle, Monitor, Power, Radio, RefreshCw, Server, WifiOff } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { useAutomationLog, loadAutomationLogRange, loadTechnicalReadings, AUTHORSHIP_UNDER_REVIEW, AUTHORSHIP_UNDER_REVIEW_TOOLTIP, type AutomationLogEntry, type TechnicalReading } from "@/lib/automationLog";
+import { useAutomationLog, loadAutomationLogRange, loadTechnicalReadings, type AutomationLogEntry, type TechnicalReading } from "@/lib/automationLog";
 import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { exportAutomacaoCSV, exportAutomacaoPDF } from "@/lib/reportExport";
 import { notifyReport } from "@/lib/notify";
@@ -47,10 +47,11 @@ function getOriginIcon(origin: string) {
 function getOriginLabel(origin: string) {
   if (origin === "Manual") return "Local";
   if (origin === "Automático") return "Automação"; // desligamento programado
-  // Transição física CONFIRMADA que ainda não recebeu atribuição superior. Não é
-  // Local, não é Remoto, e não pode sumir do histórico — fica explicitamente em
-  // apuração, com alerta técnico aberto para investigação da origem.
-  if (origin === "Sistema") return "Origem em apuração";
+  // FASE B: "Origem em apuração" NÃO existe mais no relatório oficial. Uma
+  // transição sem origem provada sai do oficial (noise_reason=
+  // 'pending_authorship_review') e vai para a fila administrativa, voltando
+  // com origem e pessoa auditáveis. Se algo assim ainda chegar aqui, é um
+  // evento que escapou do guarda — mostramos o valor cru, sem inventar rótulo.
   return origin;
 }
 
@@ -59,8 +60,6 @@ function getOriginBadge(origin: string) {
     "Automático": "bg-primary/10 text-primary",
     "Remoto": "bg-info/10 text-info",
     "Manual": "bg-warning/15 text-warning border border-warning/30",
-    // "Origem em apuração": destaque de atenção, não é um estado normal
-    "Sistema": "bg-warning/10 text-warning border border-warning/30",
     "WhatsApp": "bg-[#25D366]/10 text-[#1ea952] border border-[#25D366]/30",
   };
   return styles[origin] || "bg-secondary text-muted-foreground";
@@ -95,21 +94,12 @@ function getUserLabel(user?: string | null) {
   return user && user.trim() ? user.trim() : "—";
 }
 
-/** Célula da coluna Usuário. Autoria humana em texto normal; evento remoto sem
- *  autoria vira badge âmbar com a explicação — nunca um rótulo técnico. */
+/** Célula da coluna Usuário. Só nome humano real, nome de regra ou
+ *  "Acionamento local". FASE B removeu os rótulos provisórios: um evento sem
+ *  autoria provada não chega mais ao relatório oficial — ele fica na fila
+ *  administrativa até o platform_admin decidir. Não há fallback genérico. */
 function UserCell({ item }: { item: AutomationLogEntry }) {
   const label = getUserLabel(item.user);
-  if (label === AUTHORSHIP_UNDER_REVIEW) {
-    return (
-      <span
-        title={AUTHORSHIP_UNDER_REVIEW_TOOLTIP}
-        className="inline-flex items-center rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning"
-      >
-        {AUTHORSHIP_UNDER_REVIEW}
-      </span>
-    );
-  }
-  if (label === "Sistema") return <span className="text-warning font-medium">Sistema</span>;
   return <span className="text-foreground" title={item.confirmationMethod ?? undefined}>{label}</span>;
 }
 
@@ -125,7 +115,7 @@ function TechDetail({ item }: { item: AutomationLogEntry }) {
     `origem declarada pelo agente: ${t.agentDeclaredOrigin ?? "—"}`,
     `autoria (fonte): ${t.authorshipSource ?? "—"}`,
     `autoria (confiança): ${t.authorshipConfidence ?? "—"}`,
-    `pendência de revisão: ${t.attributionUnavailable || getUserLabel(item.user) === AUTHORSHIP_UNDER_REVIEW ? "aberta" : "não"}`,
+    `pendência de revisão: ${t.attributionUnavailable ? "aberta" : "não"}`,
   ];
   return (
     <details className="mt-1">
