@@ -430,6 +430,72 @@ describe("CASO REAL Semear 14/08 — 13 religamentos remotos voltam ao relatóri
   });
 });
 
+// Atribuição por last_changed_by só vale quando o casamento com profiles é ÚNICO.
+describe("backfill por last_changed_by — só com casamento único", () => {
+  const USER_B = "44444444-0000-0000-0000-00000000000b";
+
+  // Linha física declarada como remote-cmd, sem command_id e sem user_id.
+  async function seedOrfa(lastChangedBy: string | null) {
+    await db.exec(`ALTER TABLE public.automation_log DISABLE TRIGGER trg_enforce_automation_log_state_change`);
+    await db.query(`UPDATE public.equipments SET last_changed_by = $1 WHERE id = $2`, [lastChangedBy, POCO20]);
+    await insert(db, PEROLA, POCO20, "POÇO 20", {
+      at: "07:19", on: true, origin: "system", actor: null, details: { origin: "remote-cmd" } });
+    await db.exec(`ALTER TABLE public.automation_log ENABLE TRIGGER trg_enforce_automation_log_state_change`);
+    await db.exec(mig("20260814200200_automation_log_canonical_truth.sql"));
+    const r = await db.query<any>(
+      `SELECT origin::text, user_id, actor_label, user_email,
+              (details->>'attribution_unavailable')::boolean unavailable,
+              details->>'attribution_source' src,
+              (SELECT count(*)::int FROM public.automation_log
+                WHERE equipment_id='${POCO20}' AND noise_reason IS NULL) linhas
+         FROM public.automation_log WHERE equipment_id='${POCO20}' AND noise_reason IS NULL`);
+    return r.rows;
+  }
+
+  it("EXATAMENTE UM profile compatível → preenche user_id e actor_label", async () => {
+    await db.query(`INSERT INTO public.profiles (id,email,full_name) VALUES ($1,$2,$3)`,
+      [USER_A, "paulo@renov.com.br", "Paulo Gabriel"]);
+    const rows = await seedOrfa("Paulo Gabriel");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].origin).toBe("remote");
+    expect(rows[0].user_id).toBe(USER_A);
+    expect(rows[0].actor_label).toBe("Paulo Gabriel");
+    expect(rows[0].unavailable).toBe(false);
+    expect(rows[0].src).toBe("last_changed_by");
+  });
+
+  it("DOIS profiles homônimos → NÃO atribui pessoa e não duplica a linha", async () => {
+    await db.query(`INSERT INTO public.profiles (id,email,full_name) VALUES ($1,$2,$3),($4,$5,$6)`,
+      [USER_A, "paulo1@renov.com.br", "Paulo Gabriel",
+       USER_B, "paulo2@renov.com.br", "Paulo Gabriel"]);
+    const rows = await seedOrfa("Paulo Gabriel");
+    expect(rows).toHaveLength(1);            // nunca duplica por JOIN de nome
+    expect(Number(rows[0].linhas)).toBe(1);
+    expect(rows[0].origin).toBe("remote");   // origem sobrevive pela evidência técnica
+    expect(rows[0].user_id).toBeNull();      // pessoa NÃO é atribuída
+    expect(rows[0].actor_label).toBeNull();
+    expect(rows[0].unavailable).toBe(true);
+  });
+
+  it("ZERO profiles compatíveis → mantém remoto sem autoria", async () => {
+    await db.query(`INSERT INTO public.profiles (id,email,full_name) VALUES ($1,$2,$3)`,
+      [USER_A, "outro@renov.com.br", "Outra Pessoa"]);
+    const rows = await seedOrfa("Fulano Inexistente");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].origin).toBe("remote");
+    expect(rows[0].user_id).toBeNull();
+    expect(rows[0].actor_label).toBeNull();
+    expect(rows[0].unavailable).toBe(true);
+  });
+
+  it("last_changed_by nulo → mantém remoto sem autoria", async () => {
+    const rows = await seedOrfa(null);
+    expect(rows[0].origin).toBe("remote");
+    expect(rows[0].user_id).toBeNull();
+    expect(rows[0].unavailable).toBe(true);
+  });
+});
+
 describe("backfill histórico não inventa usuário", () => {
   it("promove a Remoto pela evidência técnica, mas deixa a autoria indisponível", async () => {
     // linha de 14/08 com details.origin='remote-cmd', sem command_id e sem user_id
