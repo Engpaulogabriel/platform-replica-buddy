@@ -31,6 +31,7 @@ CREATE TYPE public.command_type AS ENUM ('manual','polling','reset','automation'
 CREATE TYPE public.command_status AS ENUM ('pending','sent','delivered','executed','timeout','error','cancelled');
 CREATE TABLE public.farms (id uuid PRIMARY KEY, name text NOT NULL);
 CREATE TABLE public.profiles (id uuid PRIMARY KEY, email text, full_name text);
+CREATE TABLE public.whatsapp_operators (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), farm_id uuid, name text NOT NULL, phone text NOT NULL);
 CREATE TABLE public.equipments (
   id uuid PRIMARY KEY, farm_id uuid NOT NULL REFERENCES public.farms(id), name text,
   last_changed_by text, last_actuation_origin text, last_confirmed_state smallint NOT NULL DEFAULT 0);
@@ -218,6 +219,66 @@ describe("hierarquia de evidência — UUID é a prova, nome nunca é", () => {
     // nenhuma pendência: pendência é só para REMOTO sem autoria
     const p = await db.query<any>(`SELECT count(*)::int n FROM public.authorship_pending_review WHERE resolved_at IS NULL`);
     expect(Number(p.rows[0].n)).toBe(0);
+  });
+});
+
+// Os DOIS formatos que existem no campo, e o relatório que os conta.
+describe("formatos de last_changed_by — 'Nome' vs 'Nome|user:<UUID>'", () => {
+  // 200400 depende de parse_user_uuid, definida em 200300 — ordem importa.
+  beforeEach(async () => {
+    await db.exec(mig("20260814200300_command_audit_and_authorship_backfill.sql"));
+    await db.exec(mig("20260814200400_actor_tag_and_format_report.sql"));
+  });
+
+  it("parse_user_uuid extrai o UUID do formato real 'Nome|user:<UUID>'", async () => {
+    const r = await db.query<any>(
+      `SELECT public.parse_user_uuid($1) a, public.parse_user_uuid($2) b,
+              public.parse_user_uuid($3) c, public.parse_user_uuid($4) d`,
+      [`Nome Humano|user:${UA}`, "Nome Humano", `user:${UA}`, `Nome|user:nao-e-uuid`]);
+    expect(r.rows[0].a).toBe(UA);   // formato completo
+    expect(r.rows[0].b).toBeNull(); // só nome → sem autoria
+    expect(r.rows[0].c).toBe(UA);   // sem nome, só a etiqueta
+    expect(r.rows[0].d).toBeNull(); // UUID malformado não passa
+  });
+
+  it("build_actor_tag monta o formato e nunca inventa UUID", async () => {
+    const r = await db.query<any>(
+      `SELECT public.build_actor_tag('Nome Humano', $1) com,
+              public.build_actor_tag('Nome Humano', NULL) sem,
+              public.build_actor_tag(NULL, $1) sem_nome,
+              public.build_actor_tag(NULL, NULL) vazio`, [UA]);
+    expect(r.rows[0].com).toBe(`Nome Humano|user:${UA}`);
+    expect(r.rows[0].sem).toBe("Nome Humano");        // sem user_id → só nome
+    expect(r.rows[0].sem_nome).toBe(`Usuário|user:${UA}`);
+    expect(r.rows[0].vazio).toBeNull();
+  });
+
+  it("relatório conta por formato e por fazenda", async () => {
+    await db.query(`UPDATE public.equipments SET last_changed_by = $1 WHERE id = $2`,
+      [`Nome Humano|user:${UA}`, E1]);
+    await db.query(`UPDATE public.equipments SET last_changed_by = 'Só Nome' WHERE id = $1`, [E2]);
+    const r = await db.query<any>(`SELECT * FROM public.last_changed_by_format_report()`);
+    const f1 = r.rows.find((x: any) => x.farm_name === "Fazenda Um");
+    const f2 = r.rows.find((x: any) => x.farm_name === "Fazenda Dois");
+    expect(f1.com_user_uuid).toBe(1);
+    expect(f1.uuid_valido_em_profiles).toBe(1);
+    expect(f1.somente_nome).toBe(0);
+    expect(f2.com_user_uuid).toBe(0);
+    expect(f2.somente_nome).toBe(1);   // só nome não vira autoria
+  });
+
+  it("backfill usa o UUID do formato real e ignora o de só nome", async () => {
+    await db.query(`UPDATE public.equipments
+                      SET last_changed_by = $1, last_actuation_origin = 'remote-desired' WHERE id = $2`,
+      [`Nome Humano|user:${UB}`, E1]);
+    await db.query(`UPDATE public.equipments
+                      SET last_changed_by = 'Nome Humano', last_actuation_origin = 'remote-desired' WHERE id = $1`, [E2]);
+    await raw(db, { farm: F1, equip: E1, name: "BOMBA 1", on: true, origin: "remote" });
+    await raw(db, { farm: F2, equip: E2, name: "BOMBA 2", on: true, origin: "remote" });
+
+    await db.exec(mig("20260814200300_command_audit_and_authorship_backfill.sql"));
+    expect((await rows(db, E1))[0].user_id).toBe(UB);      // UUID = prova
+    expect((await rows(db, E2))[0].user_id).toBeNull();    // nome = não é prova
   });
 });
 
