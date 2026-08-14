@@ -182,13 +182,14 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
         return t >= rangeBounds.from && t <= rangeBounds.to;
       })
       .filter((e) => {
-        // Histórico OFICIAL: só transição confirmada. Leitura técnica não é
-        // filtrada aqui — ela nem chega, porque a query já exclui status_read e
-        // noise_reason. O checkbox tem seção própria (telemetria separada).
-        const isSystem = SYSTEM_ACTIONS.has(e.action) || e.origin === "Sistema";
-        if (isSystem) return false;
-        return e.origin === "Remoto" || e.origin === "Manual" || e.origin === "WhatsApp"
-          || e.origin === "Automático"; // desligamento programado (origin='auto')
+        // O relatório NÃO depende de filtro visual para estar correto: a query já
+        // devolve só evento operacional canônico (transição confirmada). Aqui
+        // resta apenas descartar linhas legadas de ciclo de vida do agente.
+        if (SYSTEM_ACTIONS.has(e.action)) return false;
+        // Ligada/Desligada de QUALQUER origem é transição confirmada — inclusive
+        // origem "Sistema" (telemetria sem autoria). Escondê-la fazia a transição
+        // desaparecer do histórico enquanto o dashboard mostrava a bomba ligada.
+        return e.action === "Ligada" || e.action === "Desligada";
       });
     // O nome exibido (item.user) vem DIRETO do actor_label do banco (resolveUser já o
     // prioriza) — sem override, sem JOIN com profiles, sem resolver por user_id.
@@ -420,11 +421,13 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
         <Card className="bg-card border-border max-w-full overflow-x-clip">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-muted-foreground flex items-center gap-1.5">
-              <Radio className="w-4 h-4" /> Telemetria técnica ({filteredReadings.length})
+              <Radio className="w-4 h-4" /> Diagnóstico técnico ({filteredReadings.length})
             </CardTitle>
             <p className="text-[11px] text-muted-foreground">
-              Leituras de estado e tentativas não confirmadas. <strong>Não são eventos operacionais</strong> e
-              não entram no histórico, no CSV nem no PDF.
+              Exceções para investigação: timeout de comando, erro de bridge/serial, perda e retorno de
+              comunicação, conflito de estado e tentativas não confirmadas. <strong>Não são eventos
+              operacionais</strong> — não entram no histórico, no CSV nem no PDF. Retenção de 30 dias.
+              Polling, eco e leitura de status não aparecem aqui porque não são gravados em lugar nenhum.
             </p>
           </CardHeader>
           <CardContent className="p-0">
@@ -439,7 +442,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                 <Table className="text-xs">
                   <TableHeader><TableRow>
                     <TableHead>Data</TableHead><TableHead>Hora</TableHead><TableHead>Equipamento</TableHead>
-                    <TableHead>Estado lido</TableHead><TableHead>Motivo</TableHead>
+                    <TableHead>Ocorrência</TableHead><TableHead>Detalhe</TableHead>
                   </TableRow></TableHeader>
                   <TableBody>
                     {filteredReadings.slice(0, 300).map((r) => (
@@ -447,8 +450,11 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                         <TableCell className="whitespace-nowrap">{r.date}</TableCell>
                         <TableCell className="whitespace-nowrap">{r.time}</TableCell>
                         <TableCell>{r.pump}</TableCell>
-                        <TableCell>{r.observed === "on" ? "Ligada" : r.observed === "off" ? "Desligada" : "—"}</TableCell>
-                        <TableCell className="text-muted-foreground">{r.noiseReason ?? (r.ok ? "leitura" : "sem resposta")}</TableCell>
+                        <TableCell>{r.kindLabel}</TableCell>
+                        <TableCell className="text-muted-foreground text-[10px] max-w-[280px] truncate"
+                                   title={JSON.stringify(r.details)}>
+                          {String(r.details?.intended_action ?? r.details?.hint ?? "—")}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

@@ -48,6 +48,7 @@ async function freshDb() {
   const db = await PGlite.create();
   await db.exec(BOOTSTRAP);
   await db.exec(mig("20260814200000_automation_log_transition_only.sql"));
+  await db.exec(mig("20260814200200_automation_log_canonical_truth.sql"));
   await db.exec(`
     INSERT INTO public.farms (id,name) VALUES
       ('${PEROLA}','Fazenda Pérola'), ('${SOSSEGO}','Fazenda Sossego'), ('${SEMEAR}','Fazenda Semear');
@@ -57,15 +58,36 @@ async function freshDb() {
   return db;
 }
 
-type Ev = { at: string; on: boolean; origin?: string; result?: string; actor?: string };
+const USER_A = "44444444-0000-0000-0000-00000000000a";
+
+type Ev = {
+  at: string; on: boolean; origin?: string; result?: string; actor?: string;
+  user?: string | null; source?: string | null; details?: Record<string, unknown>;
+  action?: "status_read" | "polling";
+};
 
 async function insert(db: PGlite, farm: string, equip: string | null, name: string, e: Ev) {
   await db.query(
-    `INSERT INTO public.automation_log (farm_id, equipment_id, equipment_name, action, origin, result, actor_label, occurred_at)
-     VALUES ($1,$2,$3,$4::public.event_action,$5::public.event_origin,$6::public.event_result,$7,$8::timestamptz)`,
-    [farm, equip, name, e.on ? "turn_on" : "turn_off", e.origin ?? "local",
-     e.result ?? "success", e.actor ?? null, `2026-08-14T${e.at}:00-03:00`],
+    `INSERT INTO public.automation_log (farm_id, equipment_id, equipment_name, action, origin, result,
+                                        actor_label, user_id, source_device, details, occurred_at)
+     VALUES ($1,$2,$3,$4::public.event_action,$5::public.event_origin,$6::public.event_result,
+             $7,$8,$9,$10::jsonb,$11::timestamptz)`,
+    [farm, equip, name,
+     e.action ?? (e.on ? "turn_on" : "turn_off"), e.origin ?? "local",
+     e.result ?? "success", e.actor ?? null, e.user ?? null, e.source ?? null,
+     JSON.stringify(e.details ?? {}), `2026-08-14T${e.at}:00-03:00`],
   );
+}
+
+// Atribuição da linha oficial (origem + quem).
+async function attribution(db: PGlite, equip: string) {
+  const r = await db.query<{ origin: string; user_id: string | null; actor_label: string | null; source_device: string | null }>(
+    `SELECT origin::text, user_id, actor_label, source_device
+       FROM public.automation_log
+      WHERE equipment_id = $1 AND noise_reason IS NULL
+        AND action IN ('turn_on','turn_off','pump_on','pump_off')
+      ORDER BY occurred_at DESC LIMIT 1`, [equip]);
+  return r.rows[0];
 }
 
 // Histórico OFICIAL, exatamente o que o relatório deve exibir.
@@ -104,28 +126,34 @@ describe("fonte — só transição confirmada entra no relatório", () => {
     expect(await official(db, POCO20)).toEqual(["08:00 ON", "08:10 OFF"]);
   });
 
-  it("polling/eco/reconexão (origin=reading) nunca entram — viram trilha técnica", async () => {
+  it("polling/eco/reconexão (origin=reading) são DESCARTADOS — não viram linha nenhuma", async () => {
     await insert(db, PEROLA, POCO20, "POÇO 20", { at: "09:00", on: true });
     await insert(db, PEROLA, POCO20, "POÇO 20", { at: "09:05", on: false, origin: "reading" });
     await insert(db, PEROLA, POCO20, "POÇO 20", { at: "09:06", on: true, origin: "reading" });
 
     expect(await official(db, POCO20)).toEqual(["09:00 ON"]);
-    const noise = await db.query<{ action: string; noise_reason: string }>(
-      `SELECT action::text, noise_reason FROM public.automation_log WHERE noise_reason IS NOT NULL ORDER BY occurred_at`);
-    expect(noise.rows).toHaveLength(2);
-    // rebaixadas para telemetria técnica, não apagadas
-    expect(noise.rows.every((r) => r.action === "status_read" && r.noise_reason === "reading_origin")).toBe(true);
+    // regra 3: nada de persistir polling como status_read — o banco não cresce
+    const all = await db.query<{ n: number }>(`SELECT count(*)::int n FROM public.automation_log`);
+    expect(Number(all.rows[0].n)).toBe(1);
+    // mas o ruído é CONTADO, para a rotina de integridade enxergar
+    const noise = await db.query<{ reason: string; hits: number }>(
+      `SELECT reason, hits FROM public.automation_log_noise_stats WHERE reason='reading_origin'`);
+    expect(Number(noise.rows[0].hits)).toBe(2);
   });
 
-  it("comando que NÃO confirmou (fail/timeout) não vira evento de estado", async () => {
+  it("comando que NÃO confirmou (fail/timeout) não vira evento de estado — vai p/ técnico", async () => {
     await insert(db, PEROLA, POCO20, "POÇO 20", { at: "10:00", on: true });
-    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "10:05", on: false, origin: "remote", result: "fail" });
-    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "10:06", on: false, origin: "remote", result: "timeout" });
+    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "10:05", on: false, origin: "remote", result: "fail", user: USER_A });
+    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "10:06", on: false, origin: "remote", result: "timeout", user: USER_A });
 
     // a bomba continua LIGADA: nenhum dos dois confirmou o desligamento
     expect(await official(db, POCO20)).toEqual(["10:00 ON"]);
     const st = await db.query<{ s: number }>(`SELECT last_confirmed_state s FROM public.equipments WHERE id='${POCO20}'`);
     expect(Number(st.rows[0].s)).toBe(1);
+    // a falha operacional fica registrada, ligada ao comando, sem fingir estado
+    const tech = await db.query<{ kind: string }>(
+      `SELECT kind FROM public.agent_technical_events ORDER BY occurred_at`);
+    expect(tech.rows.map((r) => r.kind)).toEqual(["command_not_confirmed", "command_timeout"]);
   });
 
   it("TX espontâneo local alternando em menos de 1 minuto gera as DUAS linhas", async () => {
@@ -165,6 +193,159 @@ describe("fonte — só transição confirmada entra no relatório", () => {
     expect(r.rows).toHaveLength(16);
     expect(r.rows.every((x) => Number(x.n) === 1)).toBe(true);   // um OFF por poço
     expect(r.rows.every((x) => x.origin === "auto")).toBe(true); // origem AUTO preservada
+  });
+});
+
+// A regressão relatada: a telemetria confirma o estado ANTES de o comando ser
+// resolvido, então a linha que identifica o usuário chega depois. Ela não pode
+// ser descartada como repetição — precisa PROMOVER a linha existente.
+describe("comandos remotos que sumiram — atribuição pela melhor evidência", () => {
+  it("telemetria (sem autoria) chega antes; comando remoto promove a linha a Remoto + usuário", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "07:19", on: true, origin: "system", actor: "Telemetria RF" });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "07:19", on: true, origin: "remote", user: USER_A, actor: null });
+
+    expect(await official(db, POCO20)).toEqual(["07:19 ON"]);   // continua UMA linha
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("remote");
+    expect(a.user_id).toBe(USER_A);
+  });
+
+  it("telemetria atribuída como 'local' também é promovida pelo comando remoto", async () => {
+    // ramo v_state_changed de apply_pump_telemetry credita 'local' quando o
+    // pending_command já expirou — era isto que exibia "Local" no lugar do remoto
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "07:20", on: true, origin: "local", actor: "Acionamento local" });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "07:20", on: true, origin: "remote", user: USER_A });
+
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("remote");
+    expect(a.user_id).toBe(USER_A);
+    expect(await official(db, POCO20)).toHaveLength(1);
+  });
+
+  it("comando WhatsApp confirmado aparece como WhatsApp com o operador", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "08:00", on: true, origin: "system", actor: "Telemetria RF" });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "08:00", on: true, origin: "remote", source: "whatsapp:Alcione|5577999999999" });
+
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("remote");
+    expect(a.source_device).toBe("whatsapp:Alcione|5577999999999");
+  });
+
+  it("automação promove telemetria, mas comando remoto com usuário tem precedência sobre automação", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "16:00", on: true, origin: "local" }); // bomba ligada antes
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "17:00", on: false, origin: "system", actor: "Telemetria RF" });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "17:00", on: false, origin: "auto", actor: "Desligamento 17h" });
+    expect((await attribution(db, POCO20)).origin).toBe("auto");
+    expect((await attribution(db, POCO20)).actor_label).toBe("Desligamento 17h");
+
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "17:01", on: false, origin: "remote", user: USER_A });
+    expect((await attribution(db, POCO20)).origin).toBe("remote");
+    // segue com as DUAS transições reais (16:00 ON e 17:00 OFF) — nenhuma linha extra
+    expect(await official(db, POCO20)).toEqual(["16:00 ON", "17:00 OFF"]);
+  });
+
+  it("TX local real NÃO é rebaixado nem promovido indevidamente", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "09:00", on: true, origin: "local", actor: "Acionamento local" });
+    // telemetria sem autoria depois não pode derrubar a atribuição local
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "09:00", on: true, origin: "system", actor: "Telemetria RF" });
+    expect((await attribution(db, POCO20)).origin).toBe("local");
+    expect(await official(db, POCO20)).toHaveLength(1);
+  });
+
+  it("remoto SEM usuário identificado não promove — nada vira 'Remoto não identificado'", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "10:00", on: true, origin: "local", actor: "Acionamento local" });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "10:00", on: true, origin: "remote", user: null, actor: null });
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("local");     // continua Local, com autoria honesta
+    expect(a.user_id).toBeNull();
+  });
+
+  it("comando remoto antigo (fora da janela de 180s) não é colado numa transição nova", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "11:00", on: true, origin: "system", actor: "Telemetria RF" });
+    // occurred_at antigo, mas o que vale é a janela em relação a now() da linha existente
+    await db.query(
+      `UPDATE public.automation_log SET occurred_at = now() - interval '20 minutes',
+              created_at = now() - interval '20 minutes' WHERE equipment_id = $1`, [POCO20]);
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "11:30", on: true, origin: "remote", user: USER_A });
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("system");    // não promoveu
+    expect(await official(db, POCO20)).toHaveLength(1);
+  });
+});
+
+describe("tráfego normal de polling não insere NADA em automation_log", () => {
+  it("200 leituras de polling + eco + startup não criam nenhuma linha", async () => {
+    // uma transição legítima primeiro
+    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "06:00", on: true, origin: "local" });
+    const baseline = await db.query<{ n: number }>(`SELECT count(*)::int n FROM public.automation_log`);
+    expect(Number(baseline.rows[0].n)).toBe(1);
+
+    for (let i = 0; i < 100; i++) {
+      // polling confirmando o MESMO estado (origin=reading) — o caso mais comum
+      await insert(db, PEROLA, POCO20, "POÇO 20", { at: "06:10", on: true, origin: "reading" });
+      // eco/retry do mesmo frame por telemetria
+      await insert(db, PEROLA, POCO20, "POÇO 20", { at: "06:10", on: true, origin: "system" });
+    }
+    // leituras de status explícitas e polling declarado
+    for (let i = 0; i < 20; i++) {
+      await insert(db, PEROLA, POCO20, "POÇO 20", { at: "06:11", on: true, action: "status_read", origin: "reading" });
+      await insert(db, PEROLA, POCO20, "POÇO 20", { at: "06:11", on: true, action: "polling", origin: "reading" });
+    }
+
+    const after = await db.query<{ n: number }>(`SELECT count(*)::int n FROM public.automation_log`);
+    expect(Number(after.rows[0].n)).toBe(1);          // ZERO linhas novas
+    expect(await official(db, POCO20)).toEqual(["06:00 ON"]);
+    // e nada foi parar no histórico técnico (polling não é exceção útil)
+    const tech = await db.query<{ n: number }>(`SELECT count(*)::int n FROM public.agent_technical_events`);
+    expect(Number(tech.rows[0].n)).toBe(0);
+  });
+
+  it("perda e retorno de comunicação vão para o histórico técnico, não para o oficial", async () => {
+    await insert(db, PEROLA, POCO20, "POÇO 20", {
+      at: "06:20", on: true, action: "status_read", origin: "system", result: "timeout",
+      details: { tipo_evento: "equipamento_offline" } });
+    await insert(db, PEROLA, POCO20, "POÇO 20", {
+      at: "06:30", on: true, action: "status_read", origin: "system",
+      details: { tipo_evento: "equipamento_online" } });
+
+    expect(Number((await db.query<{ n: number }>(`SELECT count(*)::int n FROM public.automation_log`)).rows[0].n)).toBe(0);
+    const tech = await db.query<{ kind: string }>(`SELECT kind FROM public.agent_technical_events ORDER BY occurred_at`);
+    expect(tech.rows.map((r) => r.kind)).toEqual(["comm_lost", "comm_restored"]);
+  });
+});
+
+describe("rotina de integridade — rede de segurança", () => {
+  it("marca linha indevida que escapou, conta o ruído e não apaga dado oficial", async () => {
+    // insere por baixo do trigger, simulando um escape
+    await db.exec(`ALTER TABLE public.automation_log DISABLE TRIGGER trg_enforce_automation_log_state_change`);
+    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "12:00", on: true, origin: "local" });
+    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "12:01", on: true, origin: "local" });  // repetido
+    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "12:02", on: false, origin: "reading" }); // leitura
+    await db.exec(`ALTER TABLE public.automation_log ENABLE TRIGGER trg_enforce_automation_log_state_change`);
+
+    const marked = await db.query<{ n: number }>(`SELECT public.audit_automation_log_integrity() AS n`);
+    expect(Number(marked.rows[0].n)).toBe(2);
+    expect(await official(db, POCO20)).toEqual(["12:00 ON"]);
+    // nada foi apagado — as 3 linhas continuam lá
+    expect(Number((await db.query<{ n: number }>(`SELECT count(*)::int n FROM public.automation_log`)).rows[0].n)).toBe(3);
+    const stats = await db.query<{ reason: string }>(`SELECT reason FROM public.automation_log_noise_stats ORDER BY reason`);
+    expect(stats.rows.map((r) => r.reason)).toContain("repeated_state");
+  });
+
+  it("ruído acima do limite abre alerta técnico para investigação", async () => {
+    await db.exec(`ALTER TABLE public.automation_log DISABLE TRIGGER trg_enforce_automation_log_state_change`);
+    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "13:00", on: true, origin: "local" });
+    for (let i = 0; i < 25; i++) {
+      await insert(db, PEROLA, POCO20, "POÇO 20", { at: "13:01", on: true, origin: "local" });
+    }
+    await db.exec(`ALTER TABLE public.automation_log ENABLE TRIGGER trg_enforce_automation_log_state_change`);
+
+    await db.query(`SELECT public.audit_automation_log_integrity(interval '48 hours', 20)`);
+    const alert = await db.query<{ kind: string; details: any }>(
+      `SELECT kind, details FROM public.agent_technical_events WHERE kind='noise_threshold'`);
+    expect(alert.rows).toHaveLength(1);
+    expect(Number(alert.rows[0].details.hits_48h)).toBeGreaterThanOrEqual(20);
   });
 });
 

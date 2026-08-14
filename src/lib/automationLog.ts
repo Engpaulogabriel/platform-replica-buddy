@@ -580,8 +580,19 @@ export async function loadAutomationLogRange(
   }
 }
 
-/** Uma leitura técnica de telemetria. NÃO é evento operacional e NUNCA entra no
- *  histórico oficial — existe só para o checkbox "leituras de status". */
+/** Rótulos legíveis dos tipos de exceção técnica. */
+const TECHNICAL_KIND_LABEL: Record<string, string> = {
+  command_timeout: "Comando expirou",
+  command_not_confirmed: "Comando não confirmado",
+  bridge_error: "Erro de bridge/serial",
+  comm_lost: "Perda de comunicação",
+  comm_restored: "Retorno de comunicação",
+  state_conflict: "Conflito de estado",
+  noise_threshold: "Ruído recorrente (investigar)",
+};
+
+/** Uma exceção técnica de diagnóstico. NÃO é evento operacional, NUNCA entra no
+ *  histórico oficial, no CSV nem no PDF. Retenção de 30 dias no servidor. */
 export interface TechnicalReading {
   id: string;
   ts: string;
@@ -589,31 +600,32 @@ export interface TechnicalReading {
   time: string;
   pump: string;
   equipmentId?: string;
-  /** 'on' | 'off' | null — estado observado, quando a linha carrega essa informação */
-  observed: "on" | "off" | null;
-  ok: boolean;
-  /** por que não é transição: reading_origin | not_confirmed | repeated_state | no_equipment */
-  noiseReason: string | null;
+  kind: string;
+  kindLabel: string;
+  details: Record<string, unknown>;
 }
 
 /**
- * Carrega a TELEMETRIA TÉCNICA (status_read) num conjunto SEPARADO. Deliberadamente
- * não usa o store do histórico: leitura técnica não pode se misturar ao relatório
- * oficial — só é exibida numa seção própria, quando o usuário pede.
+ * Carrega o HISTÓRICO TÉCNICO (agent_technical_events) num conjunto SEPARADO.
+ *
+ * Deliberadamente NÃO lê automation_log: desde 20260814200200 o log oficial só
+ * contém transição confirmada — polling, eco, retry, startup e leitura de status
+ * são DESCARTADOS na origem, nunca persistidos. Aqui ficam apenas as exceções
+ * úteis ao diagnóstico (timeout, erro de bridge, perda/retorno de comunicação,
+ * conflito de estado, tentativa não confirmada).
  */
 export async function loadTechnicalReadings(
   farmId: string,
   fromIso: string,
   toIso: string,
-  limit = 2000,
+  limit = 1000,
 ): Promise<TechnicalReading[]> {
   if (!farmId || !fromIso || !toIso) return [];
   try {
     const { data: rows, error } = await supabase
-      .from("automation_log")
-      .select("id, equipment_id, equipment_name, occurred_at, result, new_state, noise_reason")
+      .from("agent_technical_events" as any)
+      .select("id, equipment_id, equipment_name, occurred_at, kind, details")
       .eq("farm_id", farmId)
-      .eq("action", "status_read")
       .gte("occurred_at", fromIso)
       .lte("occurred_at", toIso)
       .order("occurred_at", { ascending: false })
@@ -621,7 +633,7 @@ export async function loadTechnicalReadings(
     if (error || !rows) return [];
     return (rows as any[]).map((r) => {
       const d = new Date(r.occurred_at);
-      const st = String(r.new_state ?? "").toLowerCase();
+      const kind = String(r.kind ?? "");
       return {
         id: String(r.id),
         ts: d.toISOString(),
@@ -629,9 +641,9 @@ export async function loadTechnicalReadings(
         time: formatTime(d),
         pump: r.equipment_name ?? "—",
         equipmentId: r.equipment_id ?? undefined,
-        observed: st === "on" || st === "1" ? "on" : st === "off" || st === "0" ? "off" : null,
-        ok: !["fail", "timeout", "error"].includes(String(r.result ?? "").toLowerCase()),
-        noiseReason: r.noise_reason ?? null,
+        kind,
+        kindLabel: TECHNICAL_KIND_LABEL[kind] ?? kind,
+        details: (r.details ?? {}) as Record<string, unknown>,
       } as TechnicalReading;
     });
   } catch (e) {
