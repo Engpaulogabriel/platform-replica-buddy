@@ -127,23 +127,15 @@ function PumpCardImpl(props: PumpCardProps) {
   // comunicação". Some sozinho quando uma confirmação física nova chegar.
   const commandUnconfirmed = !!pump.commandUnconfirmedAt && !isTransitioning;
 
-  // ── Proteção de comutação (server-side) ───────────────────────────────────
-  // O card só ESPELHA equipments.command_lock_until, que chega por Realtime.
-  // O bloqueio real é do banco: o navegador nunca é a fonte de verdade.
-  // `tickNow` re-renderiza a cada segundo só enquanto a trava está ativa, para
-  // a contagem regressiva liberar sozinha, sem F5.
-  const lockUntil = pump.commandLockUntil ?? 0;
-  // Sem contador regressivo: o card não revela relógio. Um único timeout no
-  // instante da expiração apenas libera o controle, sem F5 e sem exibir tempo.
-  const [lockExpiredAt, setLockExpiredAt] = useState(0);
-  useEffect(() => {
-    if (!lockUntil) return;
-    const ms = lockUntil - Date.now();
-    if (ms <= 0) { setLockExpiredAt(lockUntil); return; }
-    const t = setTimeout(() => setLockExpiredAt(lockUntil), ms);
-    return () => clearTimeout(t);
-  }, [lockUntil]);
-  const switchingLocked = !!lockUntil && lockExpiredAt !== lockUntil && Date.now() < lockUntil;
+  // ── PROTEÇÃO DE COMUTAÇÃO: INVISÍVEL NO CARD ──────────────────────────────
+  // A função é OPT-IN por poço (equipments.switching_protection_enabled, false
+  // por padrão) e vive inteiramente no servidor. O card do cliente não mostra
+  // badge, cadeado, contador, tooltip nem qualquer sinal de que ela existe —
+  // owner, gestor, admin de fazenda, operador e viewer não podem sequer saber.
+  // Quando um poço está habilitado, é o banco que recusa o comando; a recusa
+  // vira auditoria técnica, fora do Relatório de Automação oficial. A
+  // configuração e a visualização ficam em Setor Técnico → Proteções por Poço,
+  // restrito a platform_admin/platform_support.
 
   const bg = maintIsBlue
     // AZUL = manutenção bloqueante (técnico/admin, maintenance_mode).
@@ -271,16 +263,6 @@ function PumpCardImpl(props: PumpCardProps) {
               ⏱ {minutesSinceComm}min
             </span>
           )}
-          {switchingLocked && (
-            <span
-              data-testid="switching-lock"
-              className="inline-flex items-center gap-1 text-[9px] font-medium tracking-wide px-1 py-0.5 rounded bg-muted text-muted-foreground border border-border shrink-0"
-              title="Proteção de comutação ativa. Aguarde a liberação antes de novo comando."
-            >
-              <Lock className="w-3 h-3" />
-              Proteção de comutação ativa
-            </span>
-          )}
           {commandUnconfirmed && (
             <span
               className="text-[9px] font-medium tracking-wide px-1 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 shrink-0"
@@ -337,8 +319,6 @@ function PumpCardImpl(props: PumpCardProps) {
                   maintenanceActive ||
                   isOffline ||
                   inAutoMode ||
-                  // proteção de comutação: espelho do bloqueio server-side
-                  switchingLocked ||
                   pump.pending === "turning_off" ||
                   pump.pending === "resetting" ||
                   (!!pump.commandBlockedUntil && new Date(pump.commandBlockedUntil).getTime() > Date.now())

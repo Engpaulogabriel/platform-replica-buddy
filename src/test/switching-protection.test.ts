@@ -200,36 +200,29 @@ describe("caso real POÇO 12 R6 e concorrência", () => {
 });
 
 // ── Espelho no frontend (o servidor continua sendo a fonte de verdade) ───────
-describe("frontend espelha a trava", () => {
+describe("frontend NÃO espelha mais a trava", () => {
   const CARD = fs.readFileSync(path.join(REPO, "src/components/dashboard/PumpCard.tsx"), "utf8");
   const HOOK = fs.readFileSync(path.join(REPO, "src/hooks/useDashboardEquipment.ts"), "utf8");
-  const TABLE = fs.readFileSync(path.join(REPO, "src/components/dashboard/PumpTable.tsx"), "utf8");
 
-  it("7. hook propaga command_lock_until vindo do Realtime", () => {
-    expect(HOOK).toContain("commandLockUntil");
-    expect(HOOK).toContain("command_lock_until");
-    expect(TABLE).toContain("commandLockUntil?: number;");
+  // A proteção virou OPT-IN por poço e INVISÍVEL ao cliente. O card não pode
+  // mais conter badge, cadeado, texto, contador nem desabilitar o toggle.
+  it("o card não contém nenhum vestígio da função", () => {
+    expect(CARD).not.toContain("Proteção de comutação ativa");
+    expect(CARD).not.toContain('data-testid="switching-lock"');
+    expect(CARD).not.toContain("switchingLocked");
+    expect(CARD).not.toContain("setLockExpiredAt");
   });
 
-  it("badge da trava não revela tempo algum", () => {
-    expect(CARD).toContain("Proteção de comutação ativa");
-    expect(CARD).toContain('data-testid="switching-lock"');
-    expect(CARD).not.toContain("lockSecondsLeft");
-    expect(CARD).not.toContain("lastConfirmedLabel");
+  it("o toggle não é mais desabilitado pela trava", () => {
+    expect(CARD).not.toMatch(/disabled=\{[^}]*switchingLocked/s);
   });
 
-  it("controles do poço ficam desabilitados durante a trava", () => {
-    expect(CARD).toMatch(/disabled=\{[^}]*switchingLocked/s);
-  });
-
-  it("libera sozinho no instante da expiração, sem contador visível", () => {
-    expect(CARD).toContain("setTimeout(() => setLockExpiredAt(lockUntil), ms)");
-    expect(CARD).not.toContain("setInterval");   // nada de tique por segundo
-  });
-
-  it("o card NÃO decide o bloqueio — só espelha o valor do servidor", () => {
-    // não existe cálculo local de trava a partir de clique/comando
-    expect(CARD).toContain("const lockUntil = pump.commandLockUntil ?? 0;");
+  it("o card nunca calcula trava por conta própria", () => {
     expect(CARD).not.toMatch(/setCommandLock|lockUntil\s*=\s*Date\.now\(\)\s*\+/);
+  });
+
+  // O dado pode continuar chegando do Realtime — o que não pode é ser exibido.
+  it("o hook segue propagando o campo, sem uso visual", () => {
+    expect(HOOK).toContain("command_lock_until");
   });
 });

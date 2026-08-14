@@ -1,5 +1,7 @@
 import { useState, useMemo } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { SwitchingProtectionPanel } from "@/components/tecnico/SwitchingProtectionPanel";
+import { useCanViewTechnicalTelemetry } from "@/hooks/useTechnicalTelemetry";
 import { Badge } from "@/components/ui/badge";
 import { ClipboardList, KeyRound, Stethoscope, Building2, Navigation, Timer, Settings, Users, TrendingUp, ShieldCheck, Cpu, Cable, Radio, Wrench, ShieldAlert } from "lucide-react";
 import RestrictedAuth from "@/components/RestrictedAuth";
@@ -53,14 +55,23 @@ const SuporteTecnico = () => {
   const { role } = useFarmAccess();
   // Aba Segurança (eventos do agente) só para platform_admin e owner.
   const canViewSecurity = role === "platform_admin" || role === "owner";
+  // Proteções por Poço é MAIS restrita que Segurança: só platform_admin e
+  // técnico cadastrado em platform_support. `owner` NÃO entra — o cliente não
+  // pode nem saber que a proteção de comutação existe.
+  const canViewProtections = useCanViewTechnicalTelemetry();
   const shownTabs = useMemo(
-    () => (canViewSecurity
-      ? [...tabs,
-         { value: "seguranca", label: "Segurança", icon: ShieldAlert },
-         // Fila de reconciliação de autoria — mesma restrição da aba Segurança.
-         { value: "autoria", label: "Autoria", icon: ShieldAlert }]
-      : tabs),
-    [canViewSecurity],
+    () => {
+      const base = canViewSecurity
+        ? [...tabs,
+           { value: "seguranca", label: "Segurança", icon: ShieldAlert },
+           // Fila de reconciliação de autoria — mesma restrição da aba Segurança.
+           { value: "autoria", label: "Autoria", icon: ShieldAlert }]
+        : tabs;
+      return canViewProtections
+        ? [...base, { value: "protecoes", label: "Proteções por Poço", icon: ShieldCheck }]
+        : base;
+    },
+    [canViewSecurity, canViewProtections],
   );
 
   const defaults = useMemo(() => {
@@ -112,6 +123,9 @@ const SuporteTecnico = () => {
           )}
           {canViewSecurity && (
             <TabsContent value="autoria" className="mt-4"><AuthorshipReconciliationQueue /></TabsContent>
+          )}
+          {canViewProtections && (
+            <TabsContent value="protecoes" className="mt-4"><SwitchingProtectionPanel /></TabsContent>
           )}
           <TabsContent value="fazenda" className="mt-4"><FazendaContent /></TabsContent>
           <TabsContent value="temporizadores" className="mt-4"><TimersConfig /></TabsContent>

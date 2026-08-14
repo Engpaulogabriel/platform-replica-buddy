@@ -82,14 +82,6 @@ describe("PumpCard não expõe tempo técnico", () => {
     expect(surface()).not.toMatch(/\d+min/);
   });
 
-  it("proteção de comutação aparece SEM contador", () => {
-    document.body.innerHTML = "";
-    draw(base({ commandLockUntil: Date.now() + 30_000 } as Partial<Pump>));
-    const badge = screen.getByTestId("switching-lock");
-    expect(badge.textContent).toBe("Proteção de comutação ativa");
-    expect(badge.getAttribute("title"))
-      .toBe("Proteção de comutação ativa. Aguarde a liberação antes de novo comando.");
-  });
 
   it("o card continua mostrando o que é operacional", () => {
     document.body.innerHTML = "";
