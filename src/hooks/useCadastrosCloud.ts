@@ -247,8 +247,28 @@ export function useCadastrosCloud() {
     };
 
     // Após esta quantidade de tentativas sem sucesso, o indicador passa a
-    // "Dados podem estar atrasados". A reinscrição continua tentando.
+    // "Dados podem estar atrasados" e entra a rede de segurança abaixo.
     const MAX_RECONNECT_BEFORE_DEGRADED = 4;
+    // Teto de tentativas. Sem ele, um canal que responde CLOSED imediatamente
+    // (foi o caso do kill switch global) gera reinscrição em laço para sempre.
+    const MAX_RECONNECT_ATTEMPTS = 8;
+
+    // REDE DE SEGURANÇA — só existe enquanto o canal está DEGRADADO.
+    // Não é polling do caminho normal: com Realtime saudável ela nunca liga.
+    // Sem isto, canal morto = ZERO atualização até F5 — exatamente o que
+    // aconteceu quando o kill switch estava ativo e o poller foi removido.
+    let degradedTimer: ReturnType<typeof setInterval> | null = null;
+    const stopDegradedSafetyNet = () => {
+      if (degradedTimer) { clearInterval(degradedTimer); degradedTimer = null; }
+    };
+    const startDegradedSafetyNet = () => {
+      if (degradedTimer || cancelled) return;
+      degradedTimer = setInterval(() => {
+        if (cancelled) return;
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+        void refresh();
+      }, 30_000);
+    };
 
     const subscribePostgresChanges = (farmId: string) => {
       if (cancelled) return;
@@ -268,6 +288,7 @@ export function useCadastrosCloud() {
                   : (reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED ? "degraded" : "reconnecting") }));
           if (ok) {
             reconnectAttempts = 0;
+            stopDegradedSafetyNet();   // canal vivo → nada de rede de segurança
             // Sincroniza estado pós-reconexão
             void refresh();
           } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR" || status === "CLOSED") {
@@ -282,6 +303,12 @@ export function useCadastrosCloud() {
               console.warn(`[useCadastrosCloud] realtime ${status} — reconectando em ${delay}ms (tentativa ${reconnectAttempts})`);
             }
             void refresh();
+            if (reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED) startDegradedSafetyNet();
+            if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+              // Desiste de reinscrever em laço; a rede de segurança e o retorno
+              // de aba continuam atualizando a tela.
+              return;
+            }
             if (reconnectTimer) clearTimeout(reconnectTimer);
             reconnectTimer = setTimeout(() => {
               if (!cancelled) subscribePostgresChanges(farmId);
@@ -402,7 +429,10 @@ export function useCadastrosCloud() {
             lastWake = now;
             void refresh();                        // reconciliação única da fazenda ativa
             const st = (channel as { state?: string } | null)?.state;
-            if (st !== "joined") subscribePostgresChanges(farmId);   // sem duplicar canal
+            if (st !== "joined") {
+              reconnectAttempts = 0;              // volta da aba = nova chance
+              subscribePostgresChanges(farmId);   // sem duplicar canal
+            }
           };
           if (typeof document !== "undefined") {
             document.addEventListener("visibilitychange", visibilityHandler);
@@ -426,6 +456,7 @@ export function useCadastrosCloud() {
     return () => {
       cancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      stopDegradedSafetyNet();
       if (visibilityHandler && typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", visibilityHandler);
         window.removeEventListener("focus", visibilityHandler);

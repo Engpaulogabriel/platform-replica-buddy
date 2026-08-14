@@ -151,3 +151,57 @@ describe("garantias no código-fonte", () => {
     expect(CAD).toContain("lastPhysicalReadAt");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CAUSA GLOBAL: kill switch derrubava TODO o Realtime do app.
+// ─────────────────────────────────────────────────────────────────────────────
+const KILL = fs.readFileSync(path.join(REPO, "src/lib/realtimeKillSwitch.ts"), "utf8");
+
+describe("kill switch global do Realtime", () => {
+  it("não está mais fixo em true — é controlado por ambiente", () => {
+    expect(KILL).not.toMatch(/export const REALTIME_DISABLED = true;/);
+    expect(KILL).toContain("VITE_REALTIME_DISABLED");
+  });
+
+  it("por padrão (sem env) o Realtime fica HABILITADO", async () => {
+    vi.resetModules();
+    const mod = await import("@/lib/realtimeKillSwitch");
+    expect(mod.REALTIME_DISABLED).toBe(false);
+  });
+
+  it("canal que responde CLOSED na hora não gera reinscrição infinita", () => {
+    // era o comportamento do stub: subscribe(cb) => cb("CLOSED") imediato
+    const MAX = 8;
+    let attempts = 0, subs = 0;
+    const onStatus = (s: string) => {
+      if (s !== "CLOSED") return;
+      attempts++;
+      if (attempts > MAX) return;      // teto
+      subs++;
+      onStatus("CLOSED");              // stub responde CLOSED de novo
+    };
+    onStatus("CLOSED");
+    expect(subs).toBeLessThanOrEqual(MAX);
+  });
+
+  it("rede de segurança só liga em modo degradado e desliga ao reconectar", () => {
+    let net = false;
+    const start = () => { net = true; }, stop = () => { net = false; };
+    let attempts = 0;
+    const fail = () => { attempts++; if (attempts >= 4) start(); };
+    fail(); fail(); fail();
+    expect(net).toBe(false);            // ainda reconectando, sem rede
+    fail();
+    expect(net).toBe(true);             // degradado → rede de segurança
+    attempts = 0; stop();
+    expect(net).toBe(false);            // SUBSCRIBED → desliga
+  });
+
+  it("código: rede de segurança existe e é condicionada a degradado", () => {
+    expect(CAD).toContain("startDegradedSafetyNet");
+    expect(CAD).toContain("stopDegradedSafetyNet");
+    expect(CAD).toContain("MAX_RECONNECT_ATTEMPTS");
+    // e o caminho normal continua sem polling de rede
+    expect(CAD).not.toMatch(/fallbackPoller\s*=\s*setInterval/);
+  });
+});

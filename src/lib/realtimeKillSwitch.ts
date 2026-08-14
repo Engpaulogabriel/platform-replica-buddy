@@ -11,7 +11,15 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from "@/integrations/supabase/client";
 
-export const REALTIME_DISABLED = true;
+// DESLIGADO. O kill switch derrubava TODO o Realtime do app: o stub responde
+// `CLOSED` imediatamente no subscribe, então nenhum evento de `equipments`
+// chegava e os cards só mudavam com F5. Era a causa global do dashboard atrasado
+// (POÇO 12 R6 confirmado OFF no banco às 14:29:51 com o card ainda verde).
+//
+// Passa a ser controlado por ambiente, para poder ser reativado em emergência
+// sem alterar código: VITE_REALTIME_DISABLED=true.
+export const REALTIME_DISABLED =
+  String(import.meta.env.VITE_REALTIME_DISABLED ?? "").toLowerCase() === "true";
 
 // Guardamos as implementações originais ANTES de instalar o stub, para que
 // componentes específicos possam optar por Realtime real quando necessário.
