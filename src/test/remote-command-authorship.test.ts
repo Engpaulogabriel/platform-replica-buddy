@@ -141,53 +141,89 @@ describe("command_id e idempotência", () => {
   });
 });
 
-describe("não existe fallback inseguro", () => {
-  it("INSERT direto em commands é RECUSADO com a flag ligada (padrão)", async () => {
+describe("transição: nenhum comando remoto fica sem autor", () => {
+  // A migration 260000 NÃO bloqueia — se bloqueasse, Ligar/Desligar pararia
+  // enquanto o frontend não estivesse na RPC. O que ela faz é tirar a autoria
+  // das mãos do cliente, à força.
+
+  it("INSERT direto tem o created_by do frontend DESCARTADO e trocado por auth.uid()", async () => {
     await login(d,UA);
+    // o "frontend" tenta assinar como Bruno estando logado como Ana
+    await d.query(
+      `INSERT INTO public.commands (id,farm_id,equipment_id,type,frame,created_by)
+       VALUES ('aaaaaaaa-0000-0000-0000-00000000aaaa',$1,$2,'manual','FRAME',$3)`,[F1,E1,UB]);
+    const c=(await d.query<any>(`SELECT created_by FROM public.commands`)).rows[0];
+    expect(c.created_by).toBe(UA);        // quem está logado, não quem foi enviado
+  });
+
+  it("INSERT direto ganha trilha em command_audit criada pelo servidor", async () => {
+    await login(d,UA);
+    await d.query(
+      `INSERT INTO public.commands (id,farm_id,equipment_id,type,frame)
+       VALUES ('bbbbbbbb-0000-0000-0000-00000000bbbb',$1,$2,'manual','FRAME')`,[F1,E1]);
+    const a=await audit(d,'bbbbbbbb-0000-0000-0000-00000000bbbb');
+    expect(a.user_id).toBe(UA);
+    expect(a.actor_label).toBe('Ana Souza');
+    expect(a.origin_kind).toBe('panel-legacy');
+    expect(a.details.legacy_direct_insert).toBe(true);
+  });
+
+  it("INSERT direto SEM usuário autenticado é recusado", async () => {
+    await login(d,null);
+    await expect(d.query(
+      `INSERT INTO public.commands (farm_id,equipment_id,type,frame)
+       VALUES ($1,$2,'manual','FRAME')`,[F1,E1]))
+      .rejects.toThrow(/usuário autenticado/);
+  });
+
+  it("a trilha legada é distinguível, para saber quando o frontend migrou", async () => {
+    await login(d,UA);
+    await enqueue(d,'turn_on','k-rpc');                        // pela RPC
+    await d.query(`INSERT INTO public.commands (id,farm_id,equipment_id,type,frame)
+                   VALUES ('cccccccc-0000-0000-0000-00000000cccc',$1,$2,'manual','FRAME')`,[F1,E1]);
+    const n=(await d.query<any>(
+      `SELECT count(*) n FROM public.command_audit WHERE details->>'legacy_direct_insert'='true'`)).rows[0].n;
+    expect(n).toBe(1);   // é este contador que precisa zerar antes do bloqueio
+  });
+});
+
+describe("bloqueio definitivo (migration 260100)", () => {
+  const bloquear = (d:PGlite) => d.query(`UPDATE public.farms SET command_rpc_enforced=true`);
+
+  it("depois de ligado, INSERT direto é RECUSADO", async () => {
+    await bloquear(d); await login(d,UA);
     await expect(d.query(
       `INSERT INTO public.commands (farm_id,equipment_id,type,frame,created_by)
        VALUES ($1,$2,'manual','FRAME',$3)`,[F1,E1,UA]))
       .rejects.toThrow(/enqueue_remote_command/);
   });
 
-  it("INSERT direto SEM autor é recusado mesmo com a flag desligada", async () => {
-    await d.query(`UPDATE public.farms SET command_rpc_enforced=false`);
-    await login(d,UA);
-    await expect(d.query(
-      `INSERT INTO public.commands (farm_id,equipment_id,type,frame)
-       VALUES ($1,$2,'manual','FRAME')`,[F1,E1]))
-      .rejects.toThrow(/sem actor_user_id é proibido/);
+  it("a RPC continua funcionando normalmente com o bloqueio ligado", async () => {
+    await bloquear(d); await login(d,UA);
+    const r=(await enqueue(d,'turn_on')).rows[0];
+    expect(r.actor_label).toBe('Ana Souza');
   });
 
-  it("INSERT direto COM autor mas SEM trilha é recusado mesmo com a flag desligada", async () => {
+  it("o rollback devolve o caminho direto SEM perder autoria", async () => {
+    await bloquear(d); await login(d,UA);
     await d.query(`UPDATE public.farms SET command_rpc_enforced=false`);
-    await login(d,UA);
-    await expect(d.query(
-      `INSERT INTO public.commands (farm_id,equipment_id,type,frame,created_by)
-       VALUES ($1,$2,'manual','FRAME',$3)`,[F1,E1,UA]))
-      .rejects.toThrow(/sem trilha em command_audit é proibido/);
+    await d.query(`INSERT INTO public.commands (id,farm_id,equipment_id,type,frame,created_by)
+                   VALUES ('dddddddd-0000-0000-0000-00000000dddd',$1,$2,'manual','FRAME',$3)`,[F1,E1,UB]);
+    const a=await audit(d,'dddddddd-0000-0000-0000-00000000dddd');
+    expect(a.user_id).toBe(UA);   // ainda o autenticado, nunca o enviado
   });
 
-  it("a flag NUNCA permite comando sem autor — é rollback observável, não brecha", async () => {
-    await d.query(`UPDATE public.farms SET command_rpc_enforced=false`);
-    await login(d,UA);
-    // caminho legítimo com a flag desligada: trilha primeiro, comando depois
-    const cmd='11111111-2222-3333-4444-555555555555';
-    await d.query(`INSERT INTO public.command_audit (command_id,farm_id,equipment_id,user_id,user_email,actor_label,intent)
-                   VALUES ($1,$2,$3,$4,'ana@ex.com','Ana Souza','turn_on')`,[cmd,F1,E1,UA]);
-    await expect(d.query(
-      `INSERT INTO public.commands (id,farm_id,equipment_id,type,frame,created_by)
-       VALUES ($1,$2,$3,'manual','FRAME',$4)`,[cmd,F1,E1,UA])).resolves.toBeDefined();
-  });
-
-  it("polling e caminhos de máquina não são afetados", async () => {
-    for (const [tipo,src] of [['polling',null],['manual','backend-reset'],
-                              ['manual','forced-shutdown'],['manual','safety-x'],
-                              ['manual','automation-scheduler']] as const) {
-      await expect(d.query(
-        `INSERT INTO public.commands (farm_id,equipment_id,type,frame,source_device)
-         VALUES ($1,$2,$3::public.command_type,'FRAME',$4)`,[F1,E1,tipo,src]))
-        .resolves.toBeDefined();
+  it("polling e caminhos de máquina passam nos dois modos", async () => {
+    for (const enforced of [false,true]) {
+      await d.query(`UPDATE public.farms SET command_rpc_enforced=$1`,[enforced]);
+      for (const [tipo,src] of [['polling',null],['manual','backend-reset'],
+                                ['manual','forced-shutdown'],['manual','safety-x'],
+                                ['manual','automation-scheduler']] as const) {
+        await expect(d.query(
+          `INSERT INTO public.commands (farm_id,equipment_id,type,frame,source_device)
+           VALUES ($1,$2,$3::public.command_type,'FRAME',$4)`,[F1,E1,tipo,src]))
+          .resolves.toBeDefined();
+      }
     }
   });
 });
@@ -201,6 +237,6 @@ describe("observabilidade", () => {
     expect(Number(h.sem_autor)).toBe(0);
     expect(Number(h.sem_trilha)).toBe(0);
     expect(Number(h.sem_idempotencia)).toBe(0);
-    expect(h.rpc_obrigatoria).toBe(true);
+    expect(h.rpc_obrigatoria).toBe(false);   // transição: bloqueio ainda não ligado
   });
 });

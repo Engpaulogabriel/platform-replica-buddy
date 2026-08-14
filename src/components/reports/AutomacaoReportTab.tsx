@@ -47,7 +47,7 @@ function getOriginIcon(origin: string) {
 function getOriginLabel(origin: string) {
   if (origin === "Manual") return "Local";
   if (origin === "Automático") return "Automação"; // desligamento programado
-  // FASE B: "Origem em apuração" NÃO existe mais no relatório oficial. Uma
+  // FASE B: o rótulo provisório de origem NÃO existe mais no oficial. Uma
   // transição sem origem provada sai do oficial (noise_reason=
   // 'pending_authorship_review') e vai para a fila administrativa, voltando
   // com origem e pessoa auditáveis. Se algo assim ainda chegar aqui, é um
@@ -249,14 +249,27 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
 
   useEffect(() => { setLogPage(1); }, [showReadings, selectedPump, fromDate, toDate]);
 
+  // ── ARRAY CANÔNICO ────────────────────────────────────────────────────────
+  // Tela, CSV e PDF consomem ESTE array. Não existe mais transformação de
+  // rótulo separada por formato: a origem e o usuário são resolvidos uma única
+  // vez, então os três mostram exatamente as mesmas linhas e os mesmos IDs.
+  const canonicalRows = useMemo(
+    () => filteredLog.map(r => ({
+      ...r,
+      origin: getOriginLabel(r.origin),
+      user: getUserLabel(r.user),
+    })),
+    [filteredLog],
+  );
+
   const totalLogPages = useMemo(
     () => Math.max(1, Math.ceil(filteredLog.length / LOG_PAGE_SIZE)),
     [filteredLog.length]
   );
   const currentLogPage = Math.min(logPage, totalLogPages);
   const pagedLog = useMemo(
-    () => filteredLog.slice((currentLogPage - 1) * LOG_PAGE_SIZE, currentLogPage * LOG_PAGE_SIZE),
-    [filteredLog, currentLogPage]
+    () => canonicalRows.slice((currentLogPage - 1) * LOG_PAGE_SIZE, currentLogPage * LOG_PAGE_SIZE),
+    [canonicalRows, currentLogPage]
   );
 
   return (
@@ -275,8 +288,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
               <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={async () => {
                 const g = await guardExport("csv", "relatorio-automacao.csv");
                 if (!g.allowed) { toast.error(`Limite de CSVs por dia atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
-                const mapped = filteredLog.map(r => ({ ...r, origin: getOriginLabel(r.origin), user: getUserLabel(r.user) }));
-                exportAutomacaoCSV(mapped);
+                exportAutomacaoCSV(canonicalRows);
                 notifyReport.exported("CSV", "Automação");
               }}>
                 <Download className="w-3.5 h-3.5" /> CSV
@@ -284,8 +296,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
               <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={async () => {
                 const g = await guardExport("pdf", "relatorio-automacao.pdf");
                 if (!g.allowed) { toast.error(`Limite de PDFs por hora atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
-                const mapped = filteredLog.map(r => ({ ...r, origin: getOriginLabel(r.origin), user: getUserLabel(r.user), result: r.result ?? "success" }));
-                exportAutomacaoPDF(mapped, farmHeader);
+                exportAutomacaoPDF(canonicalRows, farmHeader);
                 notifyReport.exported("PDF", "Automação");
               }}>
                 <FileText className="w-3.5 h-3.5" /> PDF

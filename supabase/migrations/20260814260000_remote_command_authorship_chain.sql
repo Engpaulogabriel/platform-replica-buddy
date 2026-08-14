@@ -12,8 +12,13 @@
 --   2. grava o snapshot do perfil (nome/e-mail no instante do clique) em
 --      command_audit, para a autoria não depender de `commands` nem de perfil
 --      alterado depois;
---   3. FECHA a porta direta: um trigger recusa comando manual que não tenha
---      vindo da RPC. Não existe fallback — o caminho antigo passa a falhar.
+--   3. na TRANSIÇÃO, força autoria server-side no caminho legado: o
+--      `created_by` mandado pelo frontend é descartado e substituído por
+--      auth.uid(), e a trilha é criada pelo próprio trigger. Nenhum comando
+--      remoto fica sem autor, e nenhuma autoria vem do cliente.
+--      O bloqueio DEFINITIVO do INSERT direto é a migration 20260814260100,
+--      aplicada só depois da validação com comandos reais — assim Ligar e
+--      Desligar nunca param.
 --
 -- Não altera relés, protocolo PLC, polling, bridge, rádio, Realtime, PumpCard,
 -- manutenção, proteção de comutação, automações, FASE 2/3, OTA, energia,
@@ -23,10 +28,14 @@
 -- ── 1) Flag por fazenda, para transição observável e reversível ─────────────
 -- ATENÇÃO: a flag NÃO libera comando sem autor. Ela só decide se o INSERT
 -- direto ainda é aceito. Autoria completa é exigida nos DOIS caminhos.
+-- Nasce FALSE de propósito: esta migration NÃO bloqueia nada. Ela instala a
+-- RPC e passa a FORÇAR autoria server-side no caminho legado, para nenhum
+-- comando ficar sem autor durante a transição. O bloqueio definitivo é a
+-- migration 20260814260100, aplicada só depois da validação com comandos reais.
 ALTER TABLE public.farms
-  ADD COLUMN IF NOT EXISTS command_rpc_enforced boolean NOT NULL DEFAULT true;
+  ADD COLUMN IF NOT EXISTS command_rpc_enforced boolean NOT NULL DEFAULT false;
 COMMENT ON COLUMN public.farms.command_rpc_enforced IS
-  'true = comando manual só entra pela RPC enqueue_remote_command. false = INSERT direto ainda aceito, MAS continua obrigando actor_user_id + command_audit. Rollback observável, nunca inseguro.';
+  'true = comando manual só entra pela RPC enqueue_remote_command (bloqueio definitivo). false = etapa de transição: INSERT direto ainda entra, mas com autoria FORÇADA de auth.uid() e trilha criada no servidor. Nunca aceita autoria vinda do frontend.';
 
 -- ── 2) Idempotência ─────────────────────────────────────────────────────────
 ALTER TABLE public.commands
@@ -125,7 +134,7 @@ GRANT EXECUTE ON FUNCTION public.enqueue_remote_command(uuid, text, text, text, 
 -- linha em command_audit continuam obrigatórios.
 CREATE OR REPLACE FUNCTION public.enforce_command_authorship()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE v_rpc text; v_enforced boolean; v_src text;
+DECLARE v_rpc text; v_enforced boolean; v_src text; v_uid uuid; v_name text; v_email text;
 BEGIN
   IF NEW.type <> 'manual'::public.command_type THEN RETURN NEW; END IF;
 
@@ -140,26 +149,53 @@ BEGIN
   END IF;
 
   v_rpc := current_setting('renov.command_rpc', true);
-
   -- Veio da RPC: a autoria já foi gravada lá. Segue.
   IF v_rpc IS NOT NULL AND v_rpc = NEW.id::text THEN RETURN NEW; END IF;
 
-  -- NÃO veio da RPC.
+  -- ── NÃO veio da RPC ──────────────────────────────────────────────────────
   SELECT f.command_rpc_enforced INTO v_enforced FROM public.farms f WHERE f.id = NEW.farm_id;
-  IF COALESCE(v_enforced, true) THEN
+
+  IF COALESCE(v_enforced, false) THEN
+    -- BLOQUEIO DEFINITIVO (ligado pela migration 20260814260100, após validação)
     RAISE EXCEPTION USING
       ERRCODE = 'insufficient_privilege',
       MESSAGE = 'comando remoto deve ser criado por enqueue_remote_command (autoria server-side)',
       HINT    = 'command_rpc_required';
   END IF;
 
-  -- Flag desligada (transição): AINDA ASSIM exige autor e trilha.
-  IF NEW.created_by IS NULL THEN
-    RAISE EXCEPTION 'comando remoto sem actor_user_id é proibido';
+  -- ── TRANSIÇÃO: não recusa, mas a autoria NUNCA vem do frontend ───────────
+  -- O created_by enviado pelo cliente é DESCARTADO e substituído por auth.uid().
+  v_uid := auth.uid();
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'comando remoto exige usuário autenticado';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM public.command_audit ca WHERE ca.command_id = NEW.id) THEN
-    RAISE EXCEPTION 'comando remoto sem trilha em command_audit é proibido';
+  IF NEW.created_by IS DISTINCT FROM v_uid THEN
+    -- silencioso e deliberado: o servidor é a autoridade sobre quem assinou
+    NEW.created_by := v_uid;
   END IF;
+
+  SELECT p.full_name, p.email INTO v_name, v_email
+    FROM public.profiles p WHERE p.id = v_uid;
+  v_name := COALESCE(NULLIF(btrim(v_name),''), NULLIF(btrim(v_email),''));
+  IF v_name IS NULL THEN
+    RAISE EXCEPTION 'usuário % não tem perfil com nome ou e-mail — comando recusado', v_uid;
+  END IF;
+
+  -- Trilha criada no servidor, para o comando legado não ficar sem autoria.
+  INSERT INTO public.command_audit
+    (command_id, client_event_id, farm_id, equipment_id, equipment_name,
+     user_id, user_email, actor_label, origin_kind, intent, frame,
+     source_device, status_final, command_created_at, details)
+  SELECT NEW.id, NEW.client_event_id, NEW.farm_id, NEW.equipment_id, e.name,
+         v_uid, v_email, v_name, 'panel-legacy',
+         CASE WHEN NEW.frame ~ '\{0*1\}' THEN 'turn_on' ELSE 'turn_off' END,
+         NEW.frame, NEW.source_device, 'pending', now(),
+         jsonb_build_object('authorship_source','command_audit',
+                            'legacy_direct_insert', true,
+                            'profile_snapshot', jsonb_build_object('full_name', v_name, 'email', v_email))
+    FROM public.equipments e WHERE e.id = NEW.equipment_id
+  ON CONFLICT (command_id) DO NOTHING;
+
   RETURN NEW;
 END; $$;
 
@@ -213,7 +249,12 @@ GRANT EXECUTE ON FUNCTION public.command_authorship_health() TO authenticated, s
 --   -- tentativa de INSERT direto (deve FALHAR):
 --   INSERT INTO public.commands (farm_id,equipment_id,type,frame)
 --   VALUES ('<farm>','<equip>','manual','x');
--- ROLLBACK OBSERVÁVEL (nunca inseguro):
---   UPDATE public.farms SET command_rpc_enforced = false WHERE id = '<farm>';
---   -- autor e trilha continuam obrigatórios mesmo assim.
+-- ORDEM SEGURA (ver 20260814260100):
+--   1. aplicar ESTA migration junto com o commandQueue já chamando a RPC;
+--   2. validar command_id/actor_user_id/confirmação física com comandos reais;
+--   3. só então aplicar 20260814260100, que liga o bloqueio definitivo.
+-- ROLLBACK sem parar Ligar/Desligar:
+--   UPDATE public.farms SET command_rpc_enforced = false;
+--   -- volta à transição: INSERT direto entra, mas com autoria FORÇADA
+--   -- server-side e trilha criada pelo trigger. Nunca sem autor.
 -- ============================================================================

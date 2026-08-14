@@ -227,26 +227,32 @@ export async function enqueueManualPumpCommand(args: {
   // Comando manual só pode virar falha depois da janela física completa de
   // 120s; o timeout curto de 8/10s é apenas comunicação/RF, não desobediência.
   const clientEventId = crypto.randomUUID();
-  const { data: inserted, error: insErr } = await supabase
-    .from("commands")
-    .insert({
-      farm_id: equipment.farm_id,
-      equipment_id: equipment.id,
-      plc_hw_id: tsnn,
-      type: "manual",
-      priority: 1,
-      frame,
-      timeout_ms: 120_000,
-      created_by: commandUserId,
-      client_event_id: clientEventId,
-      source_device: typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 80) : null,
-    })
-    .select("id")
-    .single();
+
+  // AUTORIA SERVER-SIDE. O comando NÃO é mais inserido daqui: quem cria é a
+  // RPC `enqueue_remote_command`, que tira o autor de auth.uid() e emite um
+  // command_id imutável antes de o comando entrar na fila. O frontend não
+  // manda — e não consegue mandar — quem é a pessoa: a RPC não tem parâmetro
+  // de usuário. `commandUserId` continua sendo usado só para o rótulo local
+  // do card, nunca como autoria oficial.
+  //
+  // A idempotency key evita comando duplicado num duplo clique ou num retry
+  // de rede: repetir a mesma chave devolve o MESMO command_id.
+  const { data: enq, error: insErr } = await supabase.rpc("enqueue_remote_command", {
+    _equipment_id: equipment.id,
+    _intent: args.turnOn ? "turn_on" : "turn_off",
+    _frame: frame,
+    _plc_hw_id: tsnn,
+    _idempotency_key: clientEventId,
+    _client_event_id: clientEventId,
+    _source_device: typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 80) : null,
+    _timeout_ms: 120_000,
+  });
 
   if (insErr) throw new Error(insErr.message);
+  const enqRow = Array.isArray(enq) ? enq[0] : enq;
+  if (!enqRow?.command_id) throw new Error("Comando não foi registrado com autoria.");
 
-  const insertedCommandId = (inserted as { id: string }).id;
+  const insertedCommandId = enqRow.command_id as string;
   const { error: syncPendingErr } = await supabase
     .from("equipments")
     .update({

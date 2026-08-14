@@ -11,9 +11,11 @@ export interface FarmHeaderInfo {
 }
 
 const DEFAULT_FARM: FarmHeaderInfo = { name: "Fazenda", city: null, state: null, phone: null };
-// Usa o actor_label como veio (já resolvido no componente). null/vazio → "Desconhecido"
+// Usa o actor_label como veio, já resolvido no array canônico do componente.
 // (nunca "Sistema" inventado nem "Remoto (usuário não registrado)").
-const safeAutomationUser = (user?: string | null) => user && user.trim() ? user.trim() : "Desconhecido";
+// O antigo `safeAutomationUser` foi REMOVIDO: ele trocava usuário vazio por um
+// rótulo genérico só no CSV/PDF, inventando autoria que a tela nunca mostrou.
+// O Relatório de Automação não tem mais nenhum fallback textual de autoria.
 
 // ============================================================================
 // Premium PDF Design System — shared across all reports
@@ -234,10 +236,9 @@ export interface AutomacaoExportRow {
 }
 
 // "OK" só para sucesso/executed; timeout/error/fail → "Falhou".
-const resultLabel = (r?: string) => {
-  const s = (r ?? "").toLowerCase();
-  return s === "fail" || s === "failed" || s === "timeout" || s === "error" ? "Falhou" : "OK";
-};
+// `resultLabel` foi REMOVIDO junto com a coluna Resultado do PDF: o
+// Relatório de Automação só contém transição física confirmada, então
+// "Falhou" deixou de ser representável.
 
 export async function exportAutomacaoPDF(data: AutomacaoExportRow[], farm: FarmHeaderInfo = DEFAULT_FARM, period?: { from: string; to: string }) {
   const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
@@ -255,12 +256,13 @@ export async function exportAutomacaoPDF(data: AutomacaoExportRow[], farm: FarmH
   const startY = await drawHeader(doc, farm, "Relatório de Automação", subtitle);
 
   autoTable(doc, sharedTableOptions(startY, {
-    head: upperHead(["Data", "Hora", "Equipamento", "Ação", "Origem", "Usuário", "Resultado"]),
-    body: data.map((r) => [r.date, r.time, r.pump, r.action, r.origin, safeAutomationUser(r.user), resultLabel(r.result)]),
+    head: upperHead(["Data", "Hora", "Equipamento", "Ação", "Origem", "Usuário"]),
+    // Sem coluna Resultado: se a linha está no relatório oficial, houve
+    // transição física confirmada. "Falhou" não é representável aqui.
+    body: data.map((r) => [r.date, r.time, r.pump, r.action, r.origin, r.user ?? ""]),
     columnStyles: {
       0: { cellWidth: 24 },   // Data — largura suficiente p/ "DD/MM/AAAA" sem cortar o ano
       1: { cellWidth: 15 },
-      6: { halign: "center", cellWidth: 20 },
     },
     didParseCell: (data) => {
       if (data.section !== "body") return;
@@ -271,16 +273,6 @@ export async function exportAutomacaoPDF(data: AutomacaoExportRow[], farm: FarmH
           data.cell.styles.textColor = COLOR.green;
           data.cell.styles.fontStyle = "bold";
         } else if (txt.includes("desligar") || txt === "desligada" || txt.includes("desligou")) {
-          data.cell.styles.textColor = COLOR.red;
-          data.cell.styles.fontStyle = "bold";
-        }
-      }
-      // Color "Resultado" column (index 6)
-      if (data.column.index === 6) {
-        if (txt === "ok") {
-          data.cell.styles.textColor = COLOR.green;
-          data.cell.styles.fontStyle = "bold";
-        } else if (txt === "falhou") {
           data.cell.styles.textColor = COLOR.red;
           data.cell.styles.fontStyle = "bold";
         }
@@ -409,7 +401,10 @@ export async function exportDemandaPDF(
 
 export function exportAutomacaoCSV(data: { date: string; time: string; pump: string; action: string; origin: string; user: string }[]) {
   const header = "Data,Hora,Equipamento,Ação,Origem,Usuário";
-  const rows = data.map((r) => `${r.date},${r.time},${r.pump},${r.action},${r.origin},${safeAutomationUser(r.user)}`);
+  // Sem fallback textual de autoria: o que a tela mostra é o que sai aqui.
+  // Se o usuário estiver vazio, a linha não deveria estar no oficial — o
+  // guarda server-side a mantém fora. Não inventamos rótulo nenhum.
+  const rows = data.map((r) => `${r.date},${r.time},${r.pump},${r.action},${r.origin},${r.user ?? ""}`);
   const csv = [header, ...rows].join("\n");
   downloadFile(csv, "relatorio-automacao.csv", "text/csv");
 }
