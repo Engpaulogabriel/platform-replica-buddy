@@ -103,10 +103,12 @@ BEGIN
   -- neste mesmo escopo (Postgres não tem transação autônoma). A mensagem clara
   -- ao operador tem prioridade sobre o log. Quem quiser a trilha deve chamar
   -- antes `public.check_switching_protection()`, que registra e commita.
+  -- Mensagem SEM tempo: o usuário não precisa (e não deve) ver relógio técnico.
+  -- Os segundos restantes seguem disponíveis para diagnóstico em
+  -- switching_protection_status(), restrito ao Setor Técnico.
   RAISE EXCEPTION USING
     ERRCODE = 'check_violation',
-    MESSAGE = 'Aguarde ' || v_rest || ' segundos para novo comando. A última mudança foi confirmada às '
-              || to_char(v_at AT TIME ZONE 'America/Sao_Paulo', 'HH24:MI:SS') || '.',
+    MESSAGE = 'Proteção de comutação ativa. Aguarde a liberação antes de novo comando.',
     HINT    = 'switching_protection_active';
 END; $$;
 
@@ -147,9 +149,10 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN NULL;   -- trilha é best-effort, nunca bloqueia
   END;
 
+  -- idem: mensagem simples ao usuário; v_rest fica só no retorno estruturado,
+  -- para o Setor Técnico, nunca para o card operacional.
   RETURN QUERY SELECT false, v_rest,
-    ('Aguarde ' || v_rest || ' segundos para novo comando. A última mudança foi confirmada às '
-     || to_char(v_at AT TIME ZONE 'America/Sao_Paulo', 'HH24:MI:SS') || '.')::text;
+    'Proteção de comutação ativa. Aguarde a liberação antes de novo comando.'::text;
 END; $$;
 GRANT EXECUTE ON FUNCTION public.check_switching_protection(uuid, uuid, text) TO authenticated, service_role;
 

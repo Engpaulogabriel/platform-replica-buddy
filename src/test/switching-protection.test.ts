@@ -82,8 +82,9 @@ describe("a trava nasce da confirmação física", () => {
 describe("recusa server-side durante a trava", () => {
   it("3. comando dentro da janela é RECUSADO com mensagem clara", async () => {
     await confirm(d, P12, "000000");
-    await expect(cmd(d, P12)).rejects.toThrow(/Aguarde \d+ segundos para novo comando/);
-    await expect(cmd(d, P12)).rejects.toThrow(/confirmada às \d\d:\d\d:\d\d/);
+    await expect(cmd(d, P12)).rejects.toThrow(/Proteção de comutação ativa/);
+    // a mensagem ao usuário NÃO revela tempo
+    await expect(cmd(d, P12)).rejects.not.toThrow(/\d+ segundos|\d\d:\d\d/);
   });
 
   it("8. comando recusado NÃO cria linha em commands", async () => {
@@ -99,7 +100,8 @@ describe("recusa server-side durante a trava", () => {
       `SELECT * FROM public.check_switching_protection($1,$2,'web')`, [P12, ADMIN]);
     expect(r.rows[0].allowed).toBe(false);
     expect(r.rows[0].seconds_remaining).toBeGreaterThan(0);
-    expect(r.rows[0].message).toMatch(/Aguarde \d+ segundos para novo comando/);
+    expect(r.rows[0].message).toBe("Proteção de comutação ativa. Aguarde a liberação antes de novo comando.");
+    expect(r.rows[0].message).not.toMatch(/\d/);   // sem número algum
 
     const t = await d.query<any>(
       `SELECT details->>'reason' r, (details->>'seconds_remaining')::int s FROM public.agent_technical_events`);
@@ -158,7 +160,7 @@ describe("caso real POÇO 12 R6 e concorrência", () => {
     await confirm(d, P12, "000000");                       // bomba confirma OFF
     expect((await status(d, P12)).locked).toBe(true);
 
-    await expect(cmd(d, P12)).rejects.toThrow(/Aguarde/);   // tentativa em 5s
+    await expect(cmd(d, P12)).rejects.toThrow(/Proteção de comutação ativa/);  // tentativa em 5s
 
     await d.query(`UPDATE public.equipments SET command_lock_until = now() - interval '1 ms' WHERE id=$1`, [P12]);
     await cmd(d, P12);                                      // liberado
@@ -209,19 +211,20 @@ describe("frontend espelha a trava", () => {
     expect(TABLE).toContain("commandLockUntil?: number;");
   });
 
-  it("card mostra badge com contagem e hora da última confirmação", () => {
-    expect(CARD).toContain("Proteção de comutação · {lockSecondsLeft}s");
+  it("badge da trava não revela tempo algum", () => {
+    expect(CARD).toContain("Proteção de comutação ativa");
     expect(CARD).toContain('data-testid="switching-lock"');
-    expect(CARD).toContain("lastConfirmedLabel");
+    expect(CARD).not.toContain("lockSecondsLeft");
+    expect(CARD).not.toContain("lastConfirmedLabel");
   });
 
   it("controles do poço ficam desabilitados durante a trava", () => {
     expect(CARD).toMatch(/disabled=\{[^}]*switchingLocked/s);
   });
 
-  it("libera sozinho: contagem regressiva por segundo só enquanto travado", () => {
-    expect(CARD).toContain("if (!lockUntil || Date.now() >= lockUntil) return;");
-    expect(CARD).toContain("setTickNow(Date.now())");
+  it("libera sozinho no instante da expiração, sem contador visível", () => {
+    expect(CARD).toContain("setTimeout(() => setLockExpiredAt(lockUntil), ms)");
+    expect(CARD).not.toContain("setInterval");   // nada de tique por segundo
   });
 
   it("o card NÃO decide o bloqueio — só espelha o valor do servidor", () => {

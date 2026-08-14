@@ -12,7 +12,6 @@ import {
   Hand, Info, Wrench,
 } from "lucide-react";
 
-import { formatLastSeen } from "@/hooks/useDashboardEquipment";
 import { useOpenMaintenance } from "@/contexts/MaintenanceContext";
 import { problemLabel } from "@/lib/maintenanceTypes";
 import { clearAutomationGuard } from "@/lib/automationGuard";
@@ -92,11 +91,10 @@ function PumpCardImpl(props: PumpCardProps) {
   const maintIsBlue = !!inMaintenance;
   const maintIsYellow = !inMaintenance && !!maint;
   const inMaint = maintIsBlue || maintIsYellow; // usado só para suprimir o glow
-  // Minutos desde a última comunicação real — alimenta o indicador discreto "⏱ Xmin"
-  // (instável, sem alarme) e o tooltip de offline. null quando nunca comunicou.
-  const minutesSinceComm = pump.lastCommunication
-    ? Math.max(0, Math.floor((Date.now() - new Date(pump.lastCommunication).getTime()) / 60_000))
-    : null;
+  // TEMPO TÉCNICO REMOVIDO DO CARD OPERACIONAL. Minutos desde a última
+  // comunicação, horários de leitura e latência não são informação de operação:
+  // poluem o card e expõem diagnóstico a qualquer usuário. Diagnóstico de tempo
+  // vive no Setor Técnico (platform_admin/owner), fora daqui.
 
   // ── Badge de origem LOCAL ─────────────────────────────────────────────────
   // Só em estado ESTÁVEL: NUNCA durante uma transição (Ligando/Desligando). Um pump
@@ -123,18 +121,17 @@ function PumpCardImpl(props: PumpCardProps) {
   // `tickNow` re-renderiza a cada segundo só enquanto a trava está ativa, para
   // a contagem regressiva liberar sozinha, sem F5.
   const lockUntil = pump.commandLockUntil ?? 0;
-  const [tickNow, setTickNow] = useState(() => Date.now());
+  // Sem contador regressivo: o card não revela relógio. Um único timeout no
+  // instante da expiração apenas libera o controle, sem F5 e sem exibir tempo.
+  const [lockExpiredAt, setLockExpiredAt] = useState(0);
   useEffect(() => {
-    if (!lockUntil || Date.now() >= lockUntil) return;
-    const t = setInterval(() => setTickNow(Date.now()), 1_000);
-    return () => clearInterval(t);
+    if (!lockUntil) return;
+    const ms = lockUntil - Date.now();
+    if (ms <= 0) { setLockExpiredAt(lockUntil); return; }
+    const t = setTimeout(() => setLockExpiredAt(lockUntil), ms);
+    return () => clearTimeout(t);
   }, [lockUntil]);
-  const lockSecondsLeft = lockUntil > tickNow ? Math.ceil((lockUntil - tickNow) / 1000) : 0;
-  const switchingLocked = lockSecondsLeft > 0;
-  const lastConfirmedLabel = pump.lastConfirmedTransitionAt
-    ? new Date(pump.lastConfirmedTransitionAt).toLocaleTimeString("pt-BR",
-        { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-    : null;
+  const switchingLocked = !!lockUntil && lockExpiredAt !== lockUntil && Date.now() < lockUntil;
 
   const bg = maintIsBlue
     // AZUL = manutenção bloqueante (técnico/admin, maintenance_mode).
@@ -240,28 +237,19 @@ function PumpCardImpl(props: PumpCardProps) {
           {isOffline && (
             <span
               className="text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded bg-destructive/20 text-destructive border border-destructive/50 shrink-0"
-              title={`Sem comunicação${minutesSinceComm != null ? ` há ${minutesSinceComm} min` : ""}. Última: ${formatLastSeen(pump.lastCommunication)}`}
+              title="Sem comunicação com o equipamento."
             >
               ⚠️ Offline
-            </span>
-          )}
-          {isUnstable && minutesSinceComm != null && (
-            <span
-              className="text-[9px] font-medium tracking-wide px-1 py-0.5 rounded bg-muted/60 text-muted-foreground shrink-0"
-              title={`Último estado conhecido — sem nova comunicação há ${minutesSinceComm} min (ainda dentro do tempo de proteção). Última: ${formatLastSeen(pump.lastCommunication)}`}
-            >
-              ⏱ {minutesSinceComm}min
             </span>
           )}
           {switchingLocked && (
             <span
               data-testid="switching-lock"
               className="inline-flex items-center gap-1 text-[9px] font-medium tracking-wide px-1 py-0.5 rounded bg-muted text-muted-foreground border border-border shrink-0"
-              title={`Proteção de comutação: novos comandos remotos ficam bloqueados por alguns segundos após cada mudança confirmada.${lastConfirmedLabel ? ` Última confirmação às ${lastConfirmedLabel}.` : ""}`}
+              title="Proteção de comutação ativa. Aguarde a liberação antes de novo comando."
             >
               <Lock className="w-3 h-3" />
-              Proteção de comutação · {lockSecondsLeft}s
-              {lastConfirmedLabel ? ` · ${lastConfirmedLabel}` : ""}
+              Proteção de comutação ativa
             </span>
           )}
           {commandUnconfirmed && (
@@ -342,10 +330,10 @@ function PumpCardImpl(props: PumpCardProps) {
               className="flex items-center gap-1"
               title={
                 isOffline
-                  ? `Sem sinal RF — última comunicação ${formatLastSeen(pump.lastCommunication)}`
+                  ? "Sem sinal RF"
                   : isUnstable
-                    ? `Sinal instável — última comunicação ${formatLastSeen(pump.lastCommunication)}`
-                    : `Sinal RF: ${pump.signalRF}% — última comunicação ${formatLastSeen(pump.lastCommunication)}`
+                    ? "Sinal instável"
+                    : `Sinal RF: ${pump.signalRF}%`
               }
             >
               <span className="flex gap-[1px] items-end h-3">
@@ -448,26 +436,6 @@ function PumpCardImpl(props: PumpCardProps) {
               </div>
 
               <div className="p-3 space-y-2">
-                {pump.lastReading && (
-                  <div className="flex items-start gap-1.5 text-muted-foreground bg-muted/40 rounded-md px-2 py-1.5">
-                    <Signal className="w-3 h-3 mt-0.5 shrink-0 text-primary" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground/80">Última leitura do poço</p>
-                      <p className="text-xs font-semibold text-foreground truncate">{pump.lastReading}</p>
-                      <p className="text-[10px] text-muted-foreground">
-                        {showLocal && !isTransitioning ? (
-                          <span className="font-bold text-warning">Local</span>
-                        ) : (
-                          <>
-                            Estava: <span className={`font-bold ${pump.running ? "text-primary" : "text-destructive"}`}>
-                              {pump.running ? "Ligado" : "Desligado"}
-                            </span>
-                          </>
-                        )}
-                      </p>
-                    </div>
-                  </div>
-                )}
 
                 {pump.commandHistory && pump.commandHistory.length > 0 && (
                   <div>

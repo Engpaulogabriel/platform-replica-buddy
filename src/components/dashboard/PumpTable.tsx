@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Droplets, Bot, Clock, Calendar, Zap, ZapOff, WifiOff, AlertTriangle, Signal, XCircle, RotateCcw, RefreshCw, CheckCircle2, MapPin, Layers, Tractor, Power, PowerOff } from "lucide-react";
 import { notify } from "@/lib/notify";
 import { loadFarms, loadSectors, findSectorForEquipment } from "@/lib/sectors";
-import { formatLastSeen } from "@/hooks/useDashboardEquipment";
 import { useAutomationGuards } from "@/hooks/useAutomationGuards";
 import { clearAutomationGuard } from "@/lib/automationGuard";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
