@@ -7,7 +7,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { Switch } from "@/components/ui/switch";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
-  Droplets, Bot, AlertTriangle, Signal, XCircle, RotateCcw, RefreshCw, MoreHorizontal,
+  Droplets, Bot, AlertTriangle, Signal, XCircle, RotateCcw, RefreshCw,
   CheckCircle2, MapPin, Layers, Tractor, Zap, ZapOff, MessageCircle, Lock,
   Hand, Info, Wrench,
 } from "lucide-react";
@@ -390,25 +390,48 @@ function PumpCardImpl(props: PumpCardProps) {
           )}
           <Popover>
             <PopoverTrigger asChild>
-              {/* ÍCONE DE CARREGAMENTO/REFRESH REMOVIDO DO CARD.
-                  Antes este botão era um RefreshCw que mudava de cor conforme o
-                  estado da COMUNICAÇÃO — e em `isUnstable` ficava AZUL
-                  (`text-info`, hue 210). Numa fazenda com latência isso pintava
-                  vários poços de azul, invadindo a cor que pertence só à
-                  manutenção técnica, e ainda expunha polling como estado visual.
-
-                  Agora é um acesso neutro aos detalhes: sem spinner, sem
-                  animação, sem semântica de cor. `refreshing`/`refreshResult`
-                  continuam existindo como ESTADO INTERNO e aparecem apenas
-                  dentro do popover, que o usuário abre por vontade própria. */}
               <button
                 onClick={(e) => e.stopPropagation()}
-                data-testid="pump-details-trigger"
-                className="flex items-center shrink-0 text-muted-foreground transition-colors hover:text-foreground"
-                title="Ver detalhes do poço"
-                aria-label="Ver detalhes do poço"
+                data-testid="pump-refresh-button"
+                className={`flex items-center shrink-0 transition-colors hover:text-primary ${
+                  isOffline
+                    ? "text-muted-foreground"
+                    : refreshing
+                      ? lastFailed ? "text-destructive" : "text-warning"
+                      : refreshResult === "success"
+                        ? "text-primary"
+                        : refreshResult === "fail" || lastFailed
+                          ? "text-destructive"
+                          // ÚNICA MUDANÇA: comunicação instável NÃO pinta o
+                          // ícone de azul. `text-info` (hue 210) é a cor da
+                          // manutenção técnica; numa fazenda com latência isso
+                          // pintava vários poços de azul sem haver manutenção.
+                          // O ícone volta à cor operacional normal.
+                          : "text-primary"
+                }`}
+                title={
+                  refreshing
+                    ? "Atualizando leitura da bomba..."
+                    : refreshResult === "success"
+                      ? "Leitura confirmada com sucesso"
+                      : refreshResult === "fail" || lastFailed
+                        ? "Falha na última leitura — clique para tentar novamente"
+                        : "Atualizar status (faz nova leitura na bomba)"
+                }
               >
-                <MoreHorizontal className="w-3.5 h-3.5" />
+                {/* Spinner do ícone de refresh SÓ no refresh MANUAL (não em pending/
+                    transição). A transição "Ligando…/Desligando…" é mostrada como
+                    TEXTO (span pendingLabel abaixo), não como spinner eterno — assim
+                    o desligamento forçado não deixa o ícone girando para sempre. */}
+                {refreshing ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : refreshResult === "success" ? (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                ) : refreshResult === "fail" || lastFailed ? (
+                  <AlertTriangle className="w-3.5 h-3.5 animate-pulse" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
               </button>
             </PopoverTrigger>
             <PopoverContent side="top" align="end" className="w-[320px] p-0 text-xs overflow-hidden">
