@@ -32,6 +32,7 @@ import { toast } from "sonner";
 // Diagrama hidráulico só carrega quando a aba "Diagrama" é aberta.
 const WaterFlowDiagram = lazy(() => import("@/components/dashboard/WaterFlowDiagram"));
 import { useDashboardEquipment } from "@/hooks/useDashboardEquipment";
+import { RealtimeHealthBadge } from "@/components/dashboard/RealtimeHealthBadge";
 import { BridgeStatusCard } from "@/components/dashboard/BridgeStatusCard";
 import { WaterBalanceCard } from "@/components/dashboard/WaterBalanceCard";
 import { IndicatorsMiniSummary } from "@/components/dashboard/IndicatorsMiniSummary";
@@ -193,7 +194,8 @@ const Dashboard = () => {
   const userEmail = profileName ?? user?.user_metadata?.full_name ?? user?.email ?? "Sistema";
 
   // Fonte única: cadastros da nuvem + telemetria simulada
-  const { pumps, reservoirs: allReservoirs, setPumps, setReservoirs, loading, cloudEquipments } = useDashboardEquipment();
+  const { pumps, reservoirs: allReservoirs, setPumps, setReservoirs, loading, cloudEquipments,
+          realtimeHealth, lastPhysicalReadAt } = useDashboardEquipment();
   const farmFeatures = useFarmFeatures();
   // Quando o módulo de Níveis está desativado para a fazenda, oculta
   // completamente os reservatórios do dashboard (stats, listas, ordem, etc.).
@@ -1010,8 +1012,11 @@ const Dashboard = () => {
 
       {/* Header with view toggle */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-        <div>
+        <div className="flex flex-col gap-0.5">
           <p className="text-xs text-muted-foreground">{t.realTimeMonitoring}</p>
+          {/* Indicador técnico da assinatura — só platform_admin/owner.
+              Diagnóstico puro: não altera cor, estado nem comando de bomba. */}
+          <RealtimeHealthBadge health={realtimeHealth} lastPhysicalReadAt={lastPhysicalReadAt} />
         </div>
         <div className="flex items-center gap-2 w-full sm:w-auto">
           <Button

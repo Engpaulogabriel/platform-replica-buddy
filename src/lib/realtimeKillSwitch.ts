@@ -11,15 +11,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from "@/integrations/supabase/client";
 
-// DESLIGADO. O kill switch derrubava TODO o Realtime do app: o stub responde
-// `CLOSED` imediatamente no subscribe, então nenhum evento de `equipments`
-// chegava e os cards só mudavam com F5. Era a causa global do dashboard atrasado
-// (POÇO 12 R6 confirmado OFF no banco às 14:29:51 com o card ainda verde).
+// ATIVO POR PADRÃO — decisão deliberada. O kill switch derrubava TODO o Realtime
+// do app (o stub responde `CLOSED` no subscribe), o que era a causa global do
+// dashboard atrasado: nenhum evento de `equipments` chegava e os cards só mudavam
+// com F5 (POÇO 12 R6 confirmado OFF no banco às 14:29:51 com o card ainda verde).
 //
-// Passa a ser controlado por ambiente, para poder ser reativado em emergência
-// sem alterar código: VITE_REALTIME_DISABLED=true.
+// Em vez de reativar os NOVE módulos de uma vez — risco de reproduzir o incidente
+// que motivou o kill switch — apenas o DASHBOARD DE BOMBAS usa o bypass explícito
+// getRealtimeChannel()/removeRealtimeChannel(). Os demais seguem bloqueados até
+// auditoria separada: useCloudAutomation, useSiteHealth, useCommandQueueStatus,
+// farmRealtimeBus, PeakHourBanner, AgentLiveLogs, PlatformServiceMode e
+// AuthorshipReconciliationQueue.
+//
+// VITE_REALTIME_DISABLED=false libera tudo, se um dia a auditoria concluir isso.
 export const REALTIME_DISABLED =
-  String(import.meta.env.VITE_REALTIME_DISABLED ?? "").toLowerCase() === "true";
+  String(import.meta.env.VITE_REALTIME_DISABLED ?? "true").toLowerCase() !== "false";
 
 // Guardamos as implementações originais ANTES de instalar o stub, para que
 // componentes específicos possam optar por Realtime real quando necessário.

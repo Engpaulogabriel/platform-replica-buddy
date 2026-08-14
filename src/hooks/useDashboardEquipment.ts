@@ -1023,5 +1023,8 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
     setReservoirs,
     loading: cloud.loading,
     cloudEquipments: cloud.equipments,
+    // Saúde da assinatura, para o indicador técnico do header (diagnóstico puro).
+    realtimeHealth: cloud.realtimeHealth,
+    lastPhysicalReadAt: cloud.lastPhysicalReadAt,
   };
 }

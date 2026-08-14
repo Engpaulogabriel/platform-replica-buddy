@@ -163,10 +163,13 @@ describe("kill switch global do Realtime", () => {
     expect(KILL).toContain("VITE_REALTIME_DISABLED");
   });
 
-  it("por padrão (sem env) o Realtime fica HABILITADO", async () => {
+  it("permanece ATIVO por padrão — só o dashboard usa bypass", async () => {
+    // Decisão deliberada: reativar os nove módulos de uma vez poderia
+    // reproduzir o incidente que motivou o kill switch. O dashboard sai pelo
+    // bypass explícito getRealtimeChannel(); os demais seguem bloqueados.
     vi.resetModules();
     const mod = await import("@/lib/realtimeKillSwitch");
-    expect(mod.REALTIME_DISABLED).toBe(false);
+    expect(mod.REALTIME_DISABLED).toBe(true);
   });
 
   it("canal que responde CLOSED na hora não gera reinscrição infinita", () => {

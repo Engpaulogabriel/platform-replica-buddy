@@ -10,6 +10,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+// BYPASS EXPLÍCITO do kill switch global: o dashboard de bombas PRECISA de
+// Realtime real em `public.equipments` — é onde apply_pump_telemetry grava
+// last_outputs_state a cada RX físico. Os demais módulos seguem bloqueados.
+import { getRealtimeChannel, removeRealtimeChannel } from "@/lib/realtimeKillSwitch";
 import { useAuth } from "@/contexts/AuthContext";
 import { notifyRegistry } from "@/lib/notify";
 import { enqueue, isOnline } from "@/lib/offlineQueue";
@@ -272,14 +276,13 @@ export function useCadastrosCloud() {
 
     const subscribePostgresChanges = (farmId: string) => {
       if (cancelled) return;
-      if (channel) { try { void supabase.removeChannel(channel); } catch { /* ignore */ } channel = null; }
-      const ch = supabase
-        .channel(`cadastros-${farmId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`)
+      if (channel) { try { void removeRealtimeChannel(channel); } catch { /* ignore */ } channel = null; }
+      const ch = getRealtimeChannel(`cadastros-${farmId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`)
         .on("postgres_changes", { event: "*", schema: "public", table: "plc_groups", filter: `farm_id=eq.${farmId}` }, scheduleReload)
         .on("postgres_changes", { event: "*", schema: "public", table: "equipments", filter: `farm_id=eq.${farmId}` }, handleEquipmentChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "sectors", filter: `farm_id=eq.${farmId}` }, scheduleReload)
         .subscribe((status) => {
-          if (cancelled) { try { void supabase.removeChannel(ch); } catch { /* ignore */ } return; }
+          if (cancelled) { try { void removeRealtimeChannel(ch); } catch { /* ignore */ } return; }
           const ok = status === "SUBSCRIBED";
           setState((s) => (s.realtimeConnected === ok && s.realtimeHealth === (ok ? "connected" : s.realtimeHealth)
             ? s
@@ -318,7 +321,7 @@ export function useCadastrosCloud() {
       channel = ch;
       // Race: se o cleanup rodou DURANTE o setup acima, ele capturou channel=null
       // e não removeu este canal. Remove agora para não vazar nem segurar slot Realtime.
-      if (cancelled) { try { void supabase.removeChannel(ch); } catch { /* ignore */ } channel = null; }
+      if (cancelled) { try { void removeRealtimeChannel(ch); } catch { /* ignore */ } channel = null; }
     };
 
     const boot = async () => {
@@ -393,8 +396,9 @@ export function useCadastrosCloud() {
 
           // Canal Broadcast paralelo (WebSocket direto, sem passar pelo banco).
           if (cancelled) return;
-          const bch = supabase
-            .channel(`farm-${farmId}`)
+          // Também pelo bypass: este canal entrega estado de equipamento por
+          // broadcast (sem passar pelo banco) e alimenta os mesmos cards.
+          const bch = getRealtimeChannel(`farm-${farmId}`)
             .on("broadcast", { event: "equipment_state" }, (msg: any) => {
               if (cancelled) return;
               const p = msg?.payload;
@@ -413,7 +417,7 @@ export function useCadastrosCloud() {
             })
             .subscribe();
           broadcastChannel = bch;
-          if (cancelled) { try { void supabase.removeChannel(bch); } catch { /* ignore */ } broadcastChannel = null; }
+          if (cancelled) { try { void removeRealtimeChannel(bch); } catch { /* ignore */ } broadcastChannel = null; }
 
           // ── Safari/aba em segundo plano ───────────────────────────────────
           // O WebSocket costuma ser suspenso quando a aba sai de foco; ao voltar,
@@ -462,8 +466,8 @@ export function useCadastrosCloud() {
         window.removeEventListener("focus", visibilityHandler);
         window.removeEventListener("online", visibilityHandler);
       }
-      if (channel) { try { void supabase.removeChannel(channel); } catch { /* ignore */ } }
-      if (broadcastChannel) { try { void supabase.removeChannel(broadcastChannel); } catch { /* ignore */ } }
+      if (channel) { try { void removeRealtimeChannel(channel); } catch { /* ignore */ } }
+      if (broadcastChannel) { try { void removeRealtimeChannel(broadcastChannel); } catch { /* ignore */ } }
       if (reloadDebounceRef.current) clearTimeout(reloadDebounceRef.current);
     };
   }, [user, loadAll, scheduleReload, refresh]);
