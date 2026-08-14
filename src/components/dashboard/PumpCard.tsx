@@ -450,7 +450,7 @@ function PumpCardImpl(props: PumpCardProps) {
                         : "bg-destructive/20 text-destructive"
                   }`}>
                     {/* Instável → mostra o ÚLTIMO estado conhecido (Ligado/Desligado),
-                        nunca "offline"; o "⏱ Xmin" fica no badge. */}
+                        nunca "offline". */}
                     {isOffline ? "⚠️ Offline" : pump.running ? "Ligado" : "Desligado"}
                   </span>
                 )}
@@ -489,7 +489,10 @@ function PumpCardImpl(props: PumpCardProps) {
                             {failed && (
                               <span className="text-[9px] font-bold text-destructive uppercase">Falhou</span>
                             )}
-                            <span className="text-[10px] text-muted-foreground ml-auto whitespace-nowrap">{cmd.time}</span>
+                            {/* horário no popover operacional também é tempo técnico */}
+                            {showTimes && (
+                              <span data-testid="technical-cmd-time" className="text-[10px] text-muted-foreground ml-auto whitespace-nowrap">{cmd.time}</span>
+                            )}
                           </div>
                         );
                       })}
@@ -519,7 +522,9 @@ function PumpCardImpl(props: PumpCardProps) {
                             }`}>
                               {isLocal ? "Local" : "Remoto"}
                             </span>
-                            <span className="text-[10px] text-muted-foreground ml-auto whitespace-nowrap">{st.time}</span>
+                            {showTimes && (
+                              <span data-testid="technical-status-time" className="text-[10px] text-muted-foreground ml-auto whitespace-nowrap">{st.time}</span>
+                            )}
                           </div>
                         );
                       })}
