@@ -182,7 +182,41 @@ ORDER BY a.ini DESC;
 $$;
 GRANT EXECUTE ON FUNCTION public.remote_authorship_decision(uuid, interval) TO authenticated, service_role;
 
--- ── 4) FILA DE RECONCILIAÇÃO EM LOTE (item 8) ───────────────────────────────
+-- ── 4) LOTES + FILA DE RECONCILIAÇÃO ────────────────────────────────────────
+-- authorship_reconciliation_batches: registro APPEND-ONLY do lote operacional
+-- (o "o que foi decidido"). remote_reconciliation_queue: o estado de trabalho
+-- (o "o que falta decidir"). Separadas de propósito: a fila é consumida, o
+-- registro do lote permanece para auditoria.
+CREATE TABLE IF NOT EXISTS public.authorship_reconciliation_batches (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  farm_id        uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
+  batch_id       text NOT NULL,
+  started_at     timestamptz NOT NULL,
+  ended_at       timestamptz NOT NULL,
+  intent         text NOT NULL,
+  event_ids      uuid[] NOT NULL,
+  events_total   int NOT NULL,
+  applied_user   uuid,
+  applied_email  text,
+  applied_actor  text,
+  applied_by     uuid,
+  applied_at     timestamptz NOT NULL DEFAULT now(),
+  evidence       text,
+  confidence     text,
+  source         text NOT NULL DEFAULT 'batch_reconciliation'
+);
+CREATE INDEX IF NOT EXISTS idx_arb_farm ON public.authorship_reconciliation_batches (farm_id, applied_at DESC);
+CREATE INDEX IF NOT EXISTS idx_arb_batch ON public.authorship_reconciliation_batches (batch_id);
+ALTER TABLE public.authorship_reconciliation_batches ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS arb_select ON public.authorship_reconciliation_batches;
+CREATE POLICY arb_select ON public.authorship_reconciliation_batches
+  FOR SELECT TO authenticated USING (public.has_farm_access(auth.uid(), farm_id));
+-- Sem policy de INSERT/UPDATE/DELETE: só o RPC SECURITY DEFINER escreve.
+
+COMMENT ON TABLE public.authorship_reconciliation_batches IS
+  'Registro append-only de cada reconciliação de autoria aplicada em lote: quem decidiu, quando, com que evidência e sobre quais ids.';
+
+-- ── 4.1) FILA DE RECONCILIAÇÃO EM LOTE (item 8) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS public.remote_reconciliation_queue (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id         uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -294,6 +328,15 @@ BEGIN
   UPDATE public.remote_reconciliation_queue
      SET status='applied', applied_user=_user_id, applied_by=_executor, applied_at=now()
    WHERE id = _queue_id;
+
+  -- registro append-only do que foi decidido (permanece após a fila esvaziar)
+  INSERT INTO public.authorship_reconciliation_batches (
+    farm_id, batch_id, started_at, ended_at, intent, event_ids, events_total,
+    applied_user, applied_email, applied_actor, applied_by, evidence, confidence)
+  VALUES (q.farm_id, q.batch_id, q.started_at, q.ended_at, q.intent,
+          _expected_ids, COALESCE(array_length(_expected_ids,1),0),
+          _user_id, v_email, COALESCE(v_nome, v_email), _executor,
+          COALESCE(_evidence, 'reconciliação de lote ' || q.batch_id), 'strong');
 
   RETURN n;
 END; $$;

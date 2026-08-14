@@ -160,6 +160,44 @@ describe("fila e aplicação em lote", () => {
     expect(r.rows.every((x:any)=>x.user_id===null)).toBe(true);
   });
 
+  it("grava o registro append-only do lote em authorship_reconciliation_batches", async () => {
+    await ev(d,{at:T(0),user:UA}); const i1=await ev(d,{at:T(1)}); const i2=await ev(d,{at:T(2)});
+    await d.query(`SELECT public.enqueue_remote_reconciliation($1)`,[F1]);
+    const q=await d.query<any>(`SELECT id FROM public.remote_reconciliation_queue`);
+    await d.query(`SELECT public.apply_remote_reconciliation($1,$2,$3::uuid[],$4,$5)`,
+      [q.rows[0].id,UA,[i1,i2],ADMIN,'evidência de teste']);
+    const b=await d.query<any>(`SELECT farm_id, events_total, applied_user, applied_email, applied_actor,
+      applied_by, evidence, confidence, source FROM public.authorship_reconciliation_batches`);
+    expect(b.rows).toHaveLength(1);
+    expect(b.rows[0].events_total).toBe(2);
+    expect(b.rows[0].applied_user).toBe(UA);
+    expect(b.rows[0].applied_email).toBe("a@ex.com");
+    expect(b.rows[0].applied_actor).toBe("Pessoa A");
+    expect(b.rows[0].applied_by).toBe(ADMIN);
+    expect(b.rows[0].evidence).toBe("evidência de teste");
+    expect(b.rows[0].confidence).toBe("strong");
+    expect(b.rows[0].source).toBe("batch_reconciliation");
+  });
+
+  it("tabelas e funções da fila existem (migration autocontida)", async () => {
+    for (const t of ["remote_reconciliation_queue","authorship_reconciliation_batches"]) {
+      const r=await d.query<any>(`SELECT to_regclass('public.'||$1) t`,[t]);
+      expect(r.rows[0].t).not.toBeNull();
+    }
+    for (const f of ["remote_authorship_decision","enqueue_remote_reconciliation",
+                     "apply_remote_reconciliation","remote_event_authorship_candidates",
+                     "authorship_source_catalog"]) {
+      const r=await d.query<any>(`SELECT count(*)::int n FROM pg_proc WHERE proname=$1`,[f]);
+      expect(Number(r.rows[0].n)).toBeGreaterThan(0);
+    }
+    // RLS ligada: operador comum não escreve
+    const rls=await d.query<any>(`SELECT relrowsecurity FROM pg_class WHERE relname='authorship_reconciliation_batches'`);
+    expect(rls.rows[0].relrowsecurity).toBe(true);
+    const pol=await d.query<any>(`SELECT count(*)::int n FROM pg_policies
+      WHERE tablename='authorship_reconciliation_batches' AND cmd<>'SELECT'`);
+    expect(Number(pol.rows[0].n)).toBe(0);   // só SELECT; escrita apenas via SECURITY DEFINER
+  });
+
   it("executor é obrigatório e user_id precisa existir", async () => {
     await ev(d,{at:T(0),user:UA}); const i1=await ev(d,{at:T(1)});
     await d.query(`SELECT public.enqueue_remote_reconciliation($1)`,[F1]);

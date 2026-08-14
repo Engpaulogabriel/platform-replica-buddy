@@ -44,7 +44,8 @@ INSERT INTO public.equipments VALUES ('${E1}','${F1}','BOMBA 1',NULL,NULL,0),('$
 
 async function mk(){ const d=await PGlite.create(); await d.exec(BOOT);
   await d.exec(mig("20260814202000_remote_authorship_recovery.sql"));
-  await d.exec(mig("20260814203000_report_audit_and_acceptance.sql")); return d; }
+  await d.exec(mig("20260814203000_report_audit_and_acceptance.sql"));
+  await d.exec(mig("20260814203100_fix_acceptance_and_audit.sql")); return d; }
 async function add(d:PGlite,o:any){
   await d.query(`INSERT INTO public.automation_log
     (farm_id,equipment_id,equipment_name,action,origin,result,actor_label,user_id,user_email,details,noise_reason,occurred_at)
@@ -114,6 +115,38 @@ describe("Etapa D — critérios de aceite", () => {
     expect(f1.remotos_com_nome).toBe(1);
     expect(f1.remotos_sem_nome).toBe(1);
     expect(f1.tecnicos_ruido_excluido).toBe(1);
+  });
+});
+
+describe("bugs corrigidos de 20260814203000", () => {
+  it("cada critério aparece EXATAMENTE uma vez, mesmo com violações", async () => {
+    // duplicidade real: dois ON seguidos no mesmo equipamento
+    await add(d,{origin:'local',actor:'A',details:{origin:'local'},at:'2026-08-11T21:19:00-03:00'});
+    await add(d,{origin:'local',actor:'A',details:{origin:'local'},at:'2026-08-11T21:20:00-03:00'});
+    const r = await acc(d);
+    const nomes = r.map((x:any)=>x.criterio);
+    expect(new Set(nomes).size).toBe(nomes.length);          // zero duplicata
+    expect(nomes).toHaveLength(8);                            // 8 critérios fixos
+    const c4 = r.filter((x:any)=>x.criterio.startsWith('4.'));
+    expect(c4).toHaveLength(1);                               // era 2 antes
+    expect(c4[0].situacao).toBe('REPROVADO');
+    expect(c4[0].violacoes).toBe(1);
+  });
+
+  it("critério sem violação aparece uma vez como PASSOU", async () => {
+    const r = await acc(d);
+    expect(r).toHaveLength(8);
+    expect(r.every((x:any)=>x.situacao==='PASSOU' && x.violacoes===0)).toBe(true);
+  });
+
+  it("fazenda SEM eventos não inventa contagem (artefato de LEFT JOIN)", async () => {
+    await add(d,{origin:'remote',user:UA,email:'a@ex.com',actor:'Pessoa A',details:{authorship_source:'command_audit'}});
+    const r=(await d.query<any>(`SELECT * FROM public.automation_report_farm_audit()`)).rows;
+    const vazia=r.find((x:any)=>x.fazenda==='Fazenda Dois');
+    expect(vazia.eventos_oficiais).toBe(0);
+    expect(vazia.transicoes_sem_prova).toBe(0);   // era 1 antes
+    expect(vazia.locais).toBe(0);
+    expect(vazia.remotos_sem_nome).toBe(0);
   });
 });
 

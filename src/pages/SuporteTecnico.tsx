@@ -25,6 +25,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { useGuidedTour } from "@/hooks/useGuidedTour";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
+import AuthorshipReconciliationQueue from "@/components/tecnico/AuthorshipReconciliationQueue";
 
 const tabs = [
   { value: "equipamentos", label: "Equipamentos", icon: ClipboardList },
@@ -53,7 +54,12 @@ const SuporteTecnico = () => {
   // Aba Segurança (eventos do agente) só para platform_admin e owner.
   const canViewSecurity = role === "platform_admin" || role === "owner";
   const shownTabs = useMemo(
-    () => (canViewSecurity ? [...tabs, { value: "seguranca", label: "Segurança", icon: ShieldAlert }] : tabs),
+    () => (canViewSecurity
+      ? [...tabs,
+         { value: "seguranca", label: "Segurança", icon: ShieldAlert },
+         // Fila de reconciliação de autoria — mesma restrição da aba Segurança.
+         { value: "autoria", label: "Autoria", icon: ShieldAlert }]
+      : tabs),
     [canViewSecurity],
   );
 
@@ -103,6 +109,9 @@ const SuporteTecnico = () => {
           <TabsContent value="manutencao" className="mt-4"><MaintenanceTab /></TabsContent>
           {canViewSecurity && (
             <TabsContent value="seguranca" className="mt-4"><SecurityEventsPanel /></TabsContent>
+          )}
+          {canViewSecurity && (
+            <TabsContent value="autoria" className="mt-4"><AuthorshipReconciliationQueue /></TabsContent>
           )}
           <TabsContent value="fazenda" className="mt-4"><FazendaContent /></TabsContent>
           <TabsContent value="temporizadores" className="mt-4"><TimersConfig /></TabsContent>
