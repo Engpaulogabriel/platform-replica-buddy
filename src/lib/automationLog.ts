@@ -52,6 +52,20 @@ export interface AutomationLogEntry {
   /** Método de confirmação FÍSICA (ex.: "Confirmado por telemetria RF").
    *  Detalhe técnico — vai em tooltip, NUNCA na coluna Usuário. */
   confirmationMethod?: string | null;
+  /** HH:mm:ss — a tabela desktop precisa dos segundos para distinguir
+   *  mudança física rápida de duplicidade. */
+  timeSec?: string;
+  /** Detalhe técnico, visível só para platform_admin/owner. */
+  tech?: {
+    id: string;
+    occurredAtBrt: string;
+    origin: string;
+    confirmationMethod: string | null;
+    agentDeclaredOrigin: string | null;
+    authorshipSource: string | null;
+    authorshipConfidence: string | null;
+    attributionUnavailable: boolean;
+  };
   /** true = já confirmado pela nuvem (insert OK ou veio via Realtime). */
   synced?: boolean;
 }
@@ -81,6 +95,9 @@ const formatDate = (d: Date) =>
 
 const formatTime = (d: Date) =>
   `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
+const formatTimeSec = (d: Date) =>
+  `${formatTime(d)}:${String(d.getSeconds()).padStart(2, "0")}`;
 
 export const useAutomationLog = create<LogState>()(
   persist(
@@ -288,12 +305,20 @@ const originFromDb = (o: DbOrigin): AutomationOrigin =>
 const actionToDb = (a: AutomationAction): DbAction =>
   a === "Ligada" ? "turn_on" : "turn_off";
 
+/** Texto único para evento remoto confirmado sem autoria humana identificada. */
+export const AUTHORSHIP_UNDER_REVIEW = "Autoria histórica em revisão";
+export const AUTHORSHIP_UNDER_REVIEW_TOOLTIP =
+  "Comando remoto confirmado. O histórico legado não preservou identidade suficiente para "
+  + "atribuição automática. O evento está na fila de revisão auditável.";
+
 /** Rótulos que descrevem o MÉTODO DE CONFIRMAÇÃO FÍSICA, não um ator humano.
  *  "Telemetria RF" é como o servidor soube que a bomba mudou — nunca quem mandou.
  *  Nenhum destes pode aparecer na coluna Usuário. */
 const TECHNICAL_ACTOR_PATTERNS = [
   "telemetria rf", "telemetria", "rf", "agent", "agente", "serial", "serial-bridge",
   "bridge", "system", "sistema", "cloud", "auto-trigger",
+  // rótulos que descrevem o CANAL/ORIGEM, não a pessoa
+  "comando remoto", "comando", "remoto", "remote", "unknown", "desconhecido", "n/a", "na",
 ];
 
 /** true quando o texto é método técnico e não autoria humana. */
@@ -363,7 +388,7 @@ const resolveUser = (r: DbRow): string => {
   // REMOTO sem autoria humana recuperada: a coluna Usuário NUNCA recebe o método
   // técnico ("Telemetria RF" e afins). Fica "Em apuração" até o backfill preencher
   // user_id/actor_label — e aí o nome aparece sozinho, sem mudança de código.
-  if (r.origin === "remote") return "Em apuração";
+  if (r.origin === "remote") return AUTHORSHIP_UNDER_REVIEW;
 
   if (r.origin === "local") return "Local (painel)";
   return "Sistema";
@@ -436,6 +461,17 @@ const rowToEntry = (r: DbRow): AutomationLogEntry => {
     user: resolveUser(r),
     result: (["fail", "failed", "timeout", "error"].includes(String(r.result)) ? "fail" : "success"),
     confirmationMethod: resolveConfirmationMethod(r),
+    timeSec: formatTimeSec(d),
+    tech: {
+      id: String(r.id),
+      occurredAtBrt: d.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }),
+      origin: String(r.origin ?? ""),
+      confirmationMethod: resolveConfirmationMethod(r),
+      agentDeclaredOrigin: ((r.details as any)?.origin ?? null),
+      authorshipSource: ((r.details as any)?.authorship_source ?? null),
+      authorshipConfidence: ((r.details as any)?.authorship_confidence ?? null),
+      attributionUnavailable: ((r.details as any)?.attribution_unavailable === true),
+    },
     synced: true,
   };
 };

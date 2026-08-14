@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Bot, ChevronLeft, ChevronRight, Download, Eye, FileText, Hand, MessageCircle, Monitor, Power, Radio, RefreshCw, Server, WifiOff } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { useAutomationLog, loadAutomationLogRange, loadTechnicalReadings, type AutomationLogEntry, type TechnicalReading } from "@/lib/automationLog";
+import { useAutomationLog, loadAutomationLogRange, loadTechnicalReadings, AUTHORSHIP_UNDER_REVIEW, AUTHORSHIP_UNDER_REVIEW_TOOLTIP, type AutomationLogEntry, type TechnicalReading } from "@/lib/automationLog";
+import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { exportAutomacaoCSV, exportAutomacaoPDF } from "@/lib/reportExport";
 import { notifyReport } from "@/lib/notify";
 import { guardExport } from "@/lib/securityClient";
@@ -94,6 +95,50 @@ function getUserLabel(user?: string | null) {
   return user && user.trim() ? user.trim() : "—";
 }
 
+/** Célula da coluna Usuário. Autoria humana em texto normal; evento remoto sem
+ *  autoria vira badge âmbar com a explicação — nunca um rótulo técnico. */
+function UserCell({ item }: { item: AutomationLogEntry }) {
+  const label = getUserLabel(item.user);
+  if (label === AUTHORSHIP_UNDER_REVIEW) {
+    return (
+      <span
+        title={AUTHORSHIP_UNDER_REVIEW_TOOLTIP}
+        className="inline-flex items-center rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning"
+      >
+        {AUTHORSHIP_UNDER_REVIEW}
+      </span>
+    );
+  }
+  if (label === "Sistema") return <span className="text-warning font-medium">Sistema</span>;
+  return <span className="text-foreground" title={item.confirmationMethod ?? undefined}>{label}</span>;
+}
+
+/** Detalhe técnico do evento — só platform_admin/owner. */
+function TechDetail({ item }: { item: AutomationLogEntry }) {
+  const t = item.tech;
+  if (!t) return null;
+  const linhas = [
+    `ID do evento: ${t.id}`,
+    `Data/hora BRT: ${t.occurredAtBrt}`,
+    `origin: ${t.origin || "—"}`,
+    `confirmation_method: ${t.confirmationMethod ?? "—"}`,
+    `origem declarada pelo agente: ${t.agentDeclaredOrigin ?? "—"}`,
+    `autoria (fonte): ${t.authorshipSource ?? "—"}`,
+    `autoria (confiança): ${t.authorshipConfidence ?? "—"}`,
+    `pendência de revisão: ${t.attributionUnavailable || getUserLabel(item.user) === AUTHORSHIP_UNDER_REVIEW ? "aberta" : "não"}`,
+  ];
+  return (
+    <details className="mt-1">
+      <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
+        detalhe técnico
+      </summary>
+      <div className="mt-1 rounded border border-border bg-muted/40 p-2 text-[10px] font-mono leading-relaxed text-muted-foreground">
+        {linhas.map((l) => <div key={l}>{l}</div>)}
+      </div>
+    </details>
+  );
+}
+
 function buildPageList(current: number, total: number): Array<number | "..."> {
   if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
   const out: Array<number | "..."> = [1];
@@ -107,6 +152,8 @@ function buildPageList(current: number, total: number): Array<number | "..."> {
 }
 
 export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedPump }: AutomacaoReportTabProps) {
+  const { role } = useFarmAccess();
+  const canSeeTech = role === "platform_admin" || role === "owner";
   const [showReadings, setShowReadings] = useState(false);
   const [logPage, setLogPage] = useState(1);
   const [loadingRange, setLoadingRange] = useState(false);
@@ -309,13 +356,14 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                         </div>
                         <div className="col-span-2">
                           <span className="block text-muted-foreground">Usuário</span>
-                          {/* só autoria humana; método físico vai no title */}
-                          <span className="font-medium text-foreground" title={item.confirmationMethod ?? undefined}>
-                            {getUserLabel(item.user)}
-                          </span>
+                          {/* só autoria humana; método físico vai em detalhe */}
+                          <UserCell item={item} />
                           {item.confirmationMethod && (
-                            <span className="block text-[10px] text-muted-foreground">{item.confirmationMethod}</span>
+                            <span className="block text-[10px] text-muted-foreground">
+                              Confirmado por: {String(item.confirmationMethod).replace(/^Confirmado por /, "")}
+                            </span>
                           )}
+                          {canSeeTech && <TechDetail item={item} />}
                         </div>
                       </div>
                     </div>
@@ -341,7 +389,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                       return (
                         <TableRow key={item.id} className="border-border hover:bg-secondary/50">
                           <TableCell className="text-foreground text-sm">{item.date}</TableCell>
-                          <TableCell className="text-foreground text-sm font-medium">{item.time}</TableCell>
+                          <TableCell className="text-foreground text-sm font-medium tabular-nums">{item.timeSec ?? item.time}</TableCell>
                           <TableCell className="text-foreground font-medium">{item.pump}</TableCell>
                           <TableCell>
                             <span className={`inline-flex items-center gap-1.5 text-sm font-semibold ${actionCls}`}>
@@ -358,14 +406,14 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                           </TableCell>
                           {/* Coluna Usuário = SÓ autoria humana. O método de confirmação
                               física ("Telemetria RF") vive no tooltip, nunca aqui. */}
-                          <TableCell className="text-muted-foreground text-sm" title={item.confirmationMethod ?? undefined}>
-                            {getUserLabel(item.user) === "Sistema" ? (
-                              <span className="text-warning font-medium">Sistema</span>
-                            ) : getUserLabel(item.user) === "Em apuração" ? (
-                              <span className="text-warning font-medium italic">Em apuração</span>
-                            ) : (
-                              <span className="text-foreground">{getUserLabel(item.user)}</span>
+                          <TableCell className="text-muted-foreground text-sm">
+                            <UserCell item={item} />
+                            {item.confirmationMethod && (
+                              <span className="block text-[10px] text-muted-foreground">
+                                Confirmado por: {String(item.confirmationMethod).replace(/^Confirmado por /, "")}
+                              </span>
                             )}
+                            {canSeeTech && <TechDetail item={item} />}
                           </TableCell>
                           <TableCell>
                             {isResultOk(item.result) ? (
