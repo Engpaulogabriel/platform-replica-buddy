@@ -52,6 +52,11 @@ export interface Pump {
   pending?: "turning_on" | "turning_off" | "resetting" | "error" | "comm_fail";
   /** timestamp (ms) de quando entrou em pending — usado para timeout de transição. */
   pendingStartedAt?: number;
+  /** Timeout de comando (120s) sem confirmação física. Aviso NÃO-bloqueante:
+   *  o card segue mostrando o último estado físico confirmado. Não é offline. */
+  commandUnconfirmedAt?: number;
+  /** Marca temporal da última sincronização aceita — descarta evento atrasado. */
+  lastSyncAt?: number;
   /**
    * timestamp (ms) de quando o usuário recebeu confirmação do comando manual.
    * Enquanto a nuvem não publicar uma `last_communication` posterior a este valor,

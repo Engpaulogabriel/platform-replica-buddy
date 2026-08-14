@@ -17,7 +17,6 @@ import { buildCommandHistory, buildStatusHistory, logEvent, useAutomationLog, ty
 import { supabase } from "@/integrations/supabase/client";
 import { notify } from "@/lib/notify";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
-import { enqueueResetPumpCommand } from "@/lib/commandQueue";
 import { calibrateLevel } from "@/lib/levelCalibration";
 import { getSystemTimingConfig } from "@/lib/systemTimers";
 import { usePendingManualCommands, type PendingManualCommand } from "@/hooks/usePendingManualCommands";
@@ -25,10 +24,10 @@ import { usePendingManualCommands, type PendingManualCommand } from "@/hooks/use
 // Janela em que um comando manual em andamento força "Ligando…/Desligando…"
 // no card, ignorando last_confirmed_state (que o Electron pode escrever com
 // leituras intermediárias durante o reforço).
-// v3.25.21: 90s → 5min. O "Ligando" é dirigido pelo STATUS do comando (pending/sent,
-// via usePendingManualCommands + Realtime): sai quando o agente muda para
-// executed/timeout/cancelled. Esta janela é só o teto de segurança.
-const MANUAL_PENDING_WINDOW_MS = 300_000;
+// FIX dashboard preso: 5min → 120s. O card NUNCA pode aguardar mais que a janela
+// operacional. Além disso, o "Ligando/Desligando" só vive enquanto se aguarda a
+// CONFIRMAÇÃO FÍSICA — status pending/sent do comando não é confirmação.
+const MANUAL_PENDING_WINDOW_MS = 120_000;
 
 
 // Janela de classificação de comunicação por equipamento.
@@ -53,11 +52,12 @@ const UNSTABLE_MIN = 2;
 const STATUS_REFRESH_MS = 30_000;
 // Estados "Ligando…/Desligando…" aguardam a janela física completa antes de
 // qualquer falha definitiva. Resposta antiga em 8s NÃO é falha.
-// v3.25.21: 120s → 5min. Não corta mais o "Ligando" prematuramente (o safety do
-// agente agora é 120s; o comando só vira terminal depois). Este é o FALLBACK de
-// segurança: se o comando ficou pending/sent além de 5min (agente pode ter
-// crashado), o card passa a exibir ERRO em vez de ficar preso em "Ligando".
-const PENDING_MAX_MS = 300_000;
+// FIX dashboard preso: 5min → 120s. Ao expirar, o card NÃO vira erro: a pendência
+// é limpa, o último estado FÍSICO confirmado volta a ser exibido (verde se ON,
+// vermelho se OFF) e um aviso NÃO-BLOQUEANTE é mostrado. Timeout de comando
+// significa "não confirmado", NUNCA "offline" — o cinza continua sendo decidido
+// só por communicationStatus (last_communication vs comm_timeout da fazenda).
+const PENDING_MAX_MS = 120_000;
 // PROBLEMA 2 — latch anti-oscilação do desligamento forçado. Assim que a bomba
 // confirma DESLIGADO FISICAMENTE (last_outputs_state=0) com intenção desligar
 // (desired_running=false), o card entra em "Desligado" e AÍ FICA: um RX
@@ -344,6 +344,45 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
 
   // Bombas que já dispararam o RPC de timeout (evita chamar 2x para a mesma transição)
   const localTimeoutFiredRef = useRef<Set<string>>(new Set());
+
+  // ── Reconciliação PONTUAL ────────────────────────────────────────────────
+  // Lê do banco SOMENTE os equipamentos informados e reaplica o estado físico
+  // confirmado. Usada em dois momentos: quando uma pendência expira (120s) e
+  // quando o Realtime reconecta. NÃO é polling: roda por evento, não por relógio.
+  const reconcileEquipmentsRef = useRef<(ids: string[]) => Promise<void>>(async () => {});
+  reconcileEquipmentsRef.current = async (ids: string[]) => {
+    const unique = Array.from(new Set(ids)).filter(Boolean);
+    if (!unique.length) return;
+    try {
+      const { data, error } = await supabase
+        .from("equipments")
+        .select("id,last_outputs_state,last_communication,desired_running,pending_command_id,last_actuation_origin,updated_at")
+        .in("id", unique);
+      if (error || !data) return;
+      setPumps((prev) => {
+        let changed = false;
+        const byId = new Map((data as Array<Record<string, unknown>>).map((r) => [String(r.id), r]));
+        const next = prev.map((p) => {
+          const row = byId.get(p.id);
+          if (!row) return p;
+          // Evento atrasado nunca sobrescreve confirmação mais nova.
+          const rowAt = new Date(String(row.updated_at ?? row.last_communication ?? 0)).getTime();
+          if (p.lastSyncAt && rowAt && rowAt < p.lastSyncAt) return p;
+          const outs = String(row.last_outputs_state ?? "");
+          const physical = outs.includes("1");
+          if (p.running === physical && !p.pending) return p;
+          changed = true;
+          return { ...p, running: physical, pending: undefined, pendingStartedAt: undefined,
+                   lastSyncAt: rowAt || Date.now() };
+        });
+        return changed ? next : prev;
+      });
+    } catch (e) {
+      // Falha de rede: não altera o card. O estado físico exibido continua sendo
+      // o último confirmado — timeout de comando NÃO é offline.
+      console.warn("[reconcileEquipments]", e);
+    }
+  };
   // Última transição registrada como Local (evita logs duplicados quando a nuvem
   // republica o mesmo `last_actuation_origin = local` em polls subsequentes).
   // Map: equipmentId -> "running:lastCommunicationISO"
@@ -408,7 +447,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
   }, [farmId]);
 
   useEffect(() => {
-    const localTimeoutsFromCloud: { equipmentId: string; name: string }[] = [];
+    const reconcileFromCloud: string[] = [];
     const tsnnMap = buildTsnnLastCommMap(cloud.equipments);
     const plcCount = buildPlcOutputsCountMap(cloud.equipments, cloud.plcs);
 
@@ -442,7 +481,8 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
         const manualCmdFresh =
           !!manualCmd && Date.now() - new Date(manualCmd.createdAt).getTime() < MANUAL_PENDING_WINDOW_MS;
         const hasAnyPending = localPending || !!e.pending_command_id || manualCmdFresh;
-
+        // aviso não-bloqueante de "comando não confirmado" (preserva o anterior)
+        let commandUnconfirmedAt = old?.commandUnconfirmedAt;
 
         if (hasAnyPending) {
           // Determina o estado desejado:
@@ -487,22 +527,18 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
               const startedAt = old?.pendingStartedAt ?? 0;
               const elapsed = startedAt ? Date.now() - startedAt : Infinity;
               if (elapsed > PENDING_MAX_MS) {
-                if (
-                  pending === "turning_on" &&
-                  !cloudRunning &&
-                  !localTimeoutFiredRef.current.has(e.id)
-                ) {
-                  localTimeoutsFromCloud.push({
-                    equipmentId: e.id,
-                    name: old?.name ?? e.name.toUpperCase(),
-                  });
+                // TIMEOUT: nunca prende o card e nunca inventa estado.
+                // Limpa a pendência, volta ao último estado FÍSICO confirmado e
+                // agenda uma reconciliação PONTUAL só deste equipamento.
+                // Não envia comando corretivo: retry pertence ao agente.
+                pending = undefined;
+                running = cloudRunning;
+                commandUnconfirmedAt = Date.now();
+                if (!localTimeoutFiredRef.current.has(e.id)) {
                   localTimeoutFiredRef.current.add(e.id);
+                  reconcileFromCloud.push(e.id);
                   setTimeout(() => localTimeoutFiredRef.current.delete(e.id), 35_000);
                 }
-                // v3.25.21: além de 5min pending/sent → ERRO (agente pode ter
-                // crashado), em vez de silenciosamente voltar a "Desligado".
-                pending = "error";
-                running = cloudRunning;
               }
             }
           }
@@ -548,6 +584,8 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
             pendingStartedAt: pending
               ? (old?.pendingStartedAt ?? Date.now())
               : undefined,
+            // some assim que uma confirmação física nova chegar
+            commandUnconfirmedAt: pending ? undefined : commandUnconfirmedAt,
             // limpa lastUserConfirmedAt assim que a nuvem confirmar (passamos a confiar nela)
             lastUserConfirmedAt:
               old.lastUserConfirmedAt &&
@@ -570,16 +608,9 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
       });
     });
 
-    for (const lt of localTimeoutsFromCloud) {
-      void enqueueResetPumpCommand({ equipmentId: lt.equipmentId })
-        .then(() => {
-          notify.warn("Equipamentos", `${lt.name}: não ligou em 120s — enviado comando 0 para desligar o relé`);
-        })
-        .catch((error) => {
-          console.error("[enqueueResetPumpCommand:cloud-timeout]", error);
-          notify.fail("Equipamentos", `${lt.name}: falhou ao enviar comando 0 automático`);
-        });
-    }
+    // Timeout: reconciliação PONTUAL do(s) equipamento(s) afetado(s).
+    // O frontend NÃO envia comando corretivo nem retry — isso é do agente.
+    if (reconcileFromCloud.length) void reconcileEquipmentsRef.current(reconcileFromCloud);
   }, [cloudPumps, cloud.equipments, cloud.plcs, horimetroMap, logEntries, pendingManualByEq]);
 
   useEffect(() => {
@@ -587,7 +618,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
       const tsnnMap = buildTsnnLastCommMap(cloud.equipments);
       const plcCount = buildPlcOutputsCountMap(cloud.equipments, cloud.plcs);
       // Coleta bombas que estouraram 120s sem confirmação para disparar RPC
-      const localTimeouts: { equipmentId: string; farmId: string; name: string; running: boolean; pending: "turning_on" | "turning_off" | "resetting" }[] = [];
+      const reconcileIds: string[] = [];
       // Coleta transições detectadas como Local pela nuvem (sem timeout local)
       const localFromCloud: { equipmentId: string; name: string; running: boolean; ts: string }[] = [];
 
@@ -610,6 +641,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
           const manualCmdFresh =
             !!manualCmd && Date.now() - new Date(manualCmd.createdAt).getTime() < MANUAL_PENDING_WINDOW_MS;
           const hasAnyPending = localPending || !!cloudEq.pending_command_id || manualCmdFresh;
+          let commandUnconfirmed = p.commandUnconfirmedAt;
 
           if (hasAnyPending) {
             let desiredRunning: boolean | null = null;
@@ -642,25 +674,17 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
                 const startedAt = p.pendingStartedAt ?? 0;
                 const elapsed = startedAt ? Date.now() - startedAt : Infinity;
                 if (elapsed > PENDING_MAX_MS) {
-                  if (
-                    pending === "turning_on" &&
-                    !cloudRunning &&
-                    !localTimeoutFiredRef.current.has(p.id)
-                  ) {
-                    localTimeouts.push({
-                      equipmentId: p.id,
-                      farmId: cloudEq.farm_id,
-                      name: p.name,
-                      running: cloudRunning,
-                      pending,
-                    });
+                  // TIMEOUT: limpa a pendência daquele ÚNICO poço, mantém o
+                  // último estado físico confirmado e pede reconciliação pontual.
+                  // Sem comando corretivo, sem RESET, sem marcar offline.
+                  pending = undefined;
+                  running = cloudRunning;
+                  commandUnconfirmed = Date.now();
+                  if (!localTimeoutFiredRef.current.has(p.id)) {
                     localTimeoutFiredRef.current.add(p.id);
+                    reconcileIds.push(p.id);
                     setTimeout(() => localTimeoutFiredRef.current.delete(p.id), 35_000);
                   }
-                  // v3.25.21: além de 5min pending/sent → ERRO (agente pode ter
-                  // crashado), em vez de silenciosamente voltar a "Desligado".
-                  pending = "error";
-                  running = cloudRunning;
                 }
               }
             }
@@ -741,7 +765,8 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
             p.lastCommunication === cloudEq.last_communication &&
             p.lastReading === newLastReading &&
             p.signalRF === newSignalRF &&
-            p.localAckAt === newLocalAckAt
+            p.localAckAt === newLocalAckAt &&
+            p.commandUnconfirmedAt === commandUnconfirmed
           ) {
             return p;
           }
@@ -757,6 +782,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
             pendingStartedAt: pending
               ? (p.pendingStartedAt ?? Date.now())
               : undefined,
+            commandUnconfirmedAt: pending ? undefined : commandUnconfirmed,
             lastUserConfirmedAt: nextConfirmedAt,
             actuationOrigin: newActuationOrigin,
             commandBlockedUntil: newCommandBlockedUntil,
@@ -771,55 +797,10 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
         return changed ? next : prev;
       });
 
-      // Dispara RPC + notificação + LOG para cada bomba que falhou em obedecer
-      for (const lt of localTimeouts) {
-        if (lt.pending === "turning_on") {
-          void enqueueResetPumpCommand({ equipmentId: lt.equipmentId })
-            .then(() => {
-              notify.warn("Equipamentos", `${lt.name}: não ligou em 120s — enviado comando 0 para desligar o relé`);
-            })
-            .catch((error) => {
-              console.error("[enqueueResetPumpCommand:auto-timeout]", error);
-              notify.fail("Equipamentos", `${lt.name}: falhou ao enviar comando 0 automático`);
-            });
-          continue;
-        }
-
-        // Registra no automation_log como acionamento LOCAL detectado
-        // (bomba não obedeceu comando remoto → alguém acionou no painel físico).
-        // Sem usuário: não há como saber quem foi (origin "Manual" = local no DB).
-        logEvent({
-          equipmentId: lt.equipmentId,
-          pump: lt.name,
-          action: lt.running ? "Ligada" : "Desligada",
-          origin: "Manual",
-          user: "",
-          result: "success",
-        });
-        // Marca também o ref de "já registrado" para evitar duplicação quando a
-        // RPC mark_pump_local_actuation propagar last_actuation_origin=local na
-        // próxima leitura da nuvem.
-        const cloudEq = cloudPumps.find((e) => e.id === lt.equipmentId);
-        if (cloudEq?.last_communication) {
-          lastLocalLoggedRef.current.set(
-            lt.equipmentId,
-            `${lt.running ? "1" : "0"}:${cloudEq.last_communication}`,
-          );
-        }
-
-        void supabase
-          .rpc("mark_pump_local_actuation", {
-            _equipment_id: lt.equipmentId,
-            _farm_id: lt.farmId,
-          })
-          .then(({ error }) => {
-            if (error) {
-              console.error("[mark_pump_local_actuation]", error);
-            } else {
-              notify.warn("Equipamentos", `${lt.name}: não obedeceu o comando — acionamento local detectado (bloqueado 30s)`);
-            }
-          });
-      }
+      // Timeout: reconciliação PONTUAL apenas dos poços afetados. Sem comando
+      // corretivo, sem RPC de "acionamento local" inferida por timeout (inferir
+      // LOCAL a partir de silêncio foi justamente a origem dos eventos falsos).
+      if (reconcileIds.length) void reconcileEquipmentsRef.current(reconcileIds);
 
       // Registra no log toda transição que a nuvem confirmou como Local
       // (acionamento físico no painel detectado pela RPC apply_pump_telemetry).

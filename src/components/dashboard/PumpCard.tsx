@@ -106,12 +106,16 @@ function PumpCardImpl(props: PumpCardProps) {
   // da botoeira. Badge diferenciado para o cliente não confundir com modo local.
   const showTech = !isOffline && pump.actuationOrigin === "tech_terminal" && !isTransitioning;
 
-  // ── Botão/badge RESET (forçar desligamento) ───────────────────────────────
-  // Regra absoluta: SÓ durante uma transição travada (Ligando/Desligando que já
-  // passou do tempo de confirmação). NUNCA em estado estável nem no estado "error".
-  const RESET_STUCK_MS = 60_000;
-  const transitionStuckMs = pump.pendingStartedAt ? (Date.now() - pump.pendingStartedAt) : Infinity;
-  const showReset = isActiveTransition && transitionStuckMs >= RESET_STUCK_MS;
+  // ── RESET REMOVIDO como mecanismo de recuperação ──────────────────────────
+  // O card nunca mais fica travado: ao expirar 120s sem confirmação física, a
+  // pendência é limpa automaticamente e o último estado FÍSICO confirmado volta a
+  // ser exibido (ver useDashboardEquipment). Não existe ação manual necessária
+  // para destravar a tela, então não há botão RESET.
+  const showReset = false;
+  // Aviso NÃO-BLOQUEANTE de comando não confirmado. Não muda a cor do card e não
+  // marca offline: timeout de comando significa "não confirmado", não "sem
+  // comunicação". Some sozinho quando uma confirmação física nova chegar.
+  const commandUnconfirmed = !!pump.commandUnconfirmedAt && !isTransitioning;
 
   const bg = maintIsBlue
     // AZUL = manutenção bloqueante (técnico/admin, maintenance_mode).
@@ -228,6 +232,14 @@ function PumpCardImpl(props: PumpCardProps) {
               title={`Último estado conhecido — sem nova comunicação há ${minutesSinceComm} min (ainda dentro do tempo de proteção). Última: ${formatLastSeen(pump.lastCommunication)}`}
             >
               ⏱ {minutesSinceComm}min
+            </span>
+          )}
+          {commandUnconfirmed && (
+            <span
+              className="text-[9px] font-medium tracking-wide px-1 py-0.5 rounded bg-warning/15 text-warning border border-warning/30 shrink-0"
+              title="O comando não foi confirmado dentro da janela. O card mostra o último estado físico confirmado; a próxima leitura atualiza sozinha."
+            >
+              ⚠ Comando não confirmado — aguardando nova leitura
             </span>
           )}
           {maint && (
