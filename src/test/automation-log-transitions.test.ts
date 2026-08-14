@@ -31,7 +31,9 @@ CREATE TYPE public.event_result AS ENUM ('success','fail','pending','timeout');
 CREATE TABLE public.farms (id uuid PRIMARY KEY, name text NOT NULL);
 CREATE TABLE public.equipments (
   id uuid PRIMARY KEY, farm_id uuid NOT NULL REFERENCES public.farms(id), name text,
+  last_changed_by text,
   last_confirmed_state smallint NOT NULL DEFAULT 0);
+CREATE TABLE public.profiles (id uuid PRIMARY KEY, email text, full_name text);
 CREATE TABLE public.automation_log (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL, equipment_id uuid, equipment_name text NOT NULL,
@@ -201,7 +203,9 @@ describe("fonte — só transição confirmada entra no relatório", () => {
 // ser descartada como repetição — precisa PROMOVER a linha existente.
 describe("comandos remotos que sumiram — atribuição pela melhor evidência", () => {
   it("telemetria (sem autoria) chega antes; comando remoto promove a linha a Remoto + usuário", async () => {
-    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "07:19", on: true, origin: "system", actor: "Telemetria RF" });
+    // a linha física carrega a procedência declarada pelo agente (details.origin)
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "07:19", on: true, origin: "system", actor: "Telemetria RF", details: { origin: "remote-cmd" } });
     await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "07:19", on: true, origin: "remote", user: USER_A, actor: null });
 
     expect(await official(db, POCO20)).toEqual(["07:19 ON"]);   // continua UMA linha
@@ -210,10 +214,12 @@ describe("comandos remotos que sumiram — atribuição pela melhor evidência",
     expect(a.user_id).toBe(USER_A);
   });
 
-  it("telemetria atribuída como 'local' também é promovida pelo comando remoto", async () => {
-    // ramo v_state_changed de apply_pump_telemetry credita 'local' quando o
-    // pending_command já expirou — era isto que exibia "Local" no lugar do remoto
-    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "07:20", on: true, origin: "local", actor: "Acionamento local" });
+  it("coluna origin='local' mas agente declarou remote-desired → promove (não é botoeira)", async () => {
+    // ramo v_state_changed de apply_pump_telemetry credita a COLUNA como 'local'
+    // quando o pending_command já expirou, mas details.origin guarda a verdade.
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "07:20", on: true, origin: "local", actor: "Acionamento local",
+      details: { origin: "remote-desired" } });
     await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "07:20", on: true, origin: "remote", user: USER_A });
 
     const a = await attribution(db, POCO20);
@@ -223,7 +229,8 @@ describe("comandos remotos que sumiram — atribuição pela melhor evidência",
   });
 
   it("comando WhatsApp confirmado aparece como WhatsApp com o operador", async () => {
-    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "08:00", on: true, origin: "system", actor: "Telemetria RF" });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "08:00", on: true, origin: "system", actor: "Telemetria RF", details: { origin: "remote-cmd" } });
     await insert(db, SEMEAR, POCO20, "POÇO 20", {
       at: "08:00", on: true, origin: "remote", source: "whatsapp:Alcione|5577999999999" });
 
@@ -234,7 +241,8 @@ describe("comandos remotos que sumiram — atribuição pela melhor evidência",
 
   it("automação promove telemetria, mas comando remoto com usuário tem precedência sobre automação", async () => {
     await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "16:00", on: true, origin: "local" }); // bomba ligada antes
-    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "17:00", on: false, origin: "system", actor: "Telemetria RF" });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "17:00", on: false, origin: "system", actor: "Telemetria RF", details: { origin: "auto" } });
     await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "17:00", on: false, origin: "auto", actor: "Desligamento 17h" });
     expect((await attribution(db, POCO20)).origin).toBe("auto");
     expect((await attribution(db, POCO20)).actor_label).toBe("Desligamento 17h");
@@ -271,6 +279,118 @@ describe("comandos remotos que sumiram — atribuição pela melhor evidência",
     const a = await attribution(db, POCO20);
     expect(a.origin).toBe("system");    // não promoveu
     expect(await official(db, POCO20)).toHaveLength(1);
+  });
+});
+
+// Ajustes obrigatórios da aprovação: promoção só com CORRELAÇÃO FORTE.
+describe("promoção exige correlação forte — atuação local nunca é roubada", () => {
+  const CMD = "55555555-0000-0000-0000-00000000000c";
+
+  it("comando remoto + telemetria física antes + conclusão depois → UMA linha Remoto + usuário", async () => {
+    // (b) linha física: o agente declarou procedência remota em details.origin
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "07:19", on: true, origin: "system", actor: "Telemetria RF",
+      details: { origin: "remote-cmd", command_id: CMD } });
+    // (c) conclusão do comando, com o usuário
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "07:19", on: true, origin: "remote", user: USER_A, actor: "Paulo Gabriel",
+      details: { command_id: CMD } });
+
+    expect(await official(db, POCO20)).toEqual(["07:19 ON"]);
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("remote");
+    expect(a.user_id).toBe(USER_A);
+    expect(a.actor_label).toBe("Paulo Gabriel");
+    const d = await db.query<{ command_id: string }>(
+      `SELECT details->>'command_id' command_id FROM public.automation_log WHERE equipment_id='${POCO20}' AND noise_reason IS NULL`);
+    expect(d.rows[0].command_id).toBe(CMD);   // vínculo do comando preservado
+  });
+
+  it("atuação LOCAL real na janela de 180s NÃO é roubada por comando remoto", async () => {
+    // botoeira: o agente declara _origin='local'
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "08:00", on: true, origin: "local", actor: "Acionamento local",
+      details: { origin: "local" } });
+    // comando remoto coincidente, sem vínculo com esta linha física
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "08:01", on: true, origin: "remote", user: USER_A, details: { command_id: CMD } });
+
+    const a = await attribution(db, POCO20);
+    expect(a.origin).toBe("local");        // continua Local
+    expect(a.user_id).toBeNull();
+    expect(await official(db, POCO20)).toHaveLength(1);
+    // o comando não some: vira registro técnico auditável
+    const tech = await db.query<{ reason: string }>(
+      `SELECT details->>'reason' reason FROM public.agent_technical_events WHERE kind='state_conflict'`);
+    expect(tech.rows.map((r) => r.reason)).toContain("atribuicao_sem_correlacao_forte");
+  });
+
+  it("command_id conflitante invalida a promoção", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "09:00", on: true, origin: "system", details: { origin: "remote-cmd", command_id: CMD } });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "09:01", on: true, origin: "remote", user: USER_A,
+      details: { command_id: "99999999-0000-0000-0000-000000000099" } });
+    expect((await attribution(db, POCO20)).origin).toBe("system");  // não promoveu
+  });
+
+  it("sem evidência nenhuma (telemetria pura) não promove", async () => {
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "10:00", on: true, origin: "system", actor: "Telemetria RF", details: { origin: "system" } });
+    await insert(db, SEMEAR, POCO20, "POÇO 20", { at: "10:01", on: true, origin: "remote", user: USER_A });
+    expect((await attribution(db, POCO20)).origin).toBe("system");
+  });
+});
+
+describe("transição confirmada sem atribuição — Origem em apuração", () => {
+  it("não some do histórico e abre alerta técnico", async () => {
+    await insert(db, PEROLA, POCO20, "POÇO 20", {
+      at: "05:00", on: true, origin: "system", actor: "Telemetria RF", details: { origin: "system" } });
+
+    // continua no histórico OFICIAL (some seria mentir sobre o que a bomba fez)
+    expect(await official(db, POCO20)).toEqual(["05:00 ON"]);
+    expect((await attribution(db, POCO20)).origin).toBe("system");
+    const tech = await db.query<{ reason: string; note: string }>(
+      `SELECT details->>'reason' reason, details->>'note' note
+         FROM public.agent_technical_events WHERE kind='state_conflict'`);
+    expect(tech.rows[0].reason).toBe("transicao_confirmada_sem_atribuicao");
+    expect(tech.rows[0].note).toMatch(/Origem em apuração/);
+  });
+
+  it("não vira Local nem Remoto sem evidência", async () => {
+    await insert(db, PEROLA, POCO20, "POÇO 20", { at: "05:10", on: true, origin: "system", details: { origin: "system" } });
+    const a = await attribution(db, POCO20);
+    expect(a.origin).not.toBe("local");
+    expect(a.origin).not.toBe("remote");
+    expect(a.user_id).toBeNull();
+  });
+});
+
+describe("backfill histórico não inventa usuário", () => {
+  it("promove a Remoto pela evidência técnica, mas deixa a autoria indisponível", async () => {
+    // linha de 14/08 com details.origin='remote-cmd', sem command_id e sem user_id
+    await db.exec(`ALTER TABLE public.automation_log DISABLE TRIGGER trg_enforce_automation_log_state_change`);
+    await insert(db, SEMEAR, POCO20, "POÇO 20", {
+      at: "07:19", on: true, origin: "system", actor: null, details: { origin: "remote-cmd" } });
+    await db.exec(`ALTER TABLE public.automation_log ENABLE TRIGGER trg_enforce_automation_log_state_change`);
+
+    await db.exec(mig("20260814200200_automation_log_canonical_truth.sql"));
+
+    const r = await db.query<any>(
+      `SELECT origin::text, user_id, actor_label,
+              (details->>'attribution_unavailable')::boolean unavailable,
+              details->>'attribution_note' note
+         FROM public.automation_log WHERE equipment_id='${POCO20}' AND noise_reason IS NULL`);
+    expect(r.rows[0].origin).toBe("remote");        // evidência técnica basta p/ a ORIGEM
+    expect(r.rows[0].user_id).toBeNull();           // mas NÃO para a pessoa
+    expect(r.rows[0].actor_label).toBeNull();       // nada de "Remoto não identificado"
+    expect(r.rows[0].unavailable).toBe(true);
+    expect(r.rows[0].note).toBe("Remoto — atribuição histórica indisponível");
+    // a frase só aparece na auditoria técnica
+    const tech = await db.query<{ note: string }>(
+      `SELECT details->>'note' note FROM public.agent_technical_events
+        WHERE details->>'reason' = 'atribuicao_historica_indisponivel'`);
+    expect(tech.rows[0].note).toBe("Remoto — atribuição histórica indisponível");
   });
 });
 

@@ -46,6 +46,10 @@ function getOriginIcon(origin: string) {
 function getOriginLabel(origin: string) {
   if (origin === "Manual") return "Local";
   if (origin === "Automático") return "Automação"; // desligamento programado
+  // Transição física CONFIRMADA que ainda não recebeu atribuição superior. Não é
+  // Local, não é Remoto, e não pode sumir do histórico — fica explicitamente em
+  // apuração, com alerta técnico aberto para investigação da origem.
+  if (origin === "Sistema") return "Origem em apuração";
   return origin;
 }
 
@@ -54,7 +58,8 @@ function getOriginBadge(origin: string) {
     "Automático": "bg-primary/10 text-primary",
     "Remoto": "bg-info/10 text-info",
     "Manual": "bg-warning/15 text-warning border border-warning/30",
-    "Sistema": "bg-muted text-muted-foreground border border-border",
+    // "Origem em apuração": destaque de atenção, não é um estado normal
+    "Sistema": "bg-warning/10 text-warning border border-warning/30",
     "WhatsApp": "bg-[#25D366]/10 text-[#1ea952] border border-[#25D366]/30",
   };
   return styles[origin] || "bg-secondary text-muted-foreground";
@@ -82,9 +87,11 @@ function getActionStyle(action: string): { cls: string; Icon: typeof Power } {
 }
 
 function getUserLabel(user?: string | null) {
-  // actor_label vem pronto do banco (trigger). Usa DIRETO; se null/vazio → "Desconhecido"
-  // (nunca "Remoto (usuário não registrado)").
-  return user && user.trim() ? user.trim() : "Desconhecido";
+  // actor_label vem pronto do banco (trigger). Usa DIRETO. Sem ator, mostra "—":
+  // não inventamos pessoa nem escrevemos "Remoto não identificado". Quando a
+  // autoria histórica é comprovadamente indisponível, a frase explicativa fica
+  // só na auditoria técnica (agent_technical_events), não no relatório.
+  return user && user.trim() ? user.trim() : "—";
 }
 
 function buildPageList(current: number, total: number): Array<number | "..."> {

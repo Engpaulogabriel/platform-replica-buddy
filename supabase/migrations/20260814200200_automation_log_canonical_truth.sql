@@ -122,6 +122,9 @@ DECLARE
   v_rank_prev int;
   v_tipo text;
   v_confirmed boolean;
+  v_prev_decl text;
+  v_local_claim boolean;
+  v_evidence boolean;
 BEGIN
   -- ── 4.1 Ações que não afirmam estado ──────────────────────────────────────
   IF NEW.action NOT IN ('turn_on','turn_off','pump_on','pump_off') THEN
@@ -173,6 +176,20 @@ BEGIN
   IF (v_last_state IS NULL OR v_last_state <> v_new_state) AND v_confirmed THEN
     UPDATE public.equipments SET last_confirmed_state = v_new_state WHERE id = NEW.equipment_id;
     NEW.noise_reason := NULL;
+
+    -- Transição física CONFIRMADA mas sem atribuição (rank 1 = telemetria/sistema):
+    -- ela ENTRA no histórico — some seria mentir sobre o que a bomba fez — e abre
+    -- alerta técnico para investigação da origem. O frontend a exibe como
+    -- "Origem em apuração", nunca como Local/Remoto/WhatsApp sem evidência.
+    IF public.automation_attribution_rank(NEW.origin, NEW.user_id, NEW.source_device, NEW.actor_label) = 1 THEN
+      INSERT INTO public.agent_technical_events (farm_id, equipment_id, equipment_name, kind, occurred_at, details)
+      VALUES (NEW.farm_id, NEW.equipment_id, NEW.equipment_name, 'state_conflict', NEW.occurred_at,
+              COALESCE(NEW.details, '{}'::jsonb) || jsonb_build_object(
+                'reason', 'transicao_confirmada_sem_atribuicao',
+                'action', NEW.action::text, 'origin', NEW.origin::text,
+                'note', 'Origem em apuração — transição física confirmada sem evidência de comando, automação ou TX local'));
+    END IF;
+
     RETURN NEW;
   END IF;
 
@@ -195,17 +212,18 @@ BEGIN
   -- A linha que confirmou o estado chegou sem autoria; esta traz o usuário.
   -- Em vez de descartar (e perder o "Remoto + usuário") ou duplicar, promove
   -- a linha existente. Uma transição continua sendo UMA linha.
-  -- Janela por PROXIMIDADE DE EVENTO (não em relação a now()): as duas linhas
-  -- descrevem a MESMA transição física, então seus occurred_at são vizinhos —
-  -- mesmo quando a telemetria chega atrasada e o log é gravado com atraso.
-  -- O limite de `created_at` impede que um backfill promova história antiga.
-  SELECT id, origin, user_id, source_device, actor_label
+  -- CORRELAÇÃO FORTE. Janela por PROXIMIDADE DE EVENTO (não em relação a now()):
+  -- as duas linhas descrevem a MESMA transição física, então seus occurred_at são
+  -- vizinhos mesmo com telemetria atrasada. O limite de `created_at` impede que um
+  -- backfill promova história antiga.
+  SELECT id, origin, user_id, source_device, actor_label, client_event_id, details
     INTO v_prev
     FROM public.automation_log
-   WHERE equipment_id = NEW.equipment_id
+   WHERE farm_id = NEW.farm_id                       -- mesma fazenda
+     AND equipment_id = NEW.equipment_id             -- mesmo equipamento
      AND noise_reason IS NULL
      AND action IN ('turn_on','turn_off','pump_on','pump_off')
-     AND (CASE WHEN action IN ('turn_on','pump_on') THEN 1 ELSE 0 END) = v_new_state
+     AND (CASE WHEN action IN ('turn_on','pump_on') THEN 1 ELSE 0 END) = v_new_state  -- mesmo estado alvo
      AND occurred_at BETWEEN NEW.occurred_at - interval '180 seconds'
                          AND NEW.occurred_at + interval '180 seconds'
      AND created_at > now() - interval '15 minutes'
@@ -216,18 +234,59 @@ BEGIN
     v_rank_new  := public.automation_attribution_rank(NEW.origin, NEW.user_id, NEW.source_device, NEW.actor_label);
     v_rank_prev := public.automation_attribution_rank(v_prev.origin, v_prev.user_id, v_prev.source_device, v_prev.actor_label);
 
-    IF v_rank_new > v_rank_prev THEN
+    v_prev_decl := lower(COALESCE(v_prev.details->>'origin', ''));
+
+    -- A linha física DECLARA atuação local (o agente carimbou _origin='local')?
+    -- Então é botoeira de verdade: NUNCA pode ser roubada por um comando remoto
+    -- que por acaso caiu na mesma janela.
+    v_local_claim := (v_prev_decl = 'local');
+
+    -- EVIDÊNCIA de que a linha física foi causada por comando/automação.
+    -- Preferência absoluta pelo vínculo explícito (command_id / client_event_id);
+    -- na ausência dele, a procedência declarada pelo próprio agente.
+    v_evidence :=
+         ( (NEW.details ? 'command_id')
+           AND v_prev.details->>'command_id' = NEW.details->>'command_id' )
+      OR ( NEW.client_event_id IS NOT NULL
+           AND v_prev.client_event_id = NEW.client_event_id )
+      OR v_prev_decl IN ('remote','remote-cmd','remote-desired','remote_cmd','remote_desired','auto')
+      OR v_prev.origin IN ('remote'::public.event_origin, 'auto'::public.event_origin);
+
+    -- Vínculo explícito conflitante (comandos diferentes) invalida a promoção.
+    IF (NEW.details ? 'command_id') AND (v_prev.details ? 'command_id')
+       AND v_prev.details->>'command_id' IS DISTINCT FROM NEW.details->>'command_id' THEN
+      v_evidence := false;
+    END IF;
+
+    IF v_rank_new > v_rank_prev AND v_evidence AND NOT v_local_claim THEN
       UPDATE public.automation_log
-         SET origin        = NEW.origin,
-             user_id       = COALESCE(NEW.user_id, user_id),
-             user_email    = COALESCE(NEW.user_email, user_email),
-             actor_label   = COALESCE(NEW.actor_label, actor_label),
-             source_device = COALESCE(NEW.source_device, source_device),
-             details       = COALESCE(details, '{}'::jsonb)
-                             || jsonb_build_object('attribution_upgraded_from', v_prev.origin::text,
-                                                   'attribution_rank', v_rank_new)
+         SET origin          = NEW.origin,
+             user_id         = COALESCE(NEW.user_id, user_id),
+             user_email      = COALESCE(NEW.user_email, user_email),
+             actor_label     = COALESCE(NEW.actor_label, actor_label),
+             source_device   = COALESCE(NEW.source_device, source_device),
+             client_event_id = COALESCE(client_event_id, NEW.client_event_id),
+             details         = COALESCE(details, '{}'::jsonb)
+                               || jsonb_build_object(
+                                    'attribution_upgraded_from', v_prev.origin::text,
+                                    'attribution_rank', v_rank_new,
+                                    'command_id', COALESCE(NEW.details->>'command_id',
+                                                           v_prev.details->>'command_id'))
        WHERE id = v_prev.id;
       RETURN NULL;   -- promoveu a existente; não cria segunda linha
+    END IF;
+
+    -- Sem correlação forte: a linha física fica como está. O comando não some —
+    -- vira registro técnico, para auditoria, sem inventar autoria.
+    IF v_rank_new > v_rank_prev THEN
+      INSERT INTO public.agent_technical_events (farm_id, equipment_id, equipment_name, kind, occurred_at, details)
+      VALUES (NEW.farm_id, NEW.equipment_id, NEW.equipment_name, 'state_conflict', NEW.occurred_at,
+              COALESCE(NEW.details, '{}'::jsonb) || jsonb_build_object(
+                'reason', 'atribuicao_sem_correlacao_forte',
+                'intended_origin', NEW.origin::text, 'user_id', NEW.user_id,
+                'physical_row_declared_origin', v_prev_decl,
+                'note', 'comando na janela sem vínculo com a linha física — atribuição não aplicada'));
+      RETURN NULL;
     END IF;
   END IF;
 
@@ -377,7 +436,55 @@ DELETE FROM public.automation_log
  WHERE action = 'status_read'::public.event_action
    AND noise_reason = 'reading_origin';
 
--- 7.3 Reaplica o cânone sobre a janela recompensada e reconcilia o estado.
+-- 7.3 HISTÓRICO: linhas físicas que o AGENTE declarou como comando remoto
+--     (details.origin='remote-cmd'/'remote-desired') mas cujo `commands` já foi
+--     apagado por delete_finished_command — sem command_id e sem user_id.
+--     A evidência TÉCNICA é suficiente para dizer que foi REMOTO; ela NÃO é
+--     suficiente para dizer QUEM foi. Então promovemos a origem e deixamos a
+--     autoria explicitamente indisponível — sem inventar pessoa e sem escrever
+--     "Remoto não identificado" no relatório operacional.
+UPDATE public.automation_log al
+   SET origin  = 'remote'::public.event_origin,
+       details = COALESCE(details, '{}'::jsonb) || jsonb_build_object(
+                   'attribution_backfilled', true,
+                   'attribution_unavailable', true,
+                   'attribution_note', 'Remoto — atribuição histórica indisponível',
+                   'attribution_evidence', details->>'origin')
+ WHERE al.noise_reason IS NULL
+   AND al.action IN ('turn_on','turn_off','pump_on','pump_off')
+   AND al.user_id IS NULL
+   AND NOT (al.details ? 'command_id')
+   AND lower(COALESCE(al.details->>'origin','')) IN ('remote-cmd','remote-desired','remote_cmd','remote_desired')
+   AND al.origin IS DISTINCT FROM 'remote'::public.event_origin;
+
+-- Autoria histórica SÓ com vínculo confiável: mesmo equipamento, mesma janela e
+-- last_changed_by apontando para um usuário real da plataforma. Sem isso, fica
+-- sem ator — nunca uma pessoa inventada.
+UPDATE public.automation_log al
+   SET user_id     = p.id,
+       user_email  = p.email,
+       actor_label = COALESCE(al.actor_label, p.full_name, p.email),
+       details     = al.details || jsonb_build_object(
+                       'attribution_unavailable', false,
+                       'attribution_source', 'last_changed_by')
+  FROM public.equipments e
+  JOIN public.profiles p ON p.full_name = e.last_changed_by OR p.email = e.last_changed_by
+ WHERE al.equipment_id = e.id
+   AND (al.details->>'attribution_backfilled')::boolean IS TRUE
+   AND al.user_id IS NULL
+   AND e.last_changed_by IS NOT NULL;
+
+-- Registro de auditoria técnica do que ficou sem autoria (só ali aparece a frase).
+INSERT INTO public.agent_technical_events (farm_id, equipment_id, equipment_name, kind, occurred_at, details)
+SELECT farm_id, equipment_id, equipment_name, 'state_conflict', occurred_at,
+       jsonb_build_object('reason', 'atribuicao_historica_indisponivel',
+                          'note', 'Remoto — atribuição histórica indisponível',
+                          'evidence', details->>'attribution_evidence')
+  FROM public.automation_log
+ WHERE (details->>'attribution_backfilled')::boolean IS TRUE
+   AND (details->>'attribution_unavailable')::boolean IS TRUE;
+
+-- 7.4 Reaplica o cânone sobre a janela recompensada e reconcilia o estado.
 SELECT public.audit_automation_log_integrity(interval '30 days');
 
 WITH last_ok AS (
