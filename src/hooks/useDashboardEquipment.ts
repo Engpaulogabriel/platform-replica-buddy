@@ -480,7 +480,18 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
         const manualCmd = pendingManualByEq.get(e.id);
         const manualCmdFresh =
           !!manualCmd && Date.now() - new Date(manualCmd.createdAt).getTime() < MANUAL_PENDING_WINDOW_MS;
-        const hasAnyPending = localPending || !!e.pending_command_id || manualCmdFresh;
+        // VAZAMENTO CORRIGIDO: `e.pending_command_id` NÃO entra mais aqui.
+        // Ele é um marcador de banco SEM LIMITE DE TEMPO: fica não-nulo por
+        // comando de automação (que também é type='manual', ver migration
+        // 20260625104051) ou por comando que nunca foi fechado. Combinado com
+        // `desired_running=false` e a bomba ainda ON, o ramo abaixo derivava
+        // `pending = "turning_off"` e o card exibia "Desligando…" sem NENHUM
+        // comando do operador — foi o que aconteceu com o POÇO 11 R06 enquanto
+        // o comando ia para o POÇO 10 R5. Os dois cards re-renderizam no mesmo
+        // tick de Realtime, o que fazia parecer contaminação entre eles.
+        // Agora a transição só nasce de um comando FRESCO (<120s) daquele
+        // equipment_id — `manualCmdFresh` — ou de um pending local do próprio clique.
+        const hasAnyPending = localPending || manualCmdFresh;
         // aviso não-bloqueante de "comando não confirmado" (preserva o anterior)
         let commandUnconfirmedAt = old?.commandUnconfirmedAt;
 
@@ -640,7 +651,9 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
           const manualCmd = pendingManualByEq.get(p.id);
           const manualCmdFresh =
             !!manualCmd && Date.now() - new Date(manualCmd.createdAt).getTime() < MANUAL_PENDING_WINDOW_MS;
-          const hasAnyPending = localPending || !!cloudEq.pending_command_id || manualCmdFresh;
+          // Mesma correção do bloco acima: marcador de banco sem limite de
+          // tempo não pode gerar transição visual em card não comandado.
+          const hasAnyPending = localPending || manualCmdFresh;
           let commandUnconfirmed = p.commandUnconfirmedAt;
 
           if (hasAnyPending) {
