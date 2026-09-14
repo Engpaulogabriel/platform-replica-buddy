@@ -304,6 +304,27 @@ export type Database = {
           },
         ]
       }
+      agent_release_keys: {
+        Row: {
+          aes_key: string
+          algo: string
+          created_at: string
+          version: string
+        }
+        Insert: {
+          aes_key: string
+          algo?: string
+          created_at?: string
+          version: string
+        }
+        Update: {
+          aes_key?: string
+          algo?: string
+          created_at?: string
+          version?: string
+        }
+        Relationships: []
+      }
       agent_releases: {
         Row: {
           artifact_type: string
@@ -354,6 +375,94 @@ export type Database = {
           version?: string
         }
         Relationships: []
+      }
+      agent_security_events: {
+        Row: {
+          agent_version: string | null
+          created_at: string
+          details: Json
+          device_id: string | null
+          event_type: string
+          farm_id: string | null
+          id: string
+          ip_address: string | null
+          machine_id_hash: string | null
+          severity: string
+        }
+        Insert: {
+          agent_version?: string | null
+          created_at?: string
+          details?: Json
+          device_id?: string | null
+          event_type: string
+          farm_id?: string | null
+          id?: string
+          ip_address?: string | null
+          machine_id_hash?: string | null
+          severity?: string
+        }
+        Update: {
+          agent_version?: string | null
+          created_at?: string
+          details?: Json
+          device_id?: string | null
+          event_type?: string
+          farm_id?: string | null
+          id?: string
+          ip_address?: string | null
+          machine_id_hash?: string | null
+          severity?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_security_events_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      agent_technical_events: {
+        Row: {
+          created_at: string
+          details: Json
+          equipment_id: string | null
+          equipment_name: string | null
+          farm_id: string
+          id: string
+          kind: string
+          occurred_at: string
+        }
+        Insert: {
+          created_at?: string
+          details?: Json
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id: string
+          id?: string
+          kind: string
+          occurred_at?: string
+        }
+        Update: {
+          created_at?: string
+          details?: Json
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id?: string
+          id?: string
+          kind?: string
+          occurred_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_technical_events_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       agent_update_history: {
         Row: {
@@ -619,6 +728,122 @@ export type Database = {
           },
         ]
       }
+      authorship_pending_review: {
+        Row: {
+          automation_log_id: string
+          created_at: string
+          equipment_id: string | null
+          equipment_name: string | null
+          farm_id: string
+          id: string
+          occurred_at: string | null
+          origin: string | null
+          reason: string
+          resolved_at: string | null
+          resolved_by: string | null
+        }
+        Insert: {
+          automation_log_id: string
+          created_at?: string
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id: string
+          id?: string
+          occurred_at?: string | null
+          origin?: string | null
+          reason: string
+          resolved_at?: string | null
+          resolved_by?: string | null
+        }
+        Update: {
+          automation_log_id?: string
+          created_at?: string
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id?: string
+          id?: string
+          occurred_at?: string | null
+          origin?: string | null
+          reason?: string
+          resolved_at?: string | null
+          resolved_by?: string | null
+        }
+        Relationships: []
+      }
+      authorship_reconciliation_batches: {
+        Row: {
+          applied_actor: string | null
+          applied_at: string
+          applied_by: string | null
+          applied_email: string | null
+          applied_user: string | null
+          batch_id: string
+          candidate_confidence: string | null
+          candidate_source: string | null
+          confidence: string | null
+          ended_at: string
+          event_ids: string[]
+          events_total: number
+          evidence: string | null
+          farm_id: string
+          id: string
+          intent: string
+          requires_admin_decision: boolean
+          source: string
+          started_at: string
+        }
+        Insert: {
+          applied_actor?: string | null
+          applied_at?: string
+          applied_by?: string | null
+          applied_email?: string | null
+          applied_user?: string | null
+          batch_id: string
+          candidate_confidence?: string | null
+          candidate_source?: string | null
+          confidence?: string | null
+          ended_at: string
+          event_ids: string[]
+          events_total: number
+          evidence?: string | null
+          farm_id: string
+          id?: string
+          intent: string
+          requires_admin_decision?: boolean
+          source?: string
+          started_at: string
+        }
+        Update: {
+          applied_actor?: string | null
+          applied_at?: string
+          applied_by?: string | null
+          applied_email?: string | null
+          applied_user?: string | null
+          batch_id?: string
+          candidate_confidence?: string | null
+          candidate_source?: string | null
+          confidence?: string | null
+          ended_at?: string
+          event_ids?: string[]
+          events_total?: number
+          evidence?: string | null
+          farm_id?: string
+          id?: string
+          intent?: string
+          requires_admin_decision?: boolean
+          source?: string
+          started_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "authorship_reconciliation_batches_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       automation_actions: {
         Row: {
           action: string
@@ -728,6 +953,60 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      automation_cleanup_audit: {
+        Row: {
+          action: string
+          after_value: Json
+          before_value: Json
+          confidence: string | null
+          equipment_id: string | null
+          event_id: string
+          evidence: Json
+          evidence_source: string | null
+          executed_at: string
+          executed_by: string
+          farm_id: string | null
+          id: number
+          phase_a_category: string
+          reason: string
+          run_id: string
+        }
+        Insert: {
+          action: string
+          after_value?: Json
+          before_value?: Json
+          confidence?: string | null
+          equipment_id?: string | null
+          event_id: string
+          evidence?: Json
+          evidence_source?: string | null
+          executed_at?: string
+          executed_by: string
+          farm_id?: string | null
+          id?: number
+          phase_a_category: string
+          reason: string
+          run_id: string
+        }
+        Update: {
+          action?: string
+          after_value?: Json
+          before_value?: Json
+          confidence?: string | null
+          equipment_id?: string | null
+          event_id?: string
+          evidence?: Json
+          evidence_source?: string | null
+          executed_at?: string
+          executed_by?: string
+          farm_id?: string | null
+          id?: number
+          phase_a_category?: string
+          reason?: string
+          run_id?: string
+        }
+        Relationships: []
       }
       automation_engine: {
         Row: {
@@ -1021,6 +1300,7 @@ export type Database = {
           farm_id: string
           id: string
           new_state: string | null
+          noise_reason: string | null
           occurred_at: string
           origin: Database["public"]["Enums"]["event_origin"]
           result: Database["public"]["Enums"]["event_result"]
@@ -1039,6 +1319,7 @@ export type Database = {
           farm_id: string
           id?: string
           new_state?: string | null
+          noise_reason?: string | null
           occurred_at?: string
           origin: Database["public"]["Enums"]["event_origin"]
           result?: Database["public"]["Enums"]["event_result"]
@@ -1057,6 +1338,7 @@ export type Database = {
           farm_id?: string
           id?: string
           new_state?: string | null
+          noise_reason?: string | null
           occurred_at?: string
           origin?: Database["public"]["Enums"]["event_origin"]
           result?: Database["public"]["Enums"]["event_result"]
@@ -1080,6 +1362,135 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      automation_log_authorship_report: {
+        Row: {
+          com_autor_ok: number
+          farm_id: string
+          farm_name: string | null
+          id: string
+          pendencias: number
+          recuperados_command_audit: number
+          recuperados_details: number
+          recuperados_last_changed_by: number
+          remotos_total: number
+          rotulos_tecnicos_removidos: number
+          ruido_excluido: number
+          run_at: string
+          run_id: string
+        }
+        Insert: {
+          com_autor_ok?: number
+          farm_id: string
+          farm_name?: string | null
+          id?: string
+          pendencias?: number
+          recuperados_command_audit?: number
+          recuperados_details?: number
+          recuperados_last_changed_by?: number
+          remotos_total?: number
+          rotulos_tecnicos_removidos?: number
+          ruido_excluido?: number
+          run_at?: string
+          run_id: string
+        }
+        Update: {
+          com_autor_ok?: number
+          farm_id?: string
+          farm_name?: string | null
+          id?: string
+          pendencias?: number
+          recuperados_command_audit?: number
+          recuperados_details?: number
+          recuperados_last_changed_by?: number
+          remotos_total?: number
+          rotulos_tecnicos_removidos?: number
+          ruido_excluido?: number
+          run_at?: string
+          run_id?: string
+        }
+        Relationships: []
+      }
+      automation_log_cleanup_report: {
+        Row: {
+          after_count: number
+          batch_order: number
+          before_count: number
+          equipment_id: string | null
+          equipment_name: string | null
+          farm_id: string
+          farm_name: string | null
+          id: string
+          removed_no_equipment: number
+          removed_not_confirmed: number
+          removed_reading: number
+          removed_repeated: number
+          removed_total: number
+          run_at: string
+          run_id: string
+        }
+        Insert: {
+          after_count: number
+          batch_order: number
+          before_count: number
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id: string
+          farm_name?: string | null
+          id?: string
+          removed_no_equipment?: number
+          removed_not_confirmed?: number
+          removed_reading?: number
+          removed_repeated?: number
+          removed_total?: number
+          run_at?: string
+          run_id: string
+        }
+        Update: {
+          after_count?: number
+          batch_order?: number
+          before_count?: number
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id?: string
+          farm_name?: string | null
+          id?: string
+          removed_no_equipment?: number
+          removed_not_confirmed?: number
+          removed_reading?: number
+          removed_repeated?: number
+          removed_total?: number
+          run_at?: string
+          run_id?: string
+        }
+        Relationships: []
+      }
+      automation_log_noise_stats: {
+        Row: {
+          day: string
+          equipment_id: string
+          farm_id: string
+          hits: number
+          reason: string
+          updated_at: string
+        }
+        Insert: {
+          day: string
+          equipment_id: string
+          farm_id: string
+          hits?: number
+          reason: string
+          updated_at?: string
+        }
+        Update: {
+          day?: string
+          equipment_id?: string
+          farm_id?: string
+          hits?: number
+          reason?: string
+          updated_at?: string
+        }
+        Relationships: []
       }
       automation_schedules: {
         Row: {
@@ -1401,6 +1812,72 @@ export type Database = {
           },
         ]
       }
+      command_audit: {
+        Row: {
+          actor_label: string | null
+          captured_at: string
+          client_event_id: string | null
+          command_created_at: string | null
+          command_id: string
+          details: Json
+          equipment_id: string | null
+          equipment_name: string | null
+          farm_id: string
+          frame: string | null
+          id: string
+          intent: string | null
+          origin_kind: string | null
+          responded_at: string | null
+          sent_at: string | null
+          source_device: string | null
+          status_final: string | null
+          user_email: string | null
+          user_id: string | null
+        }
+        Insert: {
+          actor_label?: string | null
+          captured_at?: string
+          client_event_id?: string | null
+          command_created_at?: string | null
+          command_id: string
+          details?: Json
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id: string
+          frame?: string | null
+          id?: string
+          intent?: string | null
+          origin_kind?: string | null
+          responded_at?: string | null
+          sent_at?: string | null
+          source_device?: string | null
+          status_final?: string | null
+          user_email?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          actor_label?: string | null
+          captured_at?: string
+          client_event_id?: string | null
+          command_created_at?: string | null
+          command_id?: string
+          details?: Json
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id?: string
+          frame?: string | null
+          id?: string
+          intent?: string | null
+          origin_kind?: string | null
+          responded_at?: string | null
+          sent_at?: string | null
+          source_device?: string | null
+          status_final?: string | null
+          user_email?: string | null
+          user_id?: string | null
+        }
+        Relationships: []
+      }
       command_verifications: {
         Row: {
           command_sent_at: string
@@ -1465,6 +1942,7 @@ export type Database = {
           farm_id: string
           frame: string
           id: string
+          idempotency_key: string | null
           plc_hw_id: string | null
           priority: number
           reinforcement: boolean
@@ -1486,6 +1964,7 @@ export type Database = {
           farm_id: string
           frame: string
           id?: string
+          idempotency_key?: string | null
           plc_hw_id?: string | null
           priority?: number
           reinforcement?: boolean
@@ -1507,6 +1986,7 @@ export type Database = {
           farm_id?: string
           frame?: string
           id?: string
+          idempotency_key?: string | null
           plc_hw_id?: string | null
           priority?: number
           reinforcement?: boolean
@@ -1518,6 +1998,30 @@ export type Database = {
           status?: Database["public"]["Enums"]["command_status"]
           timeout_ms?: number
           type?: Database["public"]["Enums"]["command_type"]
+        }
+        Relationships: []
+      }
+      cron_job_backup: {
+        Row: {
+          backed_up_at: string
+          command: string
+          id: number
+          jobname: string
+          schedule: string
+        }
+        Insert: {
+          backed_up_at?: string
+          command: string
+          id?: number
+          jobname: string
+          schedule: string
+        }
+        Update: {
+          backed_up_at?: string
+          command?: string
+          id?: number
+          jobname?: string
+          schedule?: string
         }
         Relationships: []
       }
@@ -1669,11 +2173,14 @@ export type Database = {
           activated_at: string
           agent_version: string | null
           created_at: string
+          current_token_expires_at: string | null
           current_token_jti: string | null
           farm_id: string
           fingerprint: Json
+          fingerprint_mismatch_count: number | null
           id: string
           ip_address: string | null
+          last_fingerprint_check: string | null
           last_seen_at: string
           license_key: string
           machine_id_hash: string
@@ -1685,11 +2192,14 @@ export type Database = {
           activated_at?: string
           agent_version?: string | null
           created_at?: string
+          current_token_expires_at?: string | null
           current_token_jti?: string | null
           farm_id: string
           fingerprint?: Json
+          fingerprint_mismatch_count?: number | null
           id?: string
           ip_address?: string | null
+          last_fingerprint_check?: string | null
           last_seen_at?: string
           license_key: string
           machine_id_hash: string
@@ -1701,11 +2211,14 @@ export type Database = {
           activated_at?: string
           agent_version?: string | null
           created_at?: string
+          current_token_expires_at?: string | null
           current_token_jti?: string | null
           farm_id?: string
           fingerprint?: Json
+          fingerprint_mismatch_count?: number | null
           id?: string
           ip_address?: string | null
+          last_fingerprint_check?: string | null
           last_seen_at?: string
           license_key?: string
           machine_id_hash?: string
@@ -1893,13 +2406,48 @@ export type Database = {
           },
         ]
       }
+      environmental_agencies: {
+        Row: {
+          agency_acronym: string
+          agency_name: string
+          agency_website: string | null
+          id: string
+          notes: string | null
+          report_format: string | null
+          state_code: string
+          state_name: string
+        }
+        Insert: {
+          agency_acronym: string
+          agency_name: string
+          agency_website?: string | null
+          id?: string
+          notes?: string | null
+          report_format?: string | null
+          state_code: string
+          state_name: string
+        }
+        Update: {
+          agency_acronym?: string
+          agency_name?: string
+          agency_website?: string | null
+          id?: string
+          notes?: string | null
+          report_format?: string | null
+          state_code?: string
+          state_name?: string
+        }
+        Relationships: []
+      }
       equipments: {
         Row: {
           active: boolean
           alarm_high: number | null
           alarm_low: number | null
+          alimenta_alt_id: string | null
           alimenta_id: string | null
           auto_mode: boolean
+          automatic_on_attempt_since: string | null
           command_blocked_until: string | null
           communication_status: string
           created_at: string
@@ -1920,10 +2468,14 @@ export type Database = {
           horas_pico: string | null
           hw_id: string
           id: string
+          is_captacao: boolean
           last_actuation_origin: string | null
+          last_actuation_rule: string | null
           last_changed_by: string | null
           last_communication: string | null
           last_confirmed_state: number
+          last_confirmed_transition_at: string | null
+          last_confirmed_transition_state: boolean | null
           last_outputs_state: string | null
           last_polling_at: string | null
           last_signal_bars: number | null
@@ -1958,6 +2510,8 @@ export type Database = {
           safety_expired_at: string | null
           saida: number | null
           sector_id: string | null
+          switching_protection_enabled: boolean
+          switching_protection_seconds: number | null
           telemetry_interval: number
           type: Database["public"]["Enums"]["equipment_type"]
           updated_at: string
@@ -1970,8 +2524,10 @@ export type Database = {
           active?: boolean
           alarm_high?: number | null
           alarm_low?: number | null
+          alimenta_alt_id?: string | null
           alimenta_id?: string | null
           auto_mode?: boolean
+          automatic_on_attempt_since?: string | null
           command_blocked_until?: string | null
           communication_status?: string
           created_at?: string
@@ -1992,10 +2548,14 @@ export type Database = {
           horas_pico?: string | null
           hw_id: string
           id?: string
+          is_captacao?: boolean
           last_actuation_origin?: string | null
+          last_actuation_rule?: string | null
           last_changed_by?: string | null
           last_communication?: string | null
           last_confirmed_state?: number
+          last_confirmed_transition_at?: string | null
+          last_confirmed_transition_state?: boolean | null
           last_outputs_state?: string | null
           last_polling_at?: string | null
           last_signal_bars?: number | null
@@ -2030,6 +2590,8 @@ export type Database = {
           safety_expired_at?: string | null
           saida?: number | null
           sector_id?: string | null
+          switching_protection_enabled?: boolean
+          switching_protection_seconds?: number | null
           telemetry_interval?: number
           type: Database["public"]["Enums"]["equipment_type"]
           updated_at?: string
@@ -2042,8 +2604,10 @@ export type Database = {
           active?: boolean
           alarm_high?: number | null
           alarm_low?: number | null
+          alimenta_alt_id?: string | null
           alimenta_id?: string | null
           auto_mode?: boolean
+          automatic_on_attempt_since?: string | null
           command_blocked_until?: string | null
           communication_status?: string
           created_at?: string
@@ -2064,10 +2628,14 @@ export type Database = {
           horas_pico?: string | null
           hw_id?: string
           id?: string
+          is_captacao?: boolean
           last_actuation_origin?: string | null
+          last_actuation_rule?: string | null
           last_changed_by?: string | null
           last_communication?: string | null
           last_confirmed_state?: number
+          last_confirmed_transition_at?: string | null
+          last_confirmed_transition_state?: boolean | null
           last_outputs_state?: string | null
           last_polling_at?: string | null
           last_signal_bars?: number | null
@@ -2102,6 +2670,8 @@ export type Database = {
           safety_expired_at?: string | null
           saida?: number | null
           sector_id?: string | null
+          switching_protection_enabled?: boolean
+          switching_protection_seconds?: number | null
           telemetry_interval?: number
           type?: Database["public"]["Enums"]["equipment_type"]
           updated_at?: string
@@ -2111,6 +2681,13 @@ export type Database = {
           vazao_reset_pending?: boolean
         }
         Relationships: [
+          {
+            foreignKeyName: "equipments_alimenta_alt_id_fkey"
+            columns: ["alimenta_alt_id"]
+            isOneToOne: false
+            referencedRelation: "equipments"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "equipments_alimenta_fk"
             columns: ["alimenta_id"]
@@ -2147,6 +2724,39 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      export_log: {
+        Row: {
+          created_at: string
+          farm_id: string | null
+          format: string
+          id: string
+          metadata: Json
+          report_type: string
+          row_count: number
+          user_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          farm_id?: string | null
+          format: string
+          id?: string
+          metadata?: Json
+          report_type: string
+          row_count?: number
+          user_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          farm_id?: string | null
+          format?: string
+          id?: string
+          metadata?: Json
+          report_type?: string
+          row_count?: number
+          user_id?: string | null
+        }
+        Relationships: []
       }
       farm_access_requests: {
         Row: {
@@ -2512,6 +3122,57 @@ export type Database = {
           },
         ]
       }
+      farm_notifications_purged: {
+        Row: {
+          created_at: string | null
+          equipment_id: string | null
+          evidencia: Json
+          farm_id: string
+          id: string
+          kind: string | null
+          message: string | null
+          purge_reason: string
+          purged_at: string
+          resolved_at: string | null
+          severity: string | null
+          source: string | null
+          source_ref: string | null
+          title: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          equipment_id?: string | null
+          evidencia?: Json
+          farm_id: string
+          id: string
+          kind?: string | null
+          message?: string | null
+          purge_reason: string
+          purged_at?: string
+          resolved_at?: string | null
+          severity?: string | null
+          source?: string | null
+          source_ref?: string | null
+          title?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          equipment_id?: string | null
+          evidencia?: Json
+          farm_id?: string
+          id?: string
+          kind?: string | null
+          message?: string | null
+          purge_reason?: string
+          purged_at?: string
+          resolved_at?: string | null
+          severity?: string | null
+          source?: string | null
+          source_ref?: string | null
+          title?: string | null
+        }
+        Relationships: []
+      }
       farm_productivity_config: {
         Row: {
           contracted_demand_kw: number
@@ -2525,11 +3186,13 @@ export type Database = {
           manual_restart_delay_minutes: number
           manual_travel_minutes_per_trigger: number
           manual_useful_hours_per_day: number
+          operadores_reduzidos: number
           peak_hour_end: string
           peak_hour_start: string
           remote_operation_time_minutes: number
           reserved_hour_end: string
           reserved_hour_start: string
+          salario_medio_regional: number
           session_gap_minutes: number
           tariff_intermediate: number | null
           tariff_off_peak: number
@@ -2540,6 +3203,7 @@ export type Database = {
           updated_at: string
           updated_by: string | null
           utility_name: string | null
+          valor_safra_r_per_m3: number
           vehicle_cost_per_km: number
           worker_cost_per_hour: number
         }
@@ -2555,11 +3219,13 @@ export type Database = {
           manual_restart_delay_minutes?: number
           manual_travel_minutes_per_trigger?: number
           manual_useful_hours_per_day?: number
+          operadores_reduzidos?: number
           peak_hour_end?: string
           peak_hour_start?: string
           remote_operation_time_minutes?: number
           reserved_hour_end?: string
           reserved_hour_start?: string
+          salario_medio_regional?: number
           session_gap_minutes?: number
           tariff_intermediate?: number | null
           tariff_off_peak?: number
@@ -2570,6 +3236,7 @@ export type Database = {
           updated_at?: string
           updated_by?: string | null
           utility_name?: string | null
+          valor_safra_r_per_m3?: number
           vehicle_cost_per_km?: number
           worker_cost_per_hour?: number
         }
@@ -2585,11 +3252,13 @@ export type Database = {
           manual_restart_delay_minutes?: number
           manual_travel_minutes_per_trigger?: number
           manual_useful_hours_per_day?: number
+          operadores_reduzidos?: number
           peak_hour_end?: string
           peak_hour_start?: string
           remote_operation_time_minutes?: number
           reserved_hour_end?: string
           reserved_hour_start?: string
+          salario_medio_regional?: number
           session_gap_minutes?: number
           tariff_intermediate?: number | null
           tariff_off_peak?: number
@@ -2600,6 +3269,7 @@ export type Database = {
           updated_at?: string
           updated_by?: string | null
           utility_name?: string | null
+          valor_safra_r_per_m3?: number
           vehicle_cost_per_km?: number
           worker_cost_per_hour?: number
         }
@@ -2653,78 +3323,126 @@ export type Database = {
       farms: {
         Row: {
           agent_previous_version: string | null
+          automatic_start_batch_size: number
+          automatic_start_stagger_enabled: boolean
+          automatic_start_stagger_seconds: number
           bell_alerts_enabled: boolean
           city: string | null
+          cnpj: string | null
+          comm_timeout_minutes: number
           created_at: string
           device_limit: number
+          email: string | null
+          endereco: string | null
           id: string
+          inema_enabled: boolean
           ip_restriction_enabled: boolean
           is_demo: boolean
           latitude: number | null
+          latitude_sede: number | null
           license_key: string | null
           license_status: string
           longitude: number | null
+          longitude_sede: number | null
           max_devices: number | null
           modules: Json
           name: string
+          phone: string | null
           plan: string
+          proprietario: string | null
+          security_phase: number
           state: string | null
+          state_code: string | null
           subscription_status: string
+          switching_protection_seconds: number | null
           target_agent_version: string | null
           timezone: string
           trial_end_date: string | null
           trial_start_date: string | null
           updated_at: string
+          zip_code: string | null
         }
         Insert: {
           agent_previous_version?: string | null
+          automatic_start_batch_size?: number
+          automatic_start_stagger_enabled?: boolean
+          automatic_start_stagger_seconds?: number
           bell_alerts_enabled?: boolean
           city?: string | null
+          cnpj?: string | null
+          comm_timeout_minutes?: number
           created_at?: string
           device_limit?: number
+          email?: string | null
+          endereco?: string | null
           id?: string
+          inema_enabled?: boolean
           ip_restriction_enabled?: boolean
           is_demo?: boolean
           latitude?: number | null
+          latitude_sede?: number | null
           license_key?: string | null
           license_status?: string
           longitude?: number | null
+          longitude_sede?: number | null
           max_devices?: number | null
           modules?: Json
           name: string
+          phone?: string | null
           plan?: string
+          proprietario?: string | null
+          security_phase?: number
           state?: string | null
+          state_code?: string | null
           subscription_status?: string
+          switching_protection_seconds?: number | null
           target_agent_version?: string | null
           timezone?: string
           trial_end_date?: string | null
           trial_start_date?: string | null
           updated_at?: string
+          zip_code?: string | null
         }
         Update: {
           agent_previous_version?: string | null
+          automatic_start_batch_size?: number
+          automatic_start_stagger_enabled?: boolean
+          automatic_start_stagger_seconds?: number
           bell_alerts_enabled?: boolean
           city?: string | null
+          cnpj?: string | null
+          comm_timeout_minutes?: number
           created_at?: string
           device_limit?: number
+          email?: string | null
+          endereco?: string | null
           id?: string
+          inema_enabled?: boolean
           ip_restriction_enabled?: boolean
           is_demo?: boolean
           latitude?: number | null
+          latitude_sede?: number | null
           license_key?: string | null
           license_status?: string
           longitude?: number | null
+          longitude_sede?: number | null
           max_devices?: number | null
           modules?: Json
           name?: string
+          phone?: string | null
           plan?: string
+          proprietario?: string | null
+          security_phase?: number
           state?: string | null
+          state_code?: string | null
           subscription_status?: string
+          switching_protection_seconds?: number | null
           target_agent_version?: string | null
           timezone?: string
           trial_end_date?: string | null
           trial_start_date?: string | null
           updated_at?: string
+          zip_code?: string | null
         }
         Relationships: []
       }
@@ -2769,6 +3487,201 @@ export type Database = {
           },
           {
             foreignKeyName: "flow_history_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      inema_compliance_history: {
+        Row: {
+          alert_95_sent: boolean
+          created_at: string
+          equipment_id: string
+          farm_id: string
+          hours_used: number
+          id: string
+          max_daily_hours: number
+          max_daily_volume_m3: number | null
+          percent_used: number
+          record_date: string
+          updated_at: string
+          volume_used_m3: number
+        }
+        Insert: {
+          alert_95_sent?: boolean
+          created_at?: string
+          equipment_id: string
+          farm_id: string
+          hours_used?: number
+          id?: string
+          max_daily_hours: number
+          max_daily_volume_m3?: number | null
+          percent_used?: number
+          record_date: string
+          updated_at?: string
+          volume_used_m3?: number
+        }
+        Update: {
+          alert_95_sent?: boolean
+          created_at?: string
+          equipment_id?: string
+          farm_id?: string
+          hours_used?: number
+          id?: string
+          max_daily_hours?: number
+          max_daily_volume_m3?: number | null
+          percent_used?: number
+          record_date?: string
+          updated_at?: string
+          volume_used_m3?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inema_compliance_history_equipment_id_fkey"
+            columns: ["equipment_id"]
+            isOneToOne: false
+            referencedRelation: "equipments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inema_compliance_history_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      inema_daily_compliance: {
+        Row: {
+          alerted: boolean
+          day: string
+          equipment_id: string
+          equipment_name: string | null
+          farm_id: string
+          hours: number | null
+          hours_limit: number | null
+          hours_pct: number | null
+          id: string
+          peak_pct: number | null
+          status: string | null
+          updated_at: string
+          volume_limit: number | null
+          volume_m3: number | null
+          volume_pct: number | null
+          volume_source: string | null
+        }
+        Insert: {
+          alerted?: boolean
+          day: string
+          equipment_id: string
+          equipment_name?: string | null
+          farm_id: string
+          hours?: number | null
+          hours_limit?: number | null
+          hours_pct?: number | null
+          id?: string
+          peak_pct?: number | null
+          status?: string | null
+          updated_at?: string
+          volume_limit?: number | null
+          volume_m3?: number | null
+          volume_pct?: number | null
+          volume_source?: string | null
+        }
+        Update: {
+          alerted?: boolean
+          day?: string
+          equipment_id?: string
+          equipment_name?: string | null
+          farm_id?: string
+          hours?: number | null
+          hours_limit?: number | null
+          hours_pct?: number | null
+          id?: string
+          peak_pct?: number | null
+          status?: string | null
+          updated_at?: string
+          volume_limit?: number | null
+          volume_m3?: number | null
+          volume_pct?: number | null
+          volume_source?: string | null
+        }
+        Relationships: []
+      }
+      inema_permits: {
+        Row: {
+          created_at: string
+          equipment_id: string
+          expiration_date: string | null
+          farm_id: string
+          hydrographic_basin: string | null
+          id: string
+          latitude: number | null
+          longitude: number | null
+          max_daily_hours: number
+          max_daily_volume_m3: number | null
+          max_flow_m3h: number | null
+          observacoes: string | null
+          portaria_number: string | null
+          process_number: string | null
+          processo_number: string | null
+          titular_name: string | null
+          updated_at: string
+          water_use_purpose: string | null
+        }
+        Insert: {
+          created_at?: string
+          equipment_id: string
+          expiration_date?: string | null
+          farm_id: string
+          hydrographic_basin?: string | null
+          id?: string
+          latitude?: number | null
+          longitude?: number | null
+          max_daily_hours?: number
+          max_daily_volume_m3?: number | null
+          max_flow_m3h?: number | null
+          observacoes?: string | null
+          portaria_number?: string | null
+          process_number?: string | null
+          processo_number?: string | null
+          titular_name?: string | null
+          updated_at?: string
+          water_use_purpose?: string | null
+        }
+        Update: {
+          created_at?: string
+          equipment_id?: string
+          expiration_date?: string | null
+          farm_id?: string
+          hydrographic_basin?: string | null
+          id?: string
+          latitude?: number | null
+          longitude?: number | null
+          max_daily_hours?: number
+          max_daily_volume_m3?: number | null
+          max_flow_m3h?: number | null
+          observacoes?: string | null
+          portaria_number?: string | null
+          process_number?: string | null
+          processo_number?: string | null
+          titular_name?: string | null
+          updated_at?: string
+          water_use_purpose?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inema_permits_equipment_id_fkey"
+            columns: ["equipment_id"]
+            isOneToOne: true
+            referencedRelation: "equipments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inema_permits_farm_id_fkey"
             columns: ["farm_id"]
             isOneToOne: false
             referencedRelation: "farms"
@@ -2876,6 +3789,78 @@ export type Database = {
           user_agent?: string | null
         }
         Relationships: []
+      }
+      maintenance_orders: {
+        Row: {
+          completed_at: string | null
+          completed_by: string | null
+          completed_by_name: string | null
+          created_at: string
+          created_by: string | null
+          created_by_name: string | null
+          description: string | null
+          equipment_id: string | null
+          equipment_name: string | null
+          farm_id: string
+          id: string
+          notes: string | null
+          priority: string
+          problem_type: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          completed_at?: string | null
+          completed_by?: string | null
+          completed_by_name?: string | null
+          created_at?: string
+          created_by?: string | null
+          created_by_name?: string | null
+          description?: string | null
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id: string
+          id?: string
+          notes?: string | null
+          priority?: string
+          problem_type?: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          completed_at?: string | null
+          completed_by?: string | null
+          completed_by_name?: string | null
+          created_at?: string
+          created_by?: string | null
+          created_by_name?: string | null
+          description?: string | null
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id?: string
+          id?: string
+          notes?: string | null
+          priority?: string
+          problem_type?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "maintenance_orders_equipment_id_fkey"
+            columns: ["equipment_id"]
+            isOneToOne: false
+            referencedRelation: "equipments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "maintenance_orders_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       maintenance_visits: {
         Row: {
@@ -3174,6 +4159,30 @@ export type Database = {
         }
         Relationships: []
       }
+      phase_b_run_results: {
+        Row: {
+          executed_at: string
+          id: number
+          numbers: Json
+          run_id: string | null
+          step: string
+        }
+        Insert: {
+          executed_at?: string
+          id?: number
+          numbers?: Json
+          run_id?: string | null
+          step: string
+        }
+        Update: {
+          executed_at?: string
+          id?: number
+          numbers?: Json
+          run_id?: string | null
+          step?: string
+        }
+        Relationships: []
+      }
       platform_admins: {
         Row: {
           created_at: string
@@ -3307,6 +4316,7 @@ export type Database = {
           email: string | null
           full_name: string | null
           id: string
+          is_super_admin: boolean
           phone: string | null
           updated_at: string
         }
@@ -3317,6 +4327,7 @@ export type Database = {
           email?: string | null
           full_name?: string | null
           id: string
+          is_super_admin?: boolean
           phone?: string | null
           updated_at?: string
         }
@@ -3327,6 +4338,7 @@ export type Database = {
           email?: string | null
           full_name?: string | null
           id?: string
+          is_super_admin?: boolean
           phone?: string | null
           updated_at?: string
         }
@@ -3420,6 +4432,45 @@ export type Database = {
           farm_id?: string
           id?: string
           started_at?: string
+        }
+        Relationships: []
+      }
+      rate_limit_violations: {
+        Row: {
+          created_at: string
+          details: Json
+          endpoint: string
+          hits: number
+          id: string
+          ip_address: string | null
+          user_agent: string | null
+          user_id: string | null
+          violation_type: string
+          window_seconds: number
+        }
+        Insert: {
+          created_at?: string
+          details?: Json
+          endpoint: string
+          hits?: number
+          id?: string
+          ip_address?: string | null
+          user_agent?: string | null
+          user_id?: string | null
+          violation_type?: string
+          window_seconds?: number
+        }
+        Update: {
+          created_at?: string
+          details?: Json
+          endpoint?: string
+          hits?: number
+          id?: string
+          ip_address?: string | null
+          user_agent?: string | null
+          user_id?: string | null
+          violation_type?: string
+          window_seconds?: number
         }
         Relationships: []
       }
@@ -3570,6 +4621,80 @@ export type Database = {
           },
         ]
       }
+      remote_reconciliation_queue: {
+        Row: {
+          applied_at: string | null
+          applied_by: string | null
+          applied_user: string | null
+          batch_id: string
+          candidates: Json
+          created_at: string
+          ended_at: string
+          event_ids: string[]
+          events_total: number
+          events_unnamed: number
+          farm_id: string
+          id: string
+          intent: string
+          started_at: string
+          status: string
+          suggested_user: string | null
+          suggestion_basis: Json
+          suggestion_source: string | null
+          suggestion_strength: string | null
+        }
+        Insert: {
+          applied_at?: string | null
+          applied_by?: string | null
+          applied_user?: string | null
+          batch_id: string
+          candidates?: Json
+          created_at?: string
+          ended_at: string
+          event_ids: string[]
+          events_total: number
+          events_unnamed: number
+          farm_id: string
+          id?: string
+          intent: string
+          started_at: string
+          status?: string
+          suggested_user?: string | null
+          suggestion_basis?: Json
+          suggestion_source?: string | null
+          suggestion_strength?: string | null
+        }
+        Update: {
+          applied_at?: string | null
+          applied_by?: string | null
+          applied_user?: string | null
+          batch_id?: string
+          candidates?: Json
+          created_at?: string
+          ended_at?: string
+          event_ids?: string[]
+          events_total?: number
+          events_unnamed?: number
+          farm_id?: string
+          id?: string
+          intent?: string
+          started_at?: string
+          status?: string
+          suggested_user?: string | null
+          suggestion_basis?: Json
+          suggestion_source?: string | null
+          suggestion_strength?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "remote_reconciliation_queue_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       rf_routing: {
         Row: {
           farm_id: string
@@ -3598,6 +4723,117 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      scheduled_automations: {
+        Row: {
+          action: string
+          alert_after_retries: boolean
+          created_at: string
+          days_of_week: string[]
+          excluded_equipment_ids: string[]
+          farm_id: string
+          id: string
+          is_active: boolean
+          last_run_at: string | null
+          last_run_result: Json | null
+          max_retries: number
+          name: string
+          retry_interval_min: number
+          target_equipment_ids: string[]
+          time_brt: string
+          updated_at: string
+        }
+        Insert: {
+          action?: string
+          alert_after_retries?: boolean
+          created_at?: string
+          days_of_week?: string[]
+          excluded_equipment_ids?: string[]
+          farm_id: string
+          id?: string
+          is_active?: boolean
+          last_run_at?: string | null
+          last_run_result?: Json | null
+          max_retries?: number
+          name: string
+          retry_interval_min?: number
+          target_equipment_ids?: string[]
+          time_brt: string
+          updated_at?: string
+        }
+        Update: {
+          action?: string
+          alert_after_retries?: boolean
+          created_at?: string
+          days_of_week?: string[]
+          excluded_equipment_ids?: string[]
+          farm_id?: string
+          id?: string
+          is_active?: boolean
+          last_run_at?: string | null
+          last_run_result?: Json | null
+          max_retries?: number
+          name?: string
+          retry_interval_min?: number
+          target_equipment_ids?: string[]
+          time_brt?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      scheduled_shutdowns: {
+        Row: {
+          alert_sent: boolean
+          alert1_sent: boolean
+          alert2_sent: boolean
+          attempt: number
+          automation_id: string | null
+          created_at: string
+          farm_id: string
+          id: string
+          last_attempt_at: string | null
+          remaining: Json | null
+          run_date: string
+          status: string
+          steps_done: Json
+          targeted: Json | null
+          updated_at: string
+        }
+        Insert: {
+          alert_sent?: boolean
+          alert1_sent?: boolean
+          alert2_sent?: boolean
+          attempt?: number
+          automation_id?: string | null
+          created_at?: string
+          farm_id: string
+          id?: string
+          last_attempt_at?: string | null
+          remaining?: Json | null
+          run_date: string
+          status?: string
+          steps_done?: Json
+          targeted?: Json | null
+          updated_at?: string
+        }
+        Update: {
+          alert_sent?: boolean
+          alert1_sent?: boolean
+          alert2_sent?: boolean
+          attempt?: number
+          automation_id?: string | null
+          created_at?: string
+          farm_id?: string
+          id?: string
+          last_attempt_at?: string | null
+          remaining?: Json | null
+          run_date?: string
+          status?: string
+          steps_done?: Json
+          targeted?: Json | null
+          updated_at?: string
+        }
+        Relationships: []
       }
       sectors: {
         Row: {
@@ -3709,6 +4945,7 @@ export type Database = {
           com_connected: boolean
           com_port: string | null
           created_at: string
+          disk_free_mb: number | null
           farm_id: string
           firmware_server: string | null
           id: string
@@ -3724,6 +4961,7 @@ export type Database = {
           com_connected?: boolean
           com_port?: string | null
           created_at?: string
+          disk_free_mb?: number | null
           farm_id: string
           firmware_server?: string | null
           id?: string
@@ -3739,6 +4977,7 @@ export type Database = {
           com_connected?: boolean
           com_port?: string | null
           created_at?: string
+          disk_free_mb?: number | null
           farm_id?: string
           firmware_server?: string | null
           id?: string
@@ -3757,6 +4996,99 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      switching_protection_audit: {
+        Row: {
+          changed_at: string
+          changed_by: string
+          enabled: boolean
+          equipment_id: string
+          farm_id: string | null
+          id: number
+          seconds: number | null
+        }
+        Insert: {
+          changed_at?: string
+          changed_by: string
+          enabled: boolean
+          equipment_id: string
+          farm_id?: string | null
+          id?: number
+          seconds?: number | null
+        }
+        Update: {
+          changed_at?: string
+          changed_by?: string
+          enabled?: boolean
+          equipment_id?: string
+          farm_id?: string | null
+          id?: number
+          seconds?: number | null
+        }
+        Relationships: []
+      }
+      system_alerts: {
+        Row: {
+          created_at: string
+          details: Json | null
+          id: number
+          resolved: boolean
+          resolved_at: string | null
+          severity: string
+          source: string | null
+          title: string | null
+        }
+        Insert: {
+          created_at?: string
+          details?: Json | null
+          id?: never
+          resolved?: boolean
+          resolved_at?: string | null
+          severity: string
+          source?: string | null
+          title?: string | null
+        }
+        Update: {
+          created_at?: string
+          details?: Json | null
+          id?: never
+          resolved?: boolean
+          resolved_at?: string | null
+          severity?: string
+          source?: string | null
+          title?: string | null
+        }
+        Relationships: []
+      }
+      system_logs: {
+        Row: {
+          context: Json | null
+          created_at: string
+          farm_id: string | null
+          id: string
+          level: string
+          message: string
+          source: string | null
+        }
+        Insert: {
+          context?: Json | null
+          created_at?: string
+          farm_id?: string | null
+          id?: string
+          level?: string
+          message: string
+          source?: string | null
+        }
+        Update: {
+          context?: Json | null
+          created_at?: string
+          farm_id?: string | null
+          id?: string
+          level?: string
+          message?: string
+          source?: string | null
+        }
+        Relationships: []
       }
       tampering_events: {
         Row: {
@@ -3820,6 +5152,60 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      technical_display_prefs: {
+        Row: {
+          show_technical_times: boolean
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          show_technical_times?: boolean
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          show_technical_times?: boolean
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      user_activity_log: {
+        Row: {
+          action: string
+          created_at: string
+          farm_id: string | null
+          id: string
+          ip_address: string | null
+          metadata: Json
+          path: string | null
+          user_agent: string | null
+          user_id: string | null
+        }
+        Insert: {
+          action: string
+          created_at?: string
+          farm_id?: string | null
+          id?: string
+          ip_address?: string | null
+          metadata?: Json
+          path?: string | null
+          user_agent?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          action?: string
+          created_at?: string
+          farm_id?: string | null
+          id?: string
+          ip_address?: string | null
+          metadata?: Json
+          path?: string | null
+          user_agent?: string | null
+          user_id?: string | null
+        }
+        Relationships: []
       }
       user_roles: {
         Row: {
@@ -3925,6 +5311,223 @@ export type Database = {
         }
         Relationships: []
       }
+      water_permit_conditions: {
+        Row: {
+          condition_number: number | null
+          created_at: string
+          deadline_days: number | null
+          description: string
+          id: string
+          is_critical: boolean | null
+          permit_id: string
+          status: string | null
+        }
+        Insert: {
+          condition_number?: number | null
+          created_at?: string
+          deadline_days?: number | null
+          description: string
+          id?: string
+          is_critical?: boolean | null
+          permit_id: string
+          status?: string | null
+        }
+        Update: {
+          condition_number?: number | null
+          created_at?: string
+          deadline_days?: number | null
+          description?: string
+          id?: string
+          is_critical?: boolean | null
+          permit_id?: string
+          status?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "water_permit_conditions_permit_id_fkey"
+            columns: ["permit_id"]
+            isOneToOne: false
+            referencedRelation: "water_permits"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      water_permit_wells: {
+        Row: {
+          created_at: string
+          datum: string | null
+          equipment_id: string | null
+          flow_rate_m3_day: number
+          id: string
+          latitude: string | null
+          longitude: string | null
+          notes: string | null
+          permit_id: string
+          well_name: string
+        }
+        Insert: {
+          created_at?: string
+          datum?: string | null
+          equipment_id?: string | null
+          flow_rate_m3_day: number
+          id?: string
+          latitude?: string | null
+          longitude?: string | null
+          notes?: string | null
+          permit_id: string
+          well_name: string
+        }
+        Update: {
+          created_at?: string
+          datum?: string | null
+          equipment_id?: string | null
+          flow_rate_m3_day?: number
+          id?: string
+          latitude?: string | null
+          longitude?: string | null
+          notes?: string | null
+          permit_id?: string
+          well_name?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "water_permit_wells_equipment_id_fkey"
+            columns: ["equipment_id"]
+            isOneToOne: false
+            referencedRelation: "equipments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "water_permit_wells_permit_id_fkey"
+            columns: ["permit_id"]
+            isOneToOne: false
+            referencedRelation: "water_permits"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      water_permits: {
+        Row: {
+          basin: string | null
+          created_at: string
+          farm_id: string
+          holder_cpf_cnpj: string | null
+          holder_name: string
+          id: string
+          irrigated_area_ha: number | null
+          municipality: string | null
+          notes: string | null
+          permit_date: string
+          permit_number: string
+          process_number: string
+          purpose: string | null
+          regime_hours_per_day: number | null
+          status: string | null
+          updated_at: string
+          validity_end: string
+          validity_start: string
+        }
+        Insert: {
+          basin?: string | null
+          created_at?: string
+          farm_id: string
+          holder_cpf_cnpj?: string | null
+          holder_name: string
+          id?: string
+          irrigated_area_ha?: number | null
+          municipality?: string | null
+          notes?: string | null
+          permit_date: string
+          permit_number: string
+          process_number: string
+          purpose?: string | null
+          regime_hours_per_day?: number | null
+          status?: string | null
+          updated_at?: string
+          validity_end: string
+          validity_start: string
+        }
+        Update: {
+          basin?: string | null
+          created_at?: string
+          farm_id?: string
+          holder_cpf_cnpj?: string | null
+          holder_name?: string
+          id?: string
+          irrigated_area_ha?: number | null
+          municipality?: string | null
+          notes?: string | null
+          permit_date?: string
+          permit_number?: string
+          process_number?: string
+          purpose?: string | null
+          regime_hours_per_day?: number | null
+          status?: string | null
+          updated_at?: string
+          validity_end?: string
+          validity_start?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "water_permits_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      well_level_measurements: {
+        Row: {
+          created_at: string
+          dynamic_level_m: number | null
+          equipment_id: string | null
+          farm_id: string
+          id: string
+          measured_at: string
+          measured_by: string | null
+          notes: string | null
+          static_level_m: number | null
+        }
+        Insert: {
+          created_at?: string
+          dynamic_level_m?: number | null
+          equipment_id?: string | null
+          farm_id: string
+          id?: string
+          measured_at: string
+          measured_by?: string | null
+          notes?: string | null
+          static_level_m?: number | null
+        }
+        Update: {
+          created_at?: string
+          dynamic_level_m?: number | null
+          equipment_id?: string | null
+          farm_id?: string
+          id?: string
+          measured_at?: string
+          measured_by?: string | null
+          notes?: string | null
+          static_level_m?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "well_level_measurements_equipment_id_fkey"
+            columns: ["equipment_id"]
+            isOneToOne: false
+            referencedRelation: "equipments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "well_level_measurements_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       whatsapp_alert_send_claims: {
         Row: {
           alert_type: string
@@ -3948,10 +5551,16 @@ export type Database = {
       }
       whatsapp_alert_settings: {
         Row: {
+          alert_com_restaurada: boolean
+          alert_ligar_desligar: boolean
           alert_local_change_enabled: boolean
           alert_offline_enabled: boolean
           alert_peak_hours_enabled: boolean
+          alert_pico: boolean
+          alert_recipients: string
+          alert_sem_resposta: boolean
           alerts_enabled: boolean
+          alerts_master_enabled: boolean
           created_at: string
           farm_id: string | null
           id: string
@@ -3962,10 +5571,16 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          alert_com_restaurada?: boolean
+          alert_ligar_desligar?: boolean
           alert_local_change_enabled?: boolean
           alert_offline_enabled?: boolean
           alert_peak_hours_enabled?: boolean
+          alert_pico?: boolean
+          alert_recipients?: string
+          alert_sem_resposta?: boolean
           alerts_enabled?: boolean
+          alerts_master_enabled?: boolean
           created_at?: string
           farm_id?: string | null
           id?: string
@@ -3976,10 +5591,16 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          alert_com_restaurada?: boolean
+          alert_ligar_desligar?: boolean
           alert_local_change_enabled?: boolean
           alert_offline_enabled?: boolean
           alert_peak_hours_enabled?: boolean
+          alert_pico?: boolean
+          alert_recipients?: string
+          alert_sem_resposta?: boolean
           alerts_enabled?: boolean
+          alerts_master_enabled?: boolean
           created_at?: string
           farm_id?: string | null
           id?: string
@@ -4313,6 +5934,39 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      whatsapp_health_log: {
+        Row: {
+          action_taken: string | null
+          checked_at: string
+          details: Json | null
+          id: number
+          last_incoming_at: string | null
+          last_outgoing_at: string | null
+          status: string
+          subscription_ok: boolean | null
+        }
+        Insert: {
+          action_taken?: string | null
+          checked_at?: string
+          details?: Json | null
+          id?: never
+          last_incoming_at?: string | null
+          last_outgoing_at?: string | null
+          status: string
+          subscription_ok?: boolean | null
+        }
+        Update: {
+          action_taken?: string | null
+          checked_at?: string
+          details?: Json | null
+          id?: never
+          last_incoming_at?: string | null
+          last_outgoing_at?: string | null
+          status?: string
+          subscription_ok?: boolean | null
+        }
+        Relationships: []
       }
       whatsapp_invite_codes: {
         Row: {
@@ -4844,9 +6498,113 @@ export type Database = {
           },
         ]
       }
+      whatsapp_webhook_monitor_state: {
+        Row: {
+          down_strikes: number
+          id: number
+          last_healthy_at: string | null
+          last_recovery_at: string | null
+          phase: string
+          probe_req_id: number | null
+          probe_sent_at: string | null
+          recovery_attempts: number
+          updated_at: string
+        }
+        Insert: {
+          down_strikes?: number
+          id?: number
+          last_healthy_at?: string | null
+          last_recovery_at?: string | null
+          phase?: string
+          probe_req_id?: number | null
+          probe_sent_at?: string | null
+          recovery_attempts?: number
+          updated_at?: string
+        }
+        Update: {
+          down_strikes?: number
+          id?: number
+          last_healthy_at?: string | null
+          last_recovery_at?: string | null
+          phase?: string
+          probe_req_id?: number | null
+          probe_sent_at?: string | null
+          recovery_attempts?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
-      [_ in never]: never
+      automation_row_classified: {
+        Row: {
+          action: Database["public"]["Enums"]["event_action"] | null
+          actor_label: string | null
+          created_at: string | null
+          details: Json | null
+          equipment_id: string | null
+          equipment_name: string | null
+          farm_id: string | null
+          id: string | null
+          issue: string | null
+          occurred_at: string | null
+          origin: Database["public"]["Enums"]["event_origin"] | null
+          result: Database["public"]["Enums"]["event_result"] | null
+          target_state: number | null
+          user_email: string | null
+          user_id: string | null
+        }
+        Insert: {
+          action?: Database["public"]["Enums"]["event_action"] | null
+          actor_label?: string | null
+          created_at?: string | null
+          details?: Json | null
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id?: string | null
+          id?: string | null
+          issue?: never
+          occurred_at?: string | null
+          origin?: Database["public"]["Enums"]["event_origin"] | null
+          result?: Database["public"]["Enums"]["event_result"] | null
+          target_state?: never
+          user_email?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          action?: Database["public"]["Enums"]["event_action"] | null
+          actor_label?: string | null
+          created_at?: string | null
+          details?: Json | null
+          equipment_id?: string | null
+          equipment_name?: string | null
+          farm_id?: string | null
+          id?: string | null
+          issue?: never
+          occurred_at?: string | null
+          origin?: Database["public"]["Enums"]["event_origin"] | null
+          result?: Database["public"]["Enums"]["event_result"] | null
+          target_state?: never
+          user_email?: string | null
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "automation_log_equipment_id_fkey"
+            columns: ["equipment_id"]
+            isOneToOne: false
+            referencedRelation: "equipments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "automation_log_farm_id_fkey"
+            columns: ["farm_id"]
+            isOneToOne: false
+            referencedRelation: "farms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Functions: {
       _eq_output_on: {
@@ -4888,6 +6646,154 @@ export type Database = {
         }
         Returns: string
       }
+      apply_remote_reconciliation:
+        | {
+            Args: {
+              _evidence?: string
+              _executor: string
+              _expected_ids: string[]
+              _queue_id: string
+              _user_id: string
+            }
+            Returns: number
+          }
+        | {
+            Args: {
+              _confirm_corroborated?: boolean
+              _evidence?: string
+              _executor: string
+              _expected_ids: string[]
+              _queue_id: string
+              _user_id: string
+            }
+            Returns: number
+          }
+      audit_automation_log_integrity: {
+        Args: { _lookback?: string; _threshold?: number }
+        Returns: number
+      }
+      authorship_source_catalog: {
+        Args: never
+        Returns: {
+          coluna_farm: string
+          coluna_identidade: string
+          coluna_tempo: string
+          tabela: string
+          tipo: string
+        }[]
+      }
+      automatic_desired_state: {
+        Args: {
+          _days: string[]
+          _dow_prev: string
+          _dow_today: string
+          _mode: string
+          _now_min: number
+          _time_off: string
+          _time_on: string
+        }
+        Returns: string
+      }
+      automatic_mode_actor_label: {
+        Args: { _command_id: string }
+        Returns: string
+      }
+      automation_attribution_rank: {
+        Args: {
+          _actor: string
+          _origin: Database["public"]["Enums"]["event_origin"]
+          _source_device: string
+          _user_id: string
+        }
+        Returns: number
+      }
+      automation_global_acceptance: {
+        Args: never
+        Returns: {
+          categoria: string
+          fazendas_afetadas: string
+          situacao: string
+          violacoes: number
+        }[]
+      }
+      automation_global_inventory: {
+        Args: never
+        Returns: {
+          automacao_correta: number
+          duplicidades: number
+          fazenda: string
+          local_comprovado: number
+          origem_indefinida: number
+          remoto_com_autor: number
+          remoto_sem_autor: number
+          sem_prova: number
+          tecnicos_ruido: number
+          total_oficial: number
+          usuario_tecnico: number
+        }[]
+      }
+      automation_issue_rows: {
+        Args: { _categoria?: string }
+        Returns: {
+          acao: string
+          ator: string
+          categoria: string
+          equipamento: string
+          fazenda: string
+          fonte_autoria: string
+          id: string
+          metodo_confirmacao: string
+          ocorrido_brt: string
+          origem: string
+          tem_usuario: boolean
+        }[]
+      }
+      automation_issue_summary: {
+        Args: never
+        Returns: {
+          categoria: string
+          descricao: string
+          fazendas: number
+          ocorrencias: number
+        }[]
+      }
+      automation_report_acceptance: {
+        Args: { _farm_id?: string }
+        Returns: {
+          criterio: string
+          exemplos: string
+          situacao: string
+          violacoes: number
+        }[]
+      }
+      automation_report_farm_audit: {
+        Args: never
+        Returns: {
+          automacoes: number
+          eventos_oficiais: number
+          fazenda: string
+          locais: number
+          possiveis_duplicidades: number
+          remotos_com_nome: number
+          remotos_sem_nome: number
+          tecnicos_ruido_excluido: number
+          transicoes_sem_prova: number
+        }[]
+      }
+      automation_row_issue: { Args: { _id: string }; Returns: string }
+      automation_row_snapshot: { Args: { _id: string }; Returns: Json }
+      backfill_automation_log_authorship: {
+        Args: { _run_id?: string }
+        Returns: string
+      }
+      build_actor_tag: {
+        Args: { _name: string; _user_id: string }
+        Returns: string
+      }
+      bump_automation_noise: {
+        Args: { _equip: string; _farm: string; _reason: string }
+        Returns: undefined
+      }
       calculate_energy_efficiency_for_date: {
         Args: { _date: string; _farm_id: string }
         Returns: {
@@ -4926,6 +6832,10 @@ export type Database = {
           peak_minutes: number
         }[]
       }
+      can_view_technical_telemetry: {
+        Args: { _farm_id?: string; _user_id: string }
+        Returns: boolean
+      }
       can_write_farm: {
         Args: { _farm_id: string; _user_id: string }
         Returns: boolean
@@ -4935,6 +6845,15 @@ export type Database = {
         Returns: number
       }
       check_bridge_heartbeats: { Args: never; Returns: undefined }
+      check_export_rate_limit: {
+        Args: {
+          _farm_id?: string
+          _format?: string
+          _report_type: string
+          _row_count?: number
+        }
+        Returns: Json
+      }
       check_farm_device_access: {
         Args: { _farm_id: string; _ip: string }
         Returns: boolean
@@ -4951,6 +6870,18 @@ export type Database = {
           hits_last_minute: number
           is_abusive: boolean
           reason: string
+        }[]
+      }
+      check_switching_protection: {
+        Args: {
+          _equipment_id: string
+          _requested_by?: string
+          _source_device?: string
+        }
+        Returns: {
+          allowed: boolean
+          message: string
+          seconds_remaining: number
         }[]
       }
       check_unresponsive_commands: { Args: never; Returns: undefined }
@@ -4973,13 +6904,72 @@ export type Database = {
         }
         Returns: boolean
       }
+      classify_actuation_origin: {
+        Args: {
+          _at?: string
+          _equipment_id: string
+          _farm_id: string
+          _turning_on: boolean
+        }
+        Returns: {
+          evidence: string
+          forced: boolean
+          origin: string
+          rule_name: string
+        }[]
+      }
+      classify_command_origin_kind: {
+        Args: { _created_by: string; _source_device: string }
+        Returns: string
+      }
+      classify_physical_transition: {
+        Args: {
+          _at?: string
+          _equipment_id: string
+          _farm_id: string
+          _turning_on: boolean
+          _window?: string
+        }
+        Returns: {
+          actor_label: string
+          authorship_source: string
+          command_id: string
+          origin: Database["public"]["Enums"]["event_origin"]
+          user_email: string
+          user_id: string
+        }[]
+      }
       cleanup_api_hits: { Args: never; Returns: undefined }
+      cleanup_automation_log_farm: {
+        Args: { _batch_order?: number; _farm_id: string; _run_id: string }
+        Returns: number
+      }
+      cleanup_duplicate_transitions: {
+        Args: { _farm_id?: string; _run_id: string }
+        Returns: number
+      }
       cleanup_stale_data: { Args: never; Returns: Json }
+      cleanup_technical_events: {
+        Args: { _farm_id?: string; _run_id: string }
+        Returns: number
+      }
+      cleanup_unconfirmed_commands: {
+        Args: { _farm_id?: string; _run_id: string }
+        Returns: number
+      }
       clear_agent_update: { Args: { _farm_id: string }; Returns: undefined }
       close_orphan_offline_cycles: { Args: never; Returns: number }
       close_orphan_pump_runtime: {
         Args: { _max_idle_minutes?: number }
         Returns: number
+      }
+      comm_incident_detail: {
+        Args: { _notification_id: string }
+        Returns: {
+          camada: string
+          detalhe: string
+          quando: string
+        }[]
       }
       compact_old_level_history: { Args: never; Returns: undefined }
       compute_all_energy_efficiency: {
@@ -4994,6 +6984,22 @@ export type Database = {
         Args: { _date: string; _farm_id: string }
         Returns: number
       }
+      confirm_authorship_batch: {
+        Args: {
+          _admin_id: string
+          _batch_id: string
+          _expected_count: number
+          _user_id: string
+        }
+        Returns: {
+          restaurados: number
+          run_id: string
+        }[]
+      }
+      count_automatic_start_slots_in_use: {
+        Args: { _farm_id: string; _settle_seconds?: number }
+        Returns: number
+      }
       create_farm_with_owner: {
         Args: {
           _city?: string
@@ -5004,9 +7010,29 @@ export type Database = {
         }
         Returns: string
       }
+      cron_invoke: { Args: { _body?: Json; _fn: string }; Returns: number }
+      cron_secret: { Args: never; Returns: string }
+      cron_secret_configured: { Args: never; Returns: boolean }
       current_operator_phone: { Args: { _uid: string }; Returns: string }
+      dashboard_equipment_operational: {
+        Args: { _farm_id: string }
+        Returns: {
+          actuation_origin: string
+          desired_running: boolean
+          id: string
+          is_offline: boolean
+          is_unstable: boolean
+          maintenance_mode: boolean
+          name: string
+          read_token: string
+          running: boolean
+          switching_locked: boolean
+        }[]
+      }
       deactivate_stale_devices: { Args: never; Returns: undefined }
       debug_alert_system: { Args: never; Returns: Json }
+      detect_security_anomalies: { Args: never; Returns: Json }
+      dms_to_decimal: { Args: { p_dms: string }; Returns: number }
       enqueue_polling_for_due_equipments: {
         Args: { _farm_id: string }
         Returns: number
@@ -5031,6 +7057,10 @@ export type Database = {
           farm_id: string
         }[]
       }
+      enqueue_remote_reconciliation: {
+        Args: { _farm_id?: string }
+        Returns: number
+      }
       enqueue_reset_pump_command: {
         Args: { _equipment_id: string; _farm_id: string; _reason?: string }
         Returns: string
@@ -5046,6 +7076,26 @@ export type Database = {
       ensure_farm_log_key: {
         Args: { _farm_id: string; _new_key: string }
         Returns: string
+      }
+      false_power_alerts: {
+        Args: { _hours?: number }
+        Returns: {
+          bombas_na_janela: number
+          created_at: string
+          farm_id: string
+          fazenda: string
+          id: string
+          tem_prova: boolean
+        }[]
+      }
+      false_power_alerts_summary: {
+        Args: { _hours?: number }
+        Returns: {
+          com_prova: number
+          outros_alertas_intocados: number
+          sem_prova: number
+          total: number
+        }[]
       }
       farm_backup_create: {
         Args: { _farm_id: string; _label?: string; _trigger_kind?: string }
@@ -5094,6 +7144,25 @@ export type Database = {
       farm_set_modules: {
         Args: { _farm_id: string; _patch: Json }
         Returns: Json
+      }
+      finalize_origin_and_authorship: {
+        Args: { _farm_id?: string; _run_id: string }
+        Returns: {
+          corrigidos: number
+          enfileirados: number
+        }[]
+      }
+      fix_contaminated_local_origin: {
+        Args: { _hours?: number }
+        Returns: {
+          de: string
+          equipamento: string
+          equipment_id: string
+          evidencia: string
+          forcado: boolean
+          para: string
+          regra: string
+        }[]
       }
       get_agent_target_version: {
         Args: { _farm_id: string }
@@ -5167,6 +7236,10 @@ export type Database = {
         Returns: number
       }
       get_platform_admin_ids: { Args: never; Returns: string[] }
+      get_technical_display_pref: {
+        Args: { _actor?: string }
+        Returns: boolean
+      }
       get_water_balance: { Args: { _farm_id: string }; Returns: Json }
       has_farm_access: {
         Args: { _farm_id: string; _user_id: string }
@@ -5179,6 +7252,83 @@ export type Database = {
           _user_id: string
         }
         Returns: boolean
+      }
+      haversine_m: {
+        Args: { lat1: number; lat2: number; lon1: number; lon2: number }
+        Returns: number
+      }
+      hidden_physical_transitions: {
+        Args: { _hours?: number }
+        Returns: {
+          com_command_audit: number
+          fazenda: string
+          linhas: number
+          motivo: string
+          origem: string
+          sem_prova: number
+        }[]
+      }
+      historical_remote_batches: {
+        Args: { _farm_id?: string; _from?: string; _gap?: string; _to?: string }
+        Returns: {
+          acao: string
+          batch_id: string
+          contaminado: boolean
+          decisao_proposta: string
+          farm_id: string
+          farm_name: string
+          fim_brt: string
+          fontes_autoria: string
+          inicio_brt: string
+          ja_atribuidos: number
+          motivo: string
+          pocos: string
+          sem_autor: number
+          total_eventos: number
+          usuario_unico: string
+          usuario_unico_nome: string
+          usuarios_fortes: number
+        }[]
+      }
+      increment_fingerprint_mismatch: {
+        Args: { _device_id: string }
+        Returns: undefined
+      }
+      inema_farm_score:
+        | {
+            Args: { _days?: number; _farm_id: string }
+            Returns: {
+              dias_excedido: number
+              dias_ok: number
+              score_pct: number
+              total_dias: number
+            }[]
+          }
+        | {
+            Args: { p_date?: string; p_farm_id: string }
+            Returns: {
+              alerts_pending: number
+              avg_pct_hours: number
+              avg_pct_volume: number
+              total_permits: number
+            }[]
+          }
+      inema_mark_alerted: {
+        Args: { _day?: string; _equipment_id: string }
+        Returns: undefined
+      }
+      inema_snapshot: {
+        Args: { _farm_id: string }
+        Returns: {
+          equipment_id: string
+          equipment_name: string
+          farm_id: string
+          hours: number
+          hours_limit: number
+          peak_pct: number
+          volume_limit: number
+          volume_m3: number
+        }[]
       }
       infer_pump_action_from_command_frame: {
         Args: { _frame: string; _saida: number }
@@ -5198,9 +7348,24 @@ export type Database = {
       is_platform_admin: { Args: { _user_id: string }; Returns: boolean }
       is_platform_staff: { Args: { _user_id: string }; Returns: boolean }
       is_platform_support: { Args: { _user_id: string }; Returns: boolean }
+      is_strong_authorship_source: { Args: { _src: string }; Returns: boolean }
+      is_technical_actor_label: { Args: { _label: string }; Returns: boolean }
       is_whatsapp_approve_admin: { Args: { _uid: string }; Returns: boolean }
       is_whatsapp_register_admin: { Args: { _uid: string }; Returns: boolean }
       is_whatsapp_super_admin: { Args: { _uid: string }; Returns: boolean }
+      is_workday: { Args: { d: string }; Returns: boolean }
+      last_changed_by_format_report: {
+        Args: never
+        Returns: {
+          com_user_uuid: number
+          farm_id: string
+          farm_name: string
+          nulo_ou_vazio: number
+          somente_nome: number
+          total: number
+          uuid_valido_em_profiles: number
+        }[]
+      }
       license_register_device: {
         Args: {
           _agent_version?: string
@@ -5219,12 +7384,36 @@ export type Database = {
         }
         Returns: Json
       }
+      log_user_activity: {
+        Args: {
+          _action: string
+          _farm_id?: string
+          _metadata?: Json
+          _path?: string
+        }
+        Returns: string
+      }
       mark_agent_commands_expired: {
         Args: { _farm_id: string }
         Returns: number
       }
       mark_automation_command_failures: { Args: never; Returns: number }
+      mark_automation_noise: {
+        Args: {
+          _category: string
+          _evidence?: Json
+          _executed_by?: string
+          _ids: string[]
+          _reason: string
+          _run_id: string
+        }
+        Returns: number
+      }
       mark_commands_timeout: { Args: { _farm_id: string }; Returns: number }
+      mark_corroborated_candidates: {
+        Args: { _run_id: string }
+        Returns: number
+      }
       mark_disobeyed_commands_as_local: { Args: never; Returns: number }
       mark_pump_local_actuation: {
         Args: { _equipment_id: string; _farm_id: string }
@@ -5242,6 +7431,32 @@ export type Database = {
           status: string
           user_id: string
           whatsapp: string
+        }[]
+      }
+      master_manages_farm: {
+        Args: { _farm_id: string; _uid: string }
+        Returns: boolean
+      }
+      parse_user_uuid: { Args: { _text: string }; Returns: string }
+      phase_b_acceptance: {
+        Args: never
+        Returns: {
+          criterio: string
+          fazendas: string
+          situacao: string
+          violacoes: number
+        }[]
+      }
+      phase_b_impact_report: {
+        Args: { _run_id?: string }
+        Returns: {
+          enviados_fila: number
+          fazenda: string
+          pendencias_admin: number
+          reclassificados: number
+          ruido_tecnico: number
+          total_antes: number
+          total_final: number
         }[]
       }
       platform_alerts_feed: {
@@ -5515,11 +7730,76 @@ export type Database = {
         }
         Returns: number
       }
+      purge_agent_technical_events: {
+        Args: { _keep?: string }
+        Returns: number
+      }
+      purge_false_power_alerts: {
+        Args: { _hours?: number }
+        Returns: {
+          outros_intocados: number
+          preservados: number
+          removidos: number
+        }[]
+      }
       purge_stale_on_commands_when_bridge_down: {
         Args: never
         Returns: {
           cancelled_count: number
           farm_id: string
+        }[]
+      }
+      recover_hidden_transitions: {
+        Args: { _farm_id?: string; _hours?: number }
+        Returns: {
+          automacao: number
+          local_real: number
+          mantidos_privados: number
+          recuperados: number
+          remoto: number
+          run_id: string
+          whatsapp: number
+        }[]
+      }
+      remote_authorship_decision: {
+        Args: { _farm_id?: string; _gap?: string }
+        Returns: {
+          acao: string
+          acao_proposta: string
+          batch_id: string
+          candidata_user_id: string
+          candidatas: number
+          conflito: boolean
+          eventos: number
+          evidencias: string
+          fazenda: string
+          fim_brt: string
+          ids: string[]
+          inicio_brt: string
+          pessoa_candidata: string
+          sem_nome: number
+        }[]
+      }
+      remote_event_authorship_candidates: {
+        Args: { _log_id: string; _window?: string }
+        Returns: {
+          email: string
+          evidencia: string
+          fonte: string
+          forca: string
+          nome: string
+          user_id: string
+        }[]
+      }
+      remote_without_person: {
+        Args: { _hours?: number }
+        Returns: {
+          acao: string
+          equipamento: string
+          evento_id: string
+          evidencia: string
+          fazenda: string
+          ocorrido: string
         }[]
       }
       renov_combined_payload: {
@@ -5534,6 +7814,15 @@ export type Database = {
       renov_positional_payload: {
         Args: { _saida: number; _turn_on: boolean }
         Returns: string
+      }
+      report_origin_breakdown: {
+        Args: { _hours?: number }
+        Returns: {
+          escondido: number
+          fazenda: string
+          oficial: number
+          origem: string
+        }[]
       }
       request_agent_update: {
         Args: { _farm_id: string; _force?: boolean; _version: string }
@@ -5550,7 +7839,22 @@ export type Database = {
         }
         Returns: string
       }
+      resolve_event_authorship: {
+        Args: { _log_id: string }
+        Returns: {
+          actor_label: string
+          confidence: string
+          evidence: Json
+          evidence_source: string
+          origin_final: string
+          user_email: string
+          user_id: string
+        }[]
+      }
       resolve_user_display_name: { Args: { _uid: string }; Returns: string }
+      restore_purged_power_alerts: { Args: never; Returns: number }
+      rollback_cleanup_run: { Args: { _run_id: string }; Returns: number }
+      rollback_recovery_run: { Args: { _run_id: string }; Returns: number }
       run_automacoes_tick: {
         Args: never
         Returns: {
@@ -5572,16 +7876,69 @@ export type Database = {
           on_enqueued: number
         }[]
       }
+      run_phase_b_cleanup: {
+        Args: { _farm_id?: string }
+        Returns: {
+          duplicidades: number
+          nao_confirmados: number
+          run_id: string
+          tecnicos: number
+        }[]
+      }
       send_security_alert_whatsapp: {
         Args: { _alert_id: string }
         Returns: undefined
       }
+      set_switching_protection: {
+        Args: {
+          _actor?: string
+          _enabled: boolean
+          _equipment_id: string
+          _seconds?: number
+        }
+        Returns: {
+          enabled: boolean
+          equipment_id: string
+          seconds: number
+        }[]
+      }
+      set_technical_display_pref: {
+        Args: { _actor?: string; _show: boolean }
+        Returns: boolean
+      }
       sweep_stuck_pump_commands: { Args: never; Returns: number }
+      switching_protection_list: {
+        Args: { _farm_id: string }
+        Returns: {
+          currently_locked: boolean
+          enabled: boolean
+          equipment_id: string
+          equipment_name: string
+          last_change_at: string
+          last_change_by: string
+          seconds: number
+        }[]
+      }
+      switching_protection_status: {
+        Args: { _equipment_id: string }
+        Returns: {
+          last_confirmed_at: string
+          last_state: boolean
+          locked: boolean
+          seconds_remaining: number
+        }[]
+      }
       touch_active_session: { Args: { _session_id: string }; Returns: boolean }
       update_flow_from_telemetry: {
         Args: { _farm_id: string; _raw: string; _tsnn: string }
         Returns: undefined
       }
+      wa_send_message: {
+        Args: { p_body: string; p_to: string }
+        Returns: undefined
+      }
+      wa_webhook_monitor: { Args: never; Returns: undefined }
+      wa_webhook_resubscribe: { Args: never; Returns: undefined }
     }
     Enums: {
       agent_cmd_kind:
@@ -5596,8 +7953,6 @@ export type Database = {
         | "list_ports"
         | "update_agent"
         | "agent_restart"
-        | "reboot_agent"
-        | "unblock_agent"
         | "force_reboot"
         | "force_rollback"
         | "start_log_stream"
@@ -5605,6 +7960,8 @@ export type Database = {
         | "stop_log_stream"
         | "serial_terminal"
         | "serial_sniff"
+        | "unblock_agent"
+        | "reboot_agent"
         | "update_bridge"
       agent_cmd_status:
         | "pending"
@@ -5641,7 +7998,13 @@ export type Database = {
         | "polling"
         | "pump_on"
         | "pump_off"
-      event_origin: "remote" | "local" | "auto" | "reading" | "system"
+      event_origin:
+        | "remote"
+        | "local"
+        | "auto"
+        | "reading"
+        | "system"
+        | "whatsapp"
       event_result: "success" | "fail" | "pending" | "timeout"
       tampering_kind:
         | "asar_modified"
@@ -5666,12 +8029,12 @@ export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
         DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -5695,11 +8058,11 @@ export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -5720,11 +8083,11 @@ export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -5745,11 +8108,11 @@ export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
-  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaEnumNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -5762,11 +8125,11 @@ export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },
-  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
-    : never = never,
+    : never) = never,
 > = PublicCompositeTypeNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -5790,8 +8153,6 @@ export const Constants = {
         "list_ports",
         "update_agent",
         "agent_restart",
-        "reboot_agent",
-        "unblock_agent",
         "force_reboot",
         "force_rollback",
         "start_log_stream",
@@ -5799,6 +8160,8 @@ export const Constants = {
         "stop_log_stream",
         "serial_terminal",
         "serial_sniff",
+        "unblock_agent",
+        "reboot_agent",
         "update_bridge",
       ],
       agent_cmd_status: [
@@ -5840,7 +8203,14 @@ export const Constants = {
         "pump_on",
         "pump_off",
       ],
-      event_origin: ["remote", "local", "auto", "reading", "system"],
+      event_origin: [
+        "remote",
+        "local",
+        "auto",
+        "reading",
+        "system",
+        "whatsapp",
+      ],
       event_result: ["success", "fail", "pending", "timeout"],
       tampering_kind: [
         "asar_modified",
