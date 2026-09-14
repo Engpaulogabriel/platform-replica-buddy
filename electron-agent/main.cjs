@@ -1503,6 +1503,12 @@ function noteBackoffSuccess(tsnn) {
         tempo_total_offline_segundos: tempoTotal,
         tentativas_sem_resposta: b.failures,
       });
+      // EVIDÊNCIA TÉCNICA (best-effort, nunca awaited). Reusa o MESMO detector
+      // canônico — não há segundo detector nem threshold novo.
+      techEnqueueSafe("plc_online", "plc", "info", {
+        gatewayId: tsnn,
+        payload: { tsnn, duration_seconds: tempoTotal, consecutive_failures: b.failures },
+      });
     }
   }
   pollingBackoffByTsnn.set(tsnn, { failures: 0, offlineSince: null, offlineLogged: false, lastSuccessAt: Date.now(), nextRetryAt: 0 });
@@ -1532,6 +1538,11 @@ function noteBackoffFailure(tsnn) {
       tentativas_consecutivas: failures,
       ultimo_contato: lastTs,
       tempo_offline_segundos: tempoOff,
+    });
+    techEnqueueSafe("plc_offline", "plc", "error", {
+      gatewayId: tsnn,
+      payload: { tsnn, consecutive_failures: failures, last_success_at: lastTs,
+                 offline_seconds: tempoOff },
     });
     void updatePlcCommStatus(tsnn, "offline");
   }
@@ -4906,6 +4917,8 @@ function scheduleBridgeRelaunch(reason) {
       bridgeDead = true;
       lastBridgeError = "bridge_dead";
       pushLog("error", "system", `[BRIDGE] ${BRIDGE_MAX_RELAUNCH} tentativas falharam (${reason}) — serial MORTA; polling HTTP continua. Sem popup.`);
+      techEnqueueSafe("bridge_offline", "bridge", "critical",
+        { payload: { reason: String(reason || "").slice(0, 200), attempts: BRIDGE_MAX_RELAUNCH } });
       try { void sendHeartbeat(); } catch (_) {}
     }
     return;
@@ -4939,6 +4952,9 @@ function handleComStuck() {
   comStuckCount++;
   lastBridgeError = "com_stuck";
   pushLog("warn", "serial", `[COM-STUCK] sem RX há >${COM_STUCK_MS / 1000}s em ${comPort} — reset (${comStuckCount}/${COM_STUCK_MAX})`);
+  techEnqueueSafe("serial_error", "serial", "warning",
+    { payload: { port: String(comPort || "").slice(0, 40), reason: "com_stuck",
+                 stuck_count: comStuckCount, threshold_ms: COM_STUCK_MS } });
   try { void sendHeartbeat(); } catch (_) {}
   if (comStuckCount >= COM_STUCK_MAX) {
     const next = nextComPort(comPort);
@@ -7662,6 +7678,195 @@ function startRealtimeSubscriptionsBestEffort() {
     .catch((e) => scheduleAgentCmdRetry(`exception: ${formatError(e)}`));
   // polling HTTP de fallback p/ agent_commands (sempre ativo)
   startAgentCommandPolling();
+  // Evidência técnica: timer próprio, best-effort, fora do caminho serial.
+  startTechnicalEvidenceBestEffort();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CENTRO DE EVIDÊNCIAS TÉCNICAS — wiring (FASE 2B)
+// ═══════════════════════════════════════════════════════════════════════════
+// ADITIVO E ISOLADO. Não toca em txQueue, inflightCmd, polling, safety,
+// desired_running, pending_command_id nem em qualquer constante operacional.
+// Toda a lógica de decisão vive em ./lib/technicalEvents.cjs (módulo puro e
+// testado na Fase 2); aqui só há I/O e o timer.
+//
+// REGRA ABSOLUTA: best-effort. Nada aqui pode lançar, bloquear ou atrasar o
+// laço serial. O timer é próprio (setInterval), separado do loop de TX/RX, e
+// nenhum await deste bloco acontece dentro do caminho crítico.
+const TECH = (() => { try { return require("./lib/technicalEvents.cjs"); } catch { return null; } })();
+
+// Endpoint externo CONFIGURÁVEL. Default documentado, sem prender fornecedor:
+// Cloudflare responde a HEAD em /, é global e não exige credencial. Trocável por
+// env RENOV_PROBE_EXTERNAL_URL sem republicar o agente.
+const TECH_PROBE_EXTERNAL_URL = process.env.RENOV_PROBE_EXTERNAL_URL || "https://1.1.1.1/";
+const TECH_PROBE_INTERVAL_MS = Number(process.env.RENOV_PROBE_INTERVAL_MS || 60_000);
+const TECH_PROBE_TIMEOUT_MS = 8_000;
+const TECH_FLUSH_BATCH = 50;
+const TECH_BUFFER_FILE = (() => {
+  try { return path.join(app.getPath("userData"), "technical-events.ndjson"); }
+  catch { return path.join(os.tmpdir(), "renov-technical-events.ndjson"); }
+})();
+
+let techMonitor = null;
+let techFlushInFlight = false;
+let techIngestBackoffUntil = 0;
+
+/** HEAD/GET mínimo com timeout. Nunca lança. Sem speed test, sem download. */
+async function techProbe(url, opts) {
+  const t0 = Date.now();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), TECH_PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, Object.assign({ method: "HEAD", signal: ctl.signal }, opts || {}));
+    return { ok: res.ok || res.status < 500, latencyMs: Date.now() - t0, httpStatus: res.status };
+  } catch (e) {
+    // Classificação de erro — DNS é classe própria: falha de resolução não é
+    // "internet caiu", e tratar tudo como offline apagaria essa distinção.
+    const msg = String((e && e.message) || e).toLowerCase();
+    const errorClass = /abort|timeout/.test(msg) ? "timeout"
+      : /enotfound|eai_again|dns|getaddrinfo/.test(msg) ? "dns"
+      : /econnrefused|econnreset|ehostunreach|enetunreach|socket/.test(msg) ? "connection"
+      : "network";
+    return { ok: false, latencyMs: Date.now() - t0, errorClass };
+  } finally { clearTimeout(timer); }
+}
+
+/** Enfileira LOCALMENTE. Persistir primeiro é o que garante que o evento
+ *  "internet_offline" sobreviva — no instante em que ele acontece não há rede
+ *  para enviá-lo. */
+function techEnqueue(ev) {
+  try {
+    if (!TECH || !ev) return;
+    TECH.bufferAppend(TECH_BUFFER_FILE, Object.assign({
+      agentVersion: AGENT_VERSION, source: "agent",
+    }, ev));
+  } catch (_) { /* best-effort */ }
+}
+
+/** Ponto ÚNICO de emissão a partir dos detectores canônicos do agente.
+ *  Best-effort e SÍNCRONO (só append em arquivo): nunca é awaited, nunca lança,
+ *  nunca entra no caminho de TX/RX. O envio acontece no timer de flush. */
+function techEnqueueSafe(eventType, category, severity, extra) {
+  try {
+    techEnqueue(Object.assign({
+      clientEventId: crypto.randomUUID(),
+      eventType, category, severity, origin: "agent",
+      occurredAt: new Date().toISOString(),
+      // Correlaciona com o incidente de conectividade EM ABERTO, quando houver.
+      // Sem incidente aberto vai sem correlação — agrupar sem evidência
+      // temporal criaria correlação falsa.
+      correlationId: (techMonitor && techMonitor.correlationId) || null,
+    }, extra || {}));
+  } catch (_) { /* best-effort */ }
+}
+
+/** Extrai o `jti` do PRÓPRIO agent token. Leitura local do que já é nosso —
+ *  não é validação: quem valida é o banco, comparando com
+ *  `device_licenses.current_token_jti`. */
+function techJtiFromToken(token) {
+  try {
+    const p = String(token || "").split(".");
+    if (p.length !== 3) return null;
+    const b = p[1].replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b + "=".repeat((4 - (b.length % 4)) % 4);
+    const claims = JSON.parse(Buffer.from(pad, "base64").toString("utf8"));
+    return claims && claims.jti ? String(claims.jti) : null;
+  } catch { return null; }
+}
+
+/** Envia o buffer em lotes DIRETO para o PostgREST — sem Edge Function, logo
+ *  sem consumo de Lovable Cloud no fluxo normal. A autorização é o `jti`, que o
+ *  banco confere contra a licença; a anon key sozinha não grava nada, porque
+ *  `technical_events` não tem policy de INSERT para anon.
+ *
+ *  Se a gravação falhar, PARA e tenta depois — sem laço agressivo. Falha de
+ *  ingestão NÃO é falha de conectividade e nunca produz `internet_offline`. */
+async function techFlush() {
+  if (!TECH || techFlushInFlight || Date.now() < techIngestBackoffUntil) return;
+  techFlushInFlight = true;
+  try {
+    const pend = TECH.bufferRead(TECH_BUFFER_FILE);
+    if (!pend.length) return;
+    if (!supabase) return;
+
+    const cfg = (typeof loadConfig === "function") ? loadConfig() : null;
+    const { token } = await getFreshAgentBearer(cfg, false);
+    const jti = techJtiFromToken(token);
+    if (!jti) return;   // sem licença ativa não há como autenticar: tenta depois
+
+    const lote = pend.slice(0, TECH_FLUSH_BATCH);
+    const enviados = [];
+    for (const e of lote) {
+      const { error } = await withCloudTimeout(
+        supabase.rpc("record_agent_technical_event", {
+          _agent_jti: jti,
+          _event_type: e.eventType,
+          _category: e.category,
+          _severity: e.severity || "info",
+          _origin: e.origin || "agent",
+          _equipment_id: e.equipmentId || null,
+          _gateway_id: e.gatewayId || null,
+          _agent_version: e.agentVersion || AGENT_VERSION,
+          _correlation_id: e.correlationId || null,
+          _payload: e.payload || {},
+          _metadata: e.metadata || {},
+          _client_event_id: e.clientEventId || null,
+          // occurred_at REAL: sem isto, offline e restored chegariam ambos com
+          // a hora do upload e a linha do tempo do incidente sumiria.
+          _occurred_at: e.occurredAt || null,
+        }),
+        "technical-event", CLOUD_WRITE_TIMEOUT_MS,
+      );
+      if (error) { techIngestBackoffUntil = Date.now() + 60_000; break; }
+      // NULL de retorno = duplicata ou recusa; em ambos o evento está resolvido
+      // e sai do buffer. Insistir criaria laço.
+      enviados.push(e.clientEventId);
+    }
+    if (enviados.length) TECH.bufferDrop(TECH_BUFFER_FILE, enviados);
+  } catch (_) {
+    techIngestBackoffUntil = Date.now() + 60_000;
+  } finally { techFlushInFlight = false; }
+}
+
+/** Uma rodada de sondagem. A CLASSIFICAÇÃO é do módulo puro — nenhum `if`
+ *  paralelo aqui. Sondagem saudável não gera evento algum. */
+async function techProbeTick() {
+  try {
+    if (!TECH || !techMonitor) return;
+    const cfg = (typeof loadConfig === "function") ? loadConfig() : null;
+    const baseUrl = _activeBaseUrl(cfg) || SUPABASE_URL_DEFAULT;
+    const baseAnon = _activeAnon(cfg) || SUPABASE_ANON_DEFAULT;
+    // Probe RENOV: endpoint leve do PostgREST. Sem tabela, sem escrita, sem
+    // credencial sensível — só a anon, que é pública por definição.
+    const cloud = await techProbe(`${baseUrl}/rest/v1/`, {
+      method: "GET", headers: { apikey: baseAnon },
+    });
+    const extern = await techProbe(TECH_PROBE_EXTERNAL_URL);
+    for (const ev of TECH.applyProbe(techMonitor, { cloud, extern }, Date.now())) {
+      techEnqueue(ev);
+    }
+    await techFlush();
+  } catch (_) { /* best-effort */ }
+}
+
+function startTechnicalEvidenceBestEffort() {
+  try {
+    if (!TECH) return;
+    techMonitor = TECH.createMonitor();
+    techEnqueue({
+      clientEventId: crypto.randomUUID(), eventType: "agent_started",
+      category: "startup", severity: "info", origin: "agent",
+      occurredAt: new Date().toISOString(),
+      // `startup_reason` NÃO é enviado: o agente não tem como distinguir boot
+      // limpo de restart pós-crash. Inventar o campo seria pior que omiti-lo.
+      payload: { agent_version: AGENT_VERSION, platform: process.platform,
+                 node: process.versions && process.versions.node },
+    });
+    const t = setInterval(() => { void techProbeTick(); }, TECH_PROBE_INTERVAL_MS);
+    if (t && typeof t.unref === "function") t.unref();  // nunca segura o processo
+    setTimeout(() => { void techProbeTick(); }, 5_000).unref?.();
+  } catch (_) { /* best-effort */ }
 }
 
 // --- Supabase auth ---
