@@ -13,7 +13,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useCadastrosCloud, type CloudEquipamento } from "@/hooks/useCadastrosCloud";
 import type { Pump } from "@/components/dashboard/PumpTable";
 import type { Reservoir } from "@/components/dashboard/ReservoirGauges";
-import { buildCommandHistory, buildStatusHistory, logEvent, useAutomationLog, type AutomationLogEntry } from "@/lib/automationLog";
+import { logEvent, useAutomationLog, type AutomationLogEntry } from "@/lib/automationLog";
+import { buildMiniCommandHistory, buildMiniStatusHistory } from "@/lib/dashboardMiniHistory";
 import { supabase } from "@/integrations/supabase/client";
 import { notify } from "@/lib/notify";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
@@ -259,8 +260,8 @@ const buildPumpFromCloud = (
 
   const isRunning = getRunningFromOutputs(e);
   const name = e.name.toUpperCase();
-  const cmdHist = buildCommandHistory(e.id, name, log, 3);
-  const stHist = buildStatusHistory(e.id, name, log, 3);
+  const cmdHist = buildMiniCommandHistory(e.id, name, log, 3);
+  const stHist = buildMiniStatusHistory(e.id, name, log, 3);
 
   return {
     id: e.id,
@@ -287,6 +288,9 @@ const buildPumpFromCloud = (
     commandHistory: cmdHist,
     statusHistory: stHist,
     actuationOrigin: (e as { last_actuation_origin?: "remote" | "local" | "whatsapp" | "tech_terminal" | null }).last_actuation_origin ?? null,
+    desiredRunning: e.desired_running ?? null,
+    automaticOnAttemptSince: e.automatic_on_attempt_since
+      ? new Date(e.automatic_on_attempt_since).getTime() : undefined,
     localAckAt: (e as { local_ack_at?: string | null }).local_ack_at ?? null,
   };
 };
@@ -334,6 +338,8 @@ export interface UseDashboardEquipmentResult {
   loading: boolean;
   /** snapshots brutos da nuvem (para diagrama de fluxo, popovers) */
   cloudEquipments: CloudEquipamento[];
+  realtimeHealth: "connected" | "reconnecting" | "degraded";
+  lastPhysicalReadAt: number | null;
 }
 
 export function useDashboardEquipment(): UseDashboardEquipmentResult {
@@ -613,13 +619,12 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
                 ? undefined
                 : old.lastUserConfirmedAt,
             actuationOrigin: (e.last_actuation_origin as "remote" | "local" | "whatsapp" | "tech_terminal" | null) ?? null,
+            desiredRunning: e.desired_running ?? null,
+            automaticOnAttemptSince: e.automatic_on_attempt_since
+              ? new Date(e.automatic_on_attempt_since).getTime() : undefined,
             localAckAt: (e as { local_ack_at?: string | null }).local_ack_at ?? null,
             commandBlockedUntil: e.command_blocked_until ?? null,
             lastCommunication: e.last_communication,
-            commandLockUntil: (e as { command_lock_until?: string | null }).command_lock_until
-              ? new Date((e as { command_lock_until?: string }).command_lock_until!).getTime() : undefined,
-            lastConfirmedTransitionAt: (e as { last_confirmed_transition_at?: string | null }).last_confirmed_transition_at
-              ? new Date((e as { last_confirmed_transition_at?: string }).last_confirmed_transition_at!).getTime() : undefined,
             lastReading: formatTimestamp(e.last_communication),
             signalRF: online ? signalBarsToPercent(e.last_signal_bars) : 0,
             voltage: 0,
@@ -820,10 +825,6 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
             actuationOrigin: newActuationOrigin,
             commandBlockedUntil: newCommandBlockedUntil,
             lastCommunication: cloudEq.last_communication,
-            commandLockUntil: (cloudEq as { command_lock_until?: string | null }).command_lock_until
-              ? new Date((cloudEq as { command_lock_until?: string }).command_lock_until!).getTime() : undefined,
-            lastConfirmedTransitionAt: (cloudEq as { last_confirmed_transition_at?: string | null }).last_confirmed_transition_at
-              ? new Date((cloudEq as { last_confirmed_transition_at?: string }).last_confirmed_transition_at!).getTime() : undefined,
             lastReading: newLastReading,
             signalRF: newSignalRF,
             voltage: 0,
@@ -929,8 +930,8 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
   useEffect(() => {
     setPumps((prev) =>
       prev.map((p) => {
-        const cmdHist = buildCommandHistory(p.id, p.name, logEntries, 3);
-        const stHist = buildStatusHistory(p.id, p.name, logEntries, 3);
+        const cmdHist = buildMiniCommandHistory(p.id, p.name, logEntries, 3);
+        const stHist = buildMiniStatusHistory(p.id, p.name, logEntries, 3);
         return {
           ...p,
           commandHistory: cmdHist,

@@ -45,6 +45,10 @@ const emptyForm = { mode: "on-only" as ScheduleMode, days: [] as string[], timeO
 const Automatico = () => {
   const { loading: cadastrosLoading, equipments, plcs } = useCadastrosCloud();
   const cloud = useCloudAutomation();
+  // Inputs locais só para digitação; a verdade é `cloud.stagger`, do banco.
+  const [batchInput, setBatchInput] = useState("");
+  const [staggerInput, setStaggerInput] = useState("");
+  const [savingStagger, setSavingStagger] = useState(false);
   const farmId = useDefaultFarmId();
 
   const pumpEquipments = useMemo(
@@ -221,6 +225,27 @@ const Automatico = () => {
 
   const activeSchedulesCount = cloud.schedules.filter((s) => s.active).length;
 
+  // Sincroniza os inputs sempre que o valor PERSISTIDO mudar (load/refresh).
+  useEffect(() => {
+    setBatchInput(String(cloud.stagger.batchSize));
+    setStaggerInput(String(cloud.stagger.staggerSeconds));
+  }, [cloud.stagger.batchSize, cloud.stagger.staggerSeconds]);
+
+  const salvarStagger = async (patch: Parameters<typeof cloud.setStaggerConfig>[0]) => {
+    setSavingStagger(true);
+    try {
+      await cloud.setStaggerConfig(patch);
+      notify.ok("Automático", "Partida escalonada atualizada");
+    } catch (e) {
+      // Não finge sucesso: volta os inputs ao valor do banco e mostra o erro.
+      setBatchInput(String(cloud.stagger.batchSize));
+      setStaggerInput(String(cloud.stagger.staggerSeconds));
+      notify.fail("Automático", e instanceof Error ? e.message : "Falha ao salvar");
+    } finally {
+      setSavingStagger(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -258,6 +283,51 @@ const Automatico = () => {
                 checked={cloud.engineActive}
                 onCheckedChange={toggleEngine}
                 className="data-[state=checked]:bg-primary"
+              />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ── PARTIDA ESCALONADA (por fazenda) ────────────────────────────── */}
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-bold text-foreground">Partida escalonada</h3>
+              <p className="text-xs text-muted-foreground max-w-xl">
+                Controla quantas bombas podem partir automaticamente ao mesmo tempo
+                e o intervalo entre os grupos, reduzindo picos de demanda e quedas
+                de energia.
+              </p>
+            </div>
+            <Switch
+              checked={cloud.stagger.enabled}
+              onCheckedChange={(v) => void salvarStagger({ enabled: v })}
+              disabled={savingStagger}
+              className="data-[state=checked]:bg-primary"
+              aria-label="Partida escalonada"
+            />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="batch-size" className="text-xs">Bombas por grupo</Label>
+              <Input
+                id="batch-size" type="number" min={1} inputMode="numeric"
+                value={batchInput}
+                onChange={(e) => setBatchInput(e.target.value)}
+                onBlur={() => void salvarStagger({ batchSize: Number(batchInput) })}
+                disabled={!cloud.stagger.enabled || savingStagger}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="stagger-seconds" className="text-xs">Intervalo entre grupos (segundos)</Label>
+              <Input
+                id="stagger-seconds" type="number" min={10} inputMode="numeric"
+                value={staggerInput}
+                onChange={(e) => setStaggerInput(e.target.value)}
+                onBlur={() => void salvarStagger({ staggerSeconds: Number(staggerInput) })}
+                disabled={!cloud.stagger.enabled || savingStagger}
               />
             </div>
           </div>

@@ -45,6 +45,10 @@ export interface AutomationLogEntry {
    *  Atualização OTA) e leituras de status (Leitura OK, ruidosa, oculta por padrão). */
   action: AutomationAction;
   origin: AutomationOrigin;
+  /** `source_device` cru da linha do banco. Usado SÓ pela camada de
+   *  apresentação do Relatório para separar "Modo Automático"
+   *  (cloud-automation) de "Automação" genérica. Não classifica nada. */
+  sourceDevice?: string | null;
   user: string;
   /** Resultado do comando. Comandos "Manual" (acionamento físico no equipamento)
    *  nunca falham. Por padrão, sucesso. */
@@ -458,6 +462,7 @@ const rowToEntry = (r: DbRow): AutomationLogEntry => {
     pump: r.equipment_name,
     action,
     origin,
+    sourceDevice: r.source_device ?? null,
     user: resolveUser(r),
     result: (["fail", "failed", "timeout", "error"].includes(String(r.result)) ? "fail" : "success"),
     confirmationMethod: resolveConfirmationMethod(r),

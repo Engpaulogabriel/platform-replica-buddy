@@ -8,8 +8,10 @@
 //                                        ou 20 min (>1 saída/Boosters)
 //   #5  automatico_nao_obedecido      → comando automático bem-sucedido há 1–3 min
 //                                       cujo estado real não corresponde ao desejado
-//   #6  falta_energia                 → ≥4 equipamentos da MESMA fazenda perderam
-//                                       comunicação na mesma janela de 1 min
+//   #6  comm_incident / falta_energia → incidente classificado por EVIDÊNCIA.
+//                                       "Possível falta de energia" exige ≥4 BOMBAS
+//                                       lidas como DESLIGADAS em ≤60s, sem comando.
+//                                       Perda de comunicação NUNCA basta.
 //   #7  safety_timer_fired            → agente disparou safety timer (bomba não
 //                                       confirmou comando em 60s)
 //
@@ -22,6 +24,9 @@
 //
 // Autenticação: header `x-cron-secret` == CRON_SECRET.
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { classifyOutage, incidentRef, THRESHOLDS,
+         type PumpOffTransition } from "../_shared/outageClassifier.ts";
+import { authorizeCron } from "./auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -31,6 +36,9 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
+// Segredo rotacionado que o `cron_invoke()` de produção envia. Durante a
+// janela de rotação os dois valores são aceitos. Valor NUNCA no código.
+const CRON_SECRET_V2 = Deno.env.get("CRON_SECRET_V2") ?? "";
 
 // Thresholds por TIPO de equipamento (alinhado com a plataforma web):
 //   • poço (type='poco')          → 15 min sem comunicação
@@ -104,25 +112,28 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   // Auth: só permite chamadas do pg_cron/serviços internos.
-  // Aceita `x-cron-secret == CRON_SECRET` OU bearer com o service_role_key.
-  const cronHeader = req.headers.get("x-cron-secret") ?? "";
-  const authHeader = req.headers.get("authorization") ?? "";
-  const bearer = authHeader.toLowerCase().startsWith("bearer ")
-    ? authHeader.slice(7).trim()
-    : "";
-  const ok =
-    (CRON_SECRET.length > 0 && cronHeader === CRON_SECRET) ||
-    (SERVICE_ROLE.length > 0 && bearer === SERVICE_ROLE);
-  if (!ok) {
+  // Aceita `x-cron-secret` igual a QUALQUER segredo configurado no ambiente
+  // (CRON_SECRET ou o rotacionado CRON_SECRET_V2) OU bearer com o
+  // service_role_key. Sem nenhum deles, 401. Decisão em ./auth.ts, testável.
+  const auth = authorizeCron(req.headers, {
+    cronSecret: CRON_SECRET,
+    cronSecretV2: CRON_SECRET_V2,
+    serviceRole: SERVICE_ROLE,
+  });
+  if (!auth.ok) {
+    // `reason` é rótulo, nunca valor de segredo.
     console.warn("[critical-alerts-tick] unauthorized", {
-      has_secret: !!cronHeader, has_auth: !!authHeader,
+      reason: auth.reason,
+      secrets_configured: auth.secretsConfigured,
+      has_secret: !!req.headers.get("x-cron-secret"),
+      has_auth: !!req.headers.get("authorization"),
     });
     return new Response(JSON.stringify({ error: "unauthorized" }), {
       status: 401,
       headers: { ...corsHeaders, "content-type": "application/json" },
     });
   }
-  console.log("[critical-alerts-tick] authorized invocation");
+  console.log("[critical-alerts-tick] authorized invocation", { via: auth.reason });
 
   const sb = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
   const now = Date.now();
@@ -132,6 +143,9 @@ Deno.serve(async (req) => {
     safety_timer: 0, peak_events: 0, ota_events: 0,
     orphan_cycles_closed: 0,
     bridge_offline_events: 0, bridge_recovered_events: 0,
+    // Preenchido só se a leitura das transições físicas falhar. Sem isto, a
+    // detecção de energia ficaria cega em silêncio.
+    power_evidence_error: null as string | null,
   };
 
 
@@ -430,7 +444,67 @@ Deno.serve(async (req) => {
       summary.auto_violations = count ?? 0;
     }
 
-    // ─── #6 falta_energia ────────────────────────────────────────────────────
+    // ─── #6 incidente de comunicação / falta de energia ─────────────────────
+    // A regra antiga marcava "Possível falta de energia" quando ≥4 equipamentos
+    // da fazenda tinham `last_communication` na mesma janela de 60s. Isso mede
+    // SILÊNCIO, não desligamento: rádio, repetidor, gateway, bridge, agente e
+    // internet produzem exatamente o mesmo sintoma.
+    //
+    // Agora o indício de energia exige TRANSIÇÃO FÍSICA CONFIRMADA de bomba —
+    // leitura anterior '1', leitura seguinte '0' — vinda de `automation_log`
+    // com `action='turn_off' AND origin='reading'`. O trigger
+    // `log_equipment_state_change` já garante, antes de gravar essa linha, que
+    // é bomba ('poco'/'bombeamento'), que o bit mudou de verdade, que não é
+    // remoto e que não há comando manual/automação nos 120s anteriores.
+    //
+    // Consequências diretas:
+    //   • equipamento que só emudece não gera linha alguma → não conta;
+    //   • bomba já desligada que emudece não gera linha → não conta;
+    //   • nível/reservatório/repetidor nunca geram linha → não contam;
+    //   • desligamento comandado é excluído na origem → não conta.
+    const powerWindowStart = new Date(now - THRESHOLDS.powerWindowMs).toISOString();
+
+    // Só bombas ativas e fora de manutenção participam. `equips` já veio
+    // filtrado por `active` e `maintenance_mode`; aqui reforçamos o tipo.
+    const pumpIds = new Set(
+      equips.filter((e) => e.type === "poco" || e.type === "bombeamento").map((e) => e.id),
+    );
+
+    // Duas rotas gravam o MESMO desligamento espontâneo, e a bomba pode aparecer
+    // nas duas: o trigger `log_equipment_state_change` grava
+    // (action='turn_off', origin='reading') e a RPC de ingestão de telemetria
+    // grava (action='pump_off', origin='system', actor_label='Telemetria RF').
+    // Aceitamos as duas — `detectPowerPattern` conta BOMBAS DISTINTAS, então a
+    // linha duplicada não infla a contagem.
+    //
+    // `local`, `remote` e `auto` ficam de fora por definição: são desligamento
+    // intencional (botoeira, comando do usuário, desligamento programado).
+    const { data: pumpOffLogs, error: pumpOffErr } = await sb
+      .from("automation_log")
+      .select("equipment_id, farm_id, occurred_at")
+      .in("action", ["turn_off", "pump_off"])
+      .in("origin", ["reading", "system"])
+      .eq("result", "success")
+      .gte("occurred_at", powerWindowStart);
+
+    // Se esta query falhar, a detecção de energia fica cega SEM avisar. Falha
+    // fechada (nenhum falso alerta), mas tem de aparecer no retorno do tick.
+    if (pumpOffErr) {
+      console.error("[critical-alerts-tick] #6 automation_log falhou", pumpOffErr);
+      summary.power_evidence_error = pumpOffErr.message;
+    }
+
+    const offsByFarm = new Map<string, PumpOffTransition[]>();
+    for (const l of (pumpOffLogs ?? []) as Array<
+      { equipment_id: string | null; farm_id: string; occurred_at: string }
+    >) {
+      if (!l.equipment_id || !pumpIds.has(l.equipment_id)) continue;
+      const arr = offsByFarm.get(l.farm_id) ?? [];
+      arr.push({ equipmentId: l.equipment_id, atMs: new Date(l.occurred_at).getTime() });
+      offsByFarm.set(l.farm_id, arr);
+    }
+
+    // Perda simultânea de comunicação — evidência COMPLEMENTAR, nunca a base.
     const blackoutStart = new Date(now - (BLACKOUT_WINDOW_S + 60) * 1000).toISOString();
     const blackoutEnd = new Date(now - 60 * 1000).toISOString();
     const recent = equips.filter(
@@ -441,19 +515,81 @@ Deno.serve(async (req) => {
       const arr = byFarm.get(e.farm_id) ?? [];
       arr.push(e); byFarm.set(e.farm_id, arr);
     }
+
+    // Uma fazenda entra na avaliação por QUALQUER um dos dois caminhos: bombas
+    // desligando (evidência de energia, mesmo com tudo comunicando) ou perda
+    // simultânea de comunicação (incidente de comunicação).
+    const farmsToEvaluate = new Set<string>();
     for (const [farmId, list] of byFarm) {
-      if (list.length < BLACKOUT_MIN_EQUIPS) continue;
-      const cooldownTs = new Date(now - BLACKOUT_COOLDOWN_MIN * 60_000).toISOString();
-      const { data: existing } = await sb.from("farm_notifications")
-        .select("id").eq("farm_id", farmId).eq("source", "falta_energia")
-        .gte("created_at", cooldownTs).limit(1);
-      if (existing && existing.length > 0) continue;
-      const { error } = await sb.from("farm_notifications").insert({
-        farm_id: farmId, kind: "failure", severity: "critical",
-        title: "Possível falta de energia",
-        message: `${list.length} equipamentos perderam comunicação simultaneamente`,
-        source: "falta_energia", source_ref: crypto.randomUUID(),
+      if (list.length >= BLACKOUT_MIN_EQUIPS) farmsToEvaluate.add(farmId);
+    }
+    for (const [farmId, offs] of offsByFarm) {
+      if (offs.length >= THRESHOLDS.powerMinPumps) farmsToEvaluate.add(farmId);
+    }
+
+    for (const farmId of farmsToEvaluate) {
+      const list = byFarm.get(farmId) ?? [];
+      const offs = offsByFarm.get(farmId) ?? [];
+
+      // ── Evidência: agente, bridge, transições físicas e comandos ─────────
+      const { data: sh } = await sb.from("site_health")
+        .select("last_heartbeat, com_connected, last_error")
+        .eq("farm_id", farmId).maybeSingle();
+
+      const { count: totalEq } = await sb.from("equipments")
+        .select("id", { count: "exact", head: true })
+        .eq("farm_id", farmId).eq("active", true);
+
+      // Veto adicional: comando manual/automação para QUALQUER das bombas que
+      // desligaram, na janela + a margem de 120s que o trigger já usa. O
+      // trigger é a primeira barreira; esta é a segunda, para o caso de a linha
+      // ter sido gravada por outro caminho.
+      let commandedNearby = false;
+      if (offs.length > 0) {
+        const cmdSince = new Date(now - THRESHOLDS.powerWindowMs - 120_000).toISOString();
+        const { count: cmds } = await sb.from("commands")
+          .select("id", { count: "exact", head: true })
+          .in("equipment_id", [...new Set(offs.map((o) => o.equipmentId))])
+          .in("type", ["manual", "automation"])
+          .gte("created_at", cmdSince);
+        commandedNearby = (cmds ?? 0) > 0;
+      }
+
+      const cls = classifyOutage({
+        agentHeartbeatAgeMs: sh?.last_heartbeat
+          ? now - new Date(sh.last_heartbeat).getTime() : Number.POSITIVE_INFINITY,
+        bridgeConnected: sh?.com_connected === true,
+        totalEquipments: totalEq ?? list.length,
+        affectedEquipments: list.length,
+        confirmedPumpOffs: offs,
+        hasCompatibleCommandOrAutomation: commandedNearby,
+        powerSensorDown: null,          // sem sensor físico hoje
       });
+
+      // Uma fazenda pode entrar aqui só por causa das bombas desligando. Se o
+      // veredito NÃO for de energia e também não houve perda simultânea de
+      // comunicação, não há incidente para relatar.
+      const isPower = cls.type === "power_confirmed" || cls.type === "power_suspected";
+      if (!isPower && list.length < BLACKOUT_MIN_EQUIPS) continue;
+
+      // Incidente ÚNICO: mesma janela → mesma chave → upsert, não insert.
+      // `source_ref` é uuid na tabela, então a chave passa pelo mesmo
+      // `uuidFromString()` já usado por safety_timer_fired e peak_hour.
+      const anchor = isPower && cls.power.startedAtMs !== null ? cls.power.startedAtMs : now;
+      const ref = await uuidFromString(incidentRef(farmId, cls.type, anchor));
+      const message = isPower
+        ? `${cls.reason}.` +
+          (list.length > 0 ? ` ${list.length} equipamento(s) também pararam de comunicar.` : "")
+        : `${list.length} equipamento(s) sem comunicação. ${cls.reason}.`;
+
+      const { error } = await sb.from("farm_notifications").upsert({
+        farm_id: farmId, kind: "failure",
+        severity: isPower ? "critical" : "warning",
+        title: cls.title,
+        message,
+        source: isPower ? "falta_energia" : "comm_incident",
+        source_ref: ref,
+      }, { onConflict: "farm_id,source,source_ref", ignoreDuplicates: true });
       if (!error) summary.blackouts++;
     }
 

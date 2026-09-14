@@ -8,11 +8,17 @@
 // Fail-safe: qualquer erro só loga; nunca afeta a plataforma.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, jsonResp, alertSuperAdmins } from "../_shared/security.ts";
+import { guardCron } from "../_shared/cronAuth.ts";
 
 const MIN = 60_000;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // ── GUARDA DE CRON ────────────────────────────────────────────────────────
+  // Antes de QUALQUER consulta, alerta, escrita ou ação operacional.
+  // Sem x-cron-secret válido (ou service_role), devolve 401/403 e para aqui.
+  { const blocked = guardCron(req, corsHeaders); if (blocked) return blocked; }
   const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const now = Date.now();
   const alerted: string[] = [];

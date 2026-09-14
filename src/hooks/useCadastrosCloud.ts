@@ -77,6 +77,8 @@ export interface CloudEquipamento {
   pending_command_id: string | null;
   /** Estado desejado pela última intenção (true=ligar, false=desligar). Sincronizado pelo worker. */
   desired_running?: boolean | null;
+  /** Modo Automático: início da tentativa de partida ainda não confirmada. */
+  automatic_on_attempt_since?: string | null;
   polling_interval_seconds?: number;
   /** Intervalo esperado de telemetria (min). Padrão 10. Boosters = 25. Usado para calcular a janela offline (telemetry_interval + 5 min). */
   telemetry_interval?: number | null;
@@ -140,6 +142,7 @@ const EQUIP_COLS =
   "alarm_low,alarm_high,fonte_tipo,fonte_id,alimenta_id,active," +
   "last_communication,last_outputs_state,last_signal_bars,last_actuation_origin," +
   "local_ack_at,command_blocked_until,pending_command_id,desired_running," +
+  "automatic_on_attempt_since," +
   "polling_interval_seconds,rf_radio,rf_via_rep,forced_shutdown_enabled," +
   "level_last_raw,level_last_raw_at,level_cal_digital,level_cal_meters," +
   "level_max_meters,level_sensor_index," +
@@ -368,7 +371,7 @@ export function useCadastrosCloud() {
         if (!farmId) {
           farmIdRef.current = null;
           if (!cancelled) {
-            setState({ loading: false, error: "no_default_farm", farmId: null, isAdmin: false, plcs: [], equipments: [], sectors: [], lastSyncAt: null, realtimeConnected: false });
+            setState({ loading: false, error: "no_default_farm", farmId: null, isAdmin: false, plcs: [], equipments: [], sectors: [], lastSyncAt: null, realtimeConnected: false, realtimeHealth: "reconnecting", lastPhysicalReadAt: null });
           }
           return;
         }
@@ -388,7 +391,7 @@ export function useCadastrosCloud() {
 
         const data = await loadAll(farmId);
         if (cancelled) return;
-        setState({ loading: false, error: null, farmId, isAdmin, ...data, lastSyncAt: Date.now(), realtimeConnected: false });
+        setState({ loading: false, error: null, farmId, isAdmin, ...data, lastSyncAt: Date.now(), realtimeConnected: false, realtimeHealth: "reconnecting", lastPhysicalReadAt: null });
 
         try {
           if (cancelled) return;

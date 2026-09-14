@@ -2,12 +2,15 @@ import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Bot, ChevronLeft, ChevronRight, Download, Eye, FileText, Hand, MessageCircle, Monitor, Power, Radio, RefreshCw, Server, WifiOff } from "lucide-react";
+import { Bot, ChevronLeft, ChevronRight, Download, Eye, FileText, Hand, MessageCircle, Monitor, Power, Radio, RefreshCw, Server, WifiOff, Workflow } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { useAutomationLog, loadAutomationLogRange, loadTechnicalReadings, type AutomationLogEntry, type TechnicalReading } from "@/lib/automationLog";
+import { useAutomationLog, loadAutomationLogRange, loadTechnicalReadings, type AutomationLogEntry, type AutomationOrigin, type TechnicalReading } from "@/lib/automationLog";
 import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { exportAutomacaoCSV, exportAutomacaoPDF } from "@/lib/reportExport";
 import { notifyReport } from "@/lib/notify";
+import {
+  resolveReportOrigin, REPORT_ORIGIN_ICON, REPORT_ORIGIN_ICON_CLASS, REPORT_ORIGIN_BADGE,
+} from "@/lib/reportOrigin";
 import { guardExport } from "@/lib/securityClient";
 import { toast } from "sonner";
 
@@ -36,33 +39,26 @@ const SYSTEM_ACTIONS = new Set<string>([
   "Leitura OK",
 ]);
 
-function getOriginIcon(origin: string) {
-  if (origin === "Automático") return <Bot className="w-4 h-4 text-primary" />;
-  if (origin === "Remoto") return <Monitor className="w-4 h-4 text-info" />;
-  if (origin === "Sistema") return <Server className="w-4 h-4 text-muted-foreground" />;
-  if (origin === "WhatsApp") return <MessageCircle className="w-4 h-4 text-[#25D366]" />;
-  return <Hand className="w-4 h-4 text-warning" />;
+/** ORIGEM: quatro casos do produto — Remoto, Local, Automação e Modo
+ *  Automático. A decisão mora em `@/lib/reportOrigin` (puro e testado); aqui
+ *  fica só o mapeamento nome-do-ícone → componente lucide. */
+const ORIGIN_ICON_COMPONENT = {
+  Monitor, Hand, Workflow, Bot, MessageCircle, Server,
+} as const;
+
+function getOriginIcon(origin: string, sourceDevice?: string | null) {
+  const o = resolveReportOrigin(origin, sourceDevice);
+  const Icon = ORIGIN_ICON_COMPONENT[REPORT_ORIGIN_ICON[o] ?? "Hand"] ?? Hand;
+  return <Icon className={`w-4 h-4 ${REPORT_ORIGIN_ICON_CLASS[o] ?? "text-warning"}`} />;
 }
 
-function getOriginLabel(origin: string) {
-  if (origin === "Manual") return "Local";
-  if (origin === "Automático") return "Automação"; // desligamento programado
-  // FASE B: o rótulo provisório de origem NÃO existe mais no oficial. Uma
-  // transição sem origem provada sai do oficial (noise_reason=
-  // 'pending_authorship_review') e vai para a fila administrativa, voltando
-  // com origem e pessoa auditáveis. Se algo assim ainda chegar aqui, é um
-  // evento que escapou do guarda — mostramos o valor cru, sem inventar rótulo.
-  return origin;
+function getOriginLabel(origin: string, sourceDevice?: string | null) {
+  return resolveReportOrigin(origin, sourceDevice);
 }
 
-function getOriginBadge(origin: string) {
-  const styles: Record<string, string> = {
-    "Automático": "bg-primary/10 text-primary",
-    "Remoto": "bg-info/10 text-info",
-    "Manual": "bg-warning/15 text-warning border border-warning/30",
-    "WhatsApp": "bg-[#25D366]/10 text-[#1ea952] border border-[#25D366]/30",
-  };
-  return styles[origin] || "bg-secondary text-muted-foreground";
+function getOriginBadge(origin: string, sourceDevice?: string | null) {
+  return REPORT_ORIGIN_BADGE[resolveReportOrigin(origin, sourceDevice)]
+      ?? "bg-secondary text-muted-foreground";
 }
 
 function getActionStyle(action: string): { cls: string; Icon: typeof Power } {
@@ -256,7 +252,12 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
   const canonicalRows = useMemo(
     () => filteredLog.map(r => ({
       ...r,
-      origin: getOriginLabel(r.origin),
+      // Esta memo monta a linha de APRESENTAÇÃO reaproveitando a forma de
+      // AutomationLogEntry e sobrescreve `origin` com o RÓTULO exibido — algo
+      // que já acontecia antes desta mudança. O cast mantém a forma; trocar
+      // isso por um tipo de linha de exibição próprio é refatoração, e o
+      // pedido aqui é visual.
+      origin: getOriginLabel(r.origin, r.sourceDevice) as unknown as AutomationOrigin,
       user: getUserLabel(r.user),
     })),
     [filteredLog],
@@ -353,18 +354,13 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                         </div>
                         <div>
                           <span className="block text-muted-foreground">Origem</span>
-                          <span className="inline-flex items-center gap-1 font-medium text-foreground">{getOriginIcon(item.origin)}{getOriginLabel(item.origin)}</span>
+                          <span className="inline-flex items-center gap-1 font-medium text-foreground">{getOriginIcon(item.origin, item.sourceDevice)}{getOriginLabel(item.origin, item.sourceDevice)}</span>
                         </div>
                         <div className="col-span-2">
-                          <span className="block text-muted-foreground">Usuário</span>
-                          {/* só autoria humana; método físico vai em detalhe */}
+                          <span className="block text-muted-foreground">Nome</span>
+                          {/* só o nome: método de confirmação e detalhe técnico
+                              não aparecem no relatório oficial */}
                           <UserCell item={item} />
-                          {item.confirmationMethod && (
-                            <span className="block text-[10px] text-muted-foreground">
-                              Confirmado por: {String(item.confirmationMethod).replace(/^Confirmado por /, "")}
-                            </span>
-                          )}
-                          {canSeeTech && <TechDetail item={item} />}
                         </div>
                       </div>
                     </div>
@@ -377,11 +373,10 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                     <TableRow className="border-border hover:bg-secondary/50">
                       <TableHead className="text-muted-foreground">Data</TableHead>
                       <TableHead className="text-muted-foreground">Hora</TableHead>
-                      <TableHead className="text-muted-foreground">Equipamento</TableHead>
+                      <TableHead className="text-muted-foreground">Poço</TableHead>
                       <TableHead className="text-muted-foreground">Ação</TableHead>
                       <TableHead className="text-muted-foreground">Origem</TableHead>
-                      <TableHead className="text-muted-foreground">Usuário</TableHead>
-                      <TableHead className="text-muted-foreground">Resultado</TableHead>
+                      <TableHead className="text-muted-foreground">Nome</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -399,29 +394,20 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                           </TableCell>
                           <TableCell>
                             <div className="flex items-center gap-1.5">
-                              {getOriginIcon(item.origin)}
-                              <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${getOriginBadge(item.origin)}`}>
-                                {getOriginLabel(item.origin)}
+                              {getOriginIcon(item.origin, item.sourceDevice)}
+                              <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${getOriginBadge(item.origin, item.sourceDevice)}`}>
+                                {getOriginLabel(item.origin, item.sourceDevice)}
                               </span>
                             </div>
                           </TableCell>
                           {/* Coluna Usuário = SÓ autoria humana. O método de confirmação
                               física ("Telemetria RF") vive no tooltip, nunca aqui. */}
                           <TableCell className="text-muted-foreground text-sm">
+                            {/* SOMENTE o nome. O método de confirmação
+                                (Telemetria RF) é técnico e vive apenas em
+                                details.confirmation_method, para auditoria —
+                                nunca na tela, no CSV ou no PDF oficiais. */}
                             <UserCell item={item} />
-                            {item.confirmationMethod && (
-                              <span className="block text-[10px] text-muted-foreground">
-                                Confirmado por: {String(item.confirmationMethod).replace(/^Confirmado por /, "")}
-                              </span>
-                            )}
-                            {canSeeTech && <TechDetail item={item} />}
-                          </TableCell>
-                          <TableCell>
-                            {isResultOk(item.result) ? (
-                              <span className="text-[11px] font-medium text-primary">OK</span>
-                            ) : (
-                              <span className="text-[11px] font-medium text-destructive">Falhou</span>
-                            )}
                           </TableCell>
                         </TableRow>
                       );

@@ -4,6 +4,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { STAGGER_DEFAULTS, validateStaggerConfig } from "@/lib/automaticPumpState";
+
+/** Configuração de partida escalonada da fazenda (tabela `farms`). */
+export interface StaggerConfig {
+  enabled: boolean;
+  batchSize: number;
+  staggerSeconds: number;
+}
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { useAuth } from "@/contexts/AuthContext";
 import { notifyWhatsAppImmediate, type WhatsAppNotifyDiagnosticResult } from "@/lib/whatsappNotify";
@@ -40,6 +48,9 @@ interface UseCloudAutomationResult {
   deleteSchedule: (id: string) => Promise<void>;
   toggleSchedule: (id: string) => Promise<void>;
   upsertHoliday: (equipmentId: string, patch: Partial<CloudHolidayConfig>) => Promise<void>;
+  /** Partida escalonada da fazenda — já era retornada, faltava no tipo. */
+  stagger: StaggerConfig;
+  setStaggerConfig: (patch: Partial<StaggerConfig>) => Promise<StaggerConfig>;
   refresh: () => Promise<void>;
 }
 
@@ -68,7 +79,19 @@ export function useCloudAutomation(): UseCloudAutomationResult {
   const metadataName = String(user?.user_metadata?.name ?? user?.user_metadata?.full_name ?? "").trim();
   const [performerName, setPerformerName] = useState<string>(metadataName || user?.email || "Usuário Web");
   const [loading, setLoading] = useState(true);
-  const [engineActive, setEngineActiveState] = useState(true);
+  // NUNCA assumir ATIVO por ausência de informação. O motor
+  // (`run_automation_tick`) faz INNER JOIN com `automation_engine ... enabled=true`:
+  // sem linha, ou com enabled=false, a fazenda inteira não é avaliada. Assumir
+  // `true` aqui mostrava AUTO ATIVO na tela enquanto nada rodava no banco — foi
+  // o que escondeu o incidente da SOSSEGO por dois meses.
+  const [engineActive, setEngineActiveState] = useState(false);
+  // Partida escalonada, POR FAZENDA. Os defaults abaixo são só o valor inicial
+  // antes do primeiro load; o que vale é sempre o que veio do banco.
+  const [stagger, setStaggerState] = useState<StaggerConfig>({
+    enabled: STAGGER_DEFAULTS.enabled,
+    batchSize: STAGGER_DEFAULTS.batchSize,
+    staggerSeconds: STAGGER_DEFAULTS.staggerSeconds,
+  });
   const [schedules, setSchedules] = useState<CloudSchedule[]>([]);
   const [holidayConfigs, setHolidayConfigs] = useState<Record<string, CloudHolidayConfig>>({});
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
@@ -108,13 +131,13 @@ export function useCloudAutomation(): UseCloudAutomationResult {
     if (!farmId) {
       setSchedules([]);
       setHolidayConfigs({});
-      setEngineActiveState(true);
+      setEngineActiveState(false);   // sem fazenda = não configurado, não ativo
       setLoading(false);
       return;
     }
 
     setLoading(true);
-    const [schRes, holRes, engRes] = await Promise.all([
+    const [schRes, holRes, engRes, farmRes] = await Promise.all([
       supabase
         .from("automation_schedules")
         .select("id, farm_id, equipment_id, active, mode, days, time_on, time_off")
@@ -127,6 +150,11 @@ export function useCloudAutomation(): UseCloudAutomationResult {
         .from("automation_engine")
         .select("enabled")
         .eq("farm_id", farmId)
+        .maybeSingle(),
+      supabase
+        .from("farms")
+        .select("automatic_start_stagger_enabled, automatic_start_stagger_seconds, automatic_start_batch_size")
+        .eq("id", farmId)
         .maybeSingle(),
     ]);
 
@@ -159,7 +187,21 @@ export function useCloudAutomation(): UseCloudAutomationResult {
     }
 
     if (!engRes.error) {
-      setEngineActiveState(engRes.data?.enabled ?? true);
+      // linha ausente → DESATIVADO (não configurado). Só `enabled === true` ativa.
+      setEngineActiveState(engRes.data?.enabled === true);
+      // Valor PERSISTIDO, sem fallback que minta sobre o banco. As colunas têm
+      // default no Postgres, então uma fazenda sem configuração explícita já
+      // chega com 1/60/true.
+      const fr = farmRes.data as {
+        automatic_start_stagger_enabled?: boolean | null;
+        automatic_start_stagger_seconds?: number | null;
+        automatic_start_batch_size?: number | null;
+      } | null;
+      setStaggerState({
+        enabled: fr?.automatic_start_stagger_enabled !== false,
+        batchSize: fr?.automatic_start_batch_size ?? STAGGER_DEFAULTS.batchSize,
+        staggerSeconds: fr?.automatic_start_stagger_seconds ?? STAGGER_DEFAULTS.staggerSeconds,
+      });
     }
 
     setLoading(false);
@@ -192,7 +234,7 @@ export function useCloudAutomation(): UseCloudAutomationResult {
         .eq("farm_id", farmId)
         .maybeSingle();
       if (cancelled || error) return;
-      const remote = data?.enabled ?? true;
+      const remote = data?.enabled === true;   // idem: ausência nunca é ATIVO
       setEngineActiveState((prev) => {
         if (prev !== remote) {
           // Fora do render: refetch completo para sincronizar schedules também.
@@ -293,6 +335,30 @@ export function useCloudAutomation(): UseCloudAutomationResult {
     return notifyResult;
   }, [farmId, performerName]);
 
+
+  /**
+   * Persiste a partida escalonada da fazenda. Valida ANTES de gravar e só
+   * atualiza o estado local depois da confirmação — nada de sucesso fingido.
+   */
+  const setStaggerConfig = useCallback(async (patch: Partial<StaggerConfig>) => {
+    if (!farmId) throw new Error("Fazenda não identificada");
+    const next: StaggerConfig = { ...stagger, ...patch };
+    const erro = validateStaggerConfig(next.batchSize, next.staggerSeconds);
+    if (erro) throw new Error(erro);
+
+    const { error } = await supabase
+      .from("farms")
+      .update({
+        automatic_start_stagger_enabled: next.enabled,
+        automatic_start_batch_size: next.batchSize,
+        automatic_start_stagger_seconds: next.staggerSeconds,
+      })
+      .eq("id", farmId);
+    if (error) throw new Error(error.message);
+
+    setStaggerState(next);
+    return next;
+  }, [farmId, stagger]);
 
   const createSchedule = useCallback(async (input: Omit<CloudSchedule, "id" | "farmId">) => {
     if (!farmId) throw new Error("Fazenda não identificada");
@@ -449,6 +515,8 @@ export function useCloudAutomation(): UseCloudAutomationResult {
   return useMemo(() => ({
     loading,
     engineActive,
+    stagger,
+    setStaggerConfig,
     schedules,
     holidayConfigs,
     setEngineActive,
@@ -458,5 +526,5 @@ export function useCloudAutomation(): UseCloudAutomationResult {
     toggleSchedule,
     upsertHoliday,
     refresh,
-  }), [loading, engineActive, schedules, holidayConfigs, setEngineActive, createSchedule, updateSchedule, deleteSchedule, toggleSchedule, upsertHoliday, refresh]);
+  }), [loading, engineActive, stagger, setStaggerConfig, schedules, holidayConfigs, setEngineActive, createSchedule, updateSchedule, deleteSchedule, toggleSchedule, upsertHoliday, refresh]);
 }
