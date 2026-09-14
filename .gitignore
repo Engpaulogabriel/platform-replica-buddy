@@ -20,3 +20,17 @@ release/
 electron-agent/app/main.cjs
 # Estado local do supabase CLI
 supabase/.temp/
+
+# ── Resgate 2026-09-14: ruído local que nunca deve entrar no repositório ──
+# Pacotes de entrega gerados por sessão (a fonte da verdade é o repositório).
+*.zip
+*.tar.gz
+# Artefatos de SO e de editor
+.DS_Store
+**/.DS_Store
+# Diretório de auditoria local (consultas e recortes de diagnóstico)
+auditoria/
+# Arquivo criado por redirecionamento acidental do shell
+/=
+# Especificação de build do bridge, gerada pelo PyInstaller
+electron-agent/serial_bridge.spec
