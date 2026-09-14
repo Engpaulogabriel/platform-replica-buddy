@@ -127,10 +127,24 @@ describe("privacidade da telemetria técnica", () => {
     expect(screen.getByTestId("technical-comm-age").textContent).toMatch(/\d+min/);
   });
 
-  it("admin vê também as barras de sinal RF", async () => {
+  it("as barras de comunicação existem para TODOS, sem número nem tooltip técnico", async () => {
+    // A versão atual substituiu o elemento `technical-signal-rf` (exclusivo de
+    // admin) pelas barras OPERACIONAIS `comm-bars`, visíveis a todos os
+    // perfis. A privacidade não regrediu, e é isso que se verifica aqui: o
+    // cliente vê só a QUANTIDADE de barras — sem número, sem porcentagem, sem
+    // minutos, sem tooltip. O tempo no `title` continua atrás de `showTimes`.
+    await draw(base());
+    const barras = screen.queryByTestId("comm-bars");
+    expect(barras).not.toBeNull();
+    expect(barras?.getAttribute("title")).toBeNull();      // sem tooltip técnico
+    expect(barras?.textContent ?? "").not.toMatch(/\d/);   // sem número/percentual
+  });
+
+  it("com a chave ligada, admin ganha o tempo no tooltip das barras", async () => {
     membership.admin = true;
     await draw(base());
-    expect(screen.queryByTestId("technical-signal-rf")).not.toBeNull();
+    const barras = screen.queryByTestId("comm-bars");
+    expect(barras?.getAttribute("title") ?? "").toMatch(/Última resposta física/);
   });
 
   // ── QUEM NÃO PODE ────────────────────────────────────────────────────────
@@ -174,7 +188,9 @@ describe("privacidade da telemetria técnica", () => {
     const comum = document.body.innerHTML;
     expect(comum).toContain("POÇO 12 R6");          // identidade operacional intacta
     expect(comum).not.toContain("technical-comm-age");
-    expect(comum).not.toContain("technical-signal-rf");
+    // `technical-signal-rf` deixou de existir: as barras viraram operacionais
+    // (`comm-bars`) e aparecem para todos, sem número nem tooltip.
+    expect(comum).toContain("comm-bars");
 
     // admin: mesmo card, agora COM os técnicos
     membership.admin = true;
@@ -182,11 +198,15 @@ describe("privacidade da telemetria técnica", () => {
     const admin = document.body.innerHTML;
     expect(admin).toContain("POÇO 12 R6");
     expect(admin).toContain("technical-comm-age");
-    expect(admin).toContain("technical-signal-rf");
+    expect(admin).toContain("comm-bars");
 
     // Removendo do DOM só os nós marcados como técnicos, sobra exatamente o
     // card do perfil comum: o gate não mexeu em cor, controle nem rótulo.
     document.querySelectorAll('[data-testid^="technical-"]').forEach((el) => el.remove());
+    // O gate técnico deixou de ser SÓ nó: nas barras operacionais ele é um
+    // ATRIBUTO (`title` com o tempo), presente para admin e ausente para o
+    // perfil comum. Tirar o title junto é o equivalente a "remover o técnico".
+    document.querySelectorAll('[data-testid="comm-bars"]').forEach((el) => el.removeAttribute("title"));
     // os ids do Radix são gerados por render; normaliza para comparar estrutura
     const norm = (h: string) => h.replace(/radix-:[^:]*:/g, "radix-id").replace(/\s+/g, "");
     expect(norm(document.body.innerHTML)).toBe(norm(comum));

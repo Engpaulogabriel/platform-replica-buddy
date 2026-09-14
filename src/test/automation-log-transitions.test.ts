@@ -68,6 +68,15 @@ type Ev = {
   action?: "status_read" | "polling";
 };
 
+/** Data-base dos eventos: ONTEM, em BRT.
+ *  Antes era a data FIXA "2026-08-14". Como `audit_automation_log_integrity`
+ *  conta ruído numa janela de `interval '48 hours'` a partir de now(), a
+ *  fixture expirava sozinha ao passar do segundo dia — os eventos caíam fora
+ *  da janela e a rotina deixava de emitir alerta. A regra está correta; o que
+ *  estava errado era a data congelada no teste. Ontem mantém todos os horários
+ *  no passado e dentro das 48h, qualquer que seja a hora em que a suíte rode. */
+const BASE_DATE = new Date(Date.now() - 24 * 3600_000).toISOString().slice(0, 10);
+
 async function insert(db: PGlite, farm: string, equip: string | null, name: string, e: Ev) {
   await db.query(
     `INSERT INTO public.automation_log (farm_id, equipment_id, equipment_name, action, origin, result,
@@ -77,7 +86,7 @@ async function insert(db: PGlite, farm: string, equip: string | null, name: stri
     [farm, equip, name,
      e.action ?? (e.on ? "turn_on" : "turn_off"), e.origin ?? "local",
      e.result ?? "success", e.actor ?? null, e.user ?? null, e.source ?? null,
-     JSON.stringify(e.details ?? {}), `2026-08-14T${e.at}:00-03:00`],
+     JSON.stringify(e.details ?? {}), `${BASE_DATE}T${e.at}:00-03:00`],
   );
 }
 

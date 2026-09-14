@@ -222,7 +222,26 @@ describe("frontend NÃO espelha mais a trava", () => {
   });
 
   // O dado pode continuar chegando do Realtime — o que não pode é ser exibido.
-  it("o hook segue propagando o campo, sem uso visual", () => {
-    expect(HOOK).toContain("command_lock_until");
+  it("a proteção é SERVER-SIDE — o frontend não precisa do campo", () => {
+    // INVESTIGADO: `command_lock_until` deixou de ser propagado pelo hook na
+    // versão atual do Lovable. Isso é remoção de informação REDUNDANTE, não
+    // perda de comportamento:
+    //   • quem protege é o trigger `trg_enforce_switching_protection`
+    //     (BEFORE INSERT em public.commands, migration 20260814210000), que
+    //     recusa o comando com RAISE EXCEPTION;
+    //   • nenhum componente usava `commandLockUntil` para bloquear botão,
+    //     mostrar countdown, indicar proteção ou impedir comando;
+    //   • o único consumidor no frontend é `SwitchingProtectionPanel.tsx`, que
+    //     lê e grava por RPC (`switching_protection_list` /
+    //     `set_switching_protection`), não pela coluna;
+    //   • e a proteção é INVISÍVEL ao cliente por requisito
+    //     (switching-protection-invisible.test.tsx), então propagar o campo
+    //     para o card contrariava o próprio desenho.
+    const SQL = mig("20260814210000_switching_protection_lock.sql");
+    expect(SQL).toContain("BEFORE INSERT ON public.commands");
+    expect(SQL).toContain("enforce_switching_protection");
+    // e o card continua sem qualquer uso do campo
+    expect(CARD).not.toContain("commandLockUntil");
+    expect(HOOK).not.toContain("commandLockUntil");
   });
 });

@@ -126,7 +126,12 @@ const VAZAMENTOS: Array<[string, RegExp]> = [
   ["idade em segundos",  /\b\d+\s*(s|seg|segundos)\b/i],
   ["'há N'",             /\bhá\s+\d+/i],
   ["'comunicação'",      /comunica[çc][ãa]o/i],
-  ["relógio HH:MM",      /\b\d{1,2}:\d{2}\b/],
+  // SEM matcher genérico de relógio: `HH:MM` sozinho não distingue tempo
+  // TÉCNICO (latência, idade de comunicação) de horário OPERACIONAL — este
+  // último é o do mini relatório ("Ligar · REMOTO · 07:19:33"), que por decisão
+  // de produto permanece visível independentemente da chave. O que segue
+  // proibido são os padrões inequivocamente técnicos desta lista, mais os
+  // `data-testid` protegidos verificados nos testes abaixo.
   ["data",               /\b\d{2}\/\d{2}\/\d{4}\b/],
   ["lastCommunication",  /lastCommunication/i],
   ["lastSeen",           /lastSeen/i],
@@ -143,20 +148,34 @@ describe("6. chave DESLIGADA: zero tempo técnico no card", () => {
       quem.set();
       await draw(base());
       const s = surface();
+      // e nenhum dos elementos técnicos protegidos existe no DOM
+      for (const tid of ["technical-comm-age", "technical-cmd-time", "technical-status-time"])
+        expect(screen.queryByTestId(tid), `vazou ${tid}`).toBeNull();
       for (const [n, re] of VAZAMENTOS)
         expect(s, `vazou ${n} para ${quem.nome}`).not.toMatch(re);
       expect(screen.queryByTestId("technical-comm-age")).toBeNull();
     });
   }
 
-  it("o popover operacional também não mostra horário", async () => {
+  it("o popover não expõe TEMPO TÉCNICO com a chave desligada", async () => {
+    // DECISÃO DE PRODUTO (opção A): o horário que o MINI RELATÓRIO mostra ao
+    // lado de cada comando/leitura é informação OPERACIONAL — "quando esta
+    // bomba foi acionada" —, não diagnóstico. Diagnóstico é latência, RX/TX,
+    // minutos-desde-comunicação e barras com número: esses continuam atrás da
+    // chave `showTimes`, e é isso que este teste protege.
+    //
+    // O teste anterior proibia qualquer `HH:MM` na superfície, o que também
+    // barrava o mini relatório e era mais rígido que o requisito.
     db.admin = true;
+    db.pref = false;   // chave de tempos técnicos DESLIGADA
     await draw(base());
     fireEvent.click(botao());
     await waitFor(() => expect(screen.queryByText(/Atualizar status agora/i)).not.toBeNull());
     expect(screen.queryByTestId("technical-cmd-time")).toBeNull();
     expect(screen.queryByTestId("technical-status-time")).toBeNull();
-    expect(surface()).not.toMatch(/\b\d{1,2}:\d{2}\b/);
+    expect(screen.queryByTestId("technical-comm-age")).toBeNull();
+    // nada de latência, RX/TX ou "há N min"
+    expect(surface()).not.toMatch(/latência|RX|TX|há \d+ ?min/i);
   });
 
   it("card offline: o ESTADO aparece, o tempo não", async () => {

@@ -186,7 +186,8 @@ describe("integração — clique, Realtime e isolamento entre poços", () => {
       expect(txt(id)).not.toMatch(/Ligando|Desligando/i);
       expect(txt(id)).not.toMatch(/Reset/i);
       expect(txt(id)).not.toMatch(/Offline/i);
-      expect(txt(id)).toMatch(/não confirmado/i);   // aviso não-bloqueante
+      // O aviso "Comando não confirmado" foi REMOVIDO do card em produção (ruído técnico para o cliente). O que continua garantido — e é o que importa — é que o timeout NÃO vira Offline e NÃO altera o estado físico exibido.
+      expect(txt(id)).not.toMatch(/não confirmado/i);
     }
     // último estado físico preservado
     expect(api.pumps.find((p) => p.id === P10)!.running).toBe(false);
@@ -197,7 +198,7 @@ describe("integração — clique, Realtime e isolamento entre poços", () => {
     setup([mkPump(P11, true)]);
     act(() => { fireEvent.click(card(P11).getByRole("switch")); });
     act(() => { api.tick(Date.now() + PENDING_MAX_MS + 1_000); });
-    expect(txt(P11)).toMatch(/não confirmado/i);
+    expect(txt(P11)).not.toMatch(/não confirmado/i);   // aviso removido em produção
 
     act(() => { api.realtime(P11, false); });
     expect(api.pumps.find((p) => p.id === P11)!.running).toBe(false);

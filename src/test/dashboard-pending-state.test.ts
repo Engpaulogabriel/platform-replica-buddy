@@ -124,8 +124,10 @@ describe("código-fonte: garantias estruturais", () => {
     expect(HOOK).toMatch(/\.in\("id", unique\)/);
   });
 
-  it("aviso de comando não confirmado é não-bloqueante", () => {
-    expect(CARD).toContain("Comando não confirmado — aguardando nova leitura");
+  it("o aviso de comando não confirmado NÃO existe mais no card", () => {
+    // O aviso "Comando não confirmado" foi REMOVIDO do card em produção (ruído técnico para o cliente). O que continua garantido — e é o que importa — é que o timeout NÃO vira Offline e NÃO altera o estado físico exibido.
+    expect(CARD).not.toContain("Comando não confirmado");
+    expect(CARD).not.toContain("aguardando nova leitura");
     // não entra no cálculo de cor do card
     expect(CARD).not.toMatch(/commandUnconfirmed\s*\?\s*"bg-/);
   });
