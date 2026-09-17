@@ -10,3 +10,7 @@ releases/
 electron-builds/
 electron-agent/app/dist/
 electron-agent/app/main.cjs
+
+# Artefatos que nao pertencem ao repositorio do frontend
+*.zip
+.DS_Store
