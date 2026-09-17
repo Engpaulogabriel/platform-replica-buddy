@@ -1,7 +1,10 @@
 // useEquipmentMaintenance — fonte única de dados de manutenção de
 // equipamentos por fazenda. Polling 30s. Expõe ações para bloquear/liberar.
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+// DUAL-BACKEND: todo acesso deste hook é farm-scoped (equipments/maintenance),
+// então segue o backend do farmId. Leitura degrada sem cair para o antigo;
+// escrita é fail-closed.
+import { tryGetSupabaseForFarm, assertOperationalClient } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { useAuth } from "@/contexts/AuthContext";
 import { enqueueManualPumpCommand } from "@/lib/commandQueue";
@@ -34,8 +37,13 @@ export function useEquipmentMaintenance() {
 
   const reload = useCallback(async () => {
     if (!farmId) return;
+    // Cliente resolvido UMA VEZ para esta carga. Fazenda migrada sem backend
+    // novo disponível não cai para o antigo — melhor lista vazia que dado velho.
+    const routed = tryGetSupabaseForFarm(farmId);
+    if ("reason" in routed) { setRows([]); setLoading(false); return; }
+    const client = routed.client;
     setLoading(true);
-    const { data } = await supabase
+    const { data } = await client
       .from("equipments")
       .select(SELECT_COLS)
       .eq("farm_id", farmId)
@@ -60,9 +68,11 @@ export function useEquipmentMaintenance() {
   const activate = useCallback(
     async (equipmentId: string, reason: string | null, shutdownNow: boolean) => {
       if (!farmId) throw new Error("Fazenda não definida");
+      // Escrita operacional: mesmo backend do comando que pode vir a seguir.
+      const client = assertOperationalClient(farmId);
 
       // 1) Marca manutenção primeiro — qualquer comando ON em paralelo será rejeitado pelo trigger.
-      const { error: upErr } = await supabase
+      const { error: upErr } = await client
         .from("equipments")
         .update({
           maintenance_mode: true,
@@ -93,7 +103,8 @@ export function useEquipmentMaintenance() {
   const release = useCallback(
     async (equipmentId: string) => {
       if (!farmId) throw new Error("Fazenda não definida");
-      const { error } = await supabase
+      const client = assertOperationalClient(farmId);
+      const { error } = await client
         .from("equipments")
         .update({
           maintenance_mode: false,
