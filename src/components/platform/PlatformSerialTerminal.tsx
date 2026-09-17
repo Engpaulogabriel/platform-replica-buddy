@@ -4,6 +4,10 @@
 // (captura passiva). O agente SEMPRE anexa \r ao frame; aqui nunca digitamos CR.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+// DUAL-BACKEND: tudo que é farm-scoped (equipamentos, serial_terminal,
+// serial_sniff) segue o backend da fazenda selecionada. A lista de fazendas
+// é global da plataforma e permanece no singleton.
+import { getSupabaseForFarm, assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -79,7 +83,7 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
 
   const loadEquips = async (id: string) => {
     if (!id) { setEquips([]); return; }
-    const { data, error } = await supabase
+    const { data, error } = await getSupabaseForFarm(id)
       .from("equipments")
       .select("id,name,hw_id,saida,type,last_outputs_state")
       .eq("farm_id", id)
@@ -106,10 +110,20 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
   const sendTerminal = async (payload: Record<string, unknown>, label: string) => {
     if (!farmId) { push("err", "Selecione uma fazenda antes de enviar."); return; }
     setBusy(true);
-    push("tx", label);
+    // Cliente resolvido UMA VEZ e capturado por todo o ciclo (INSERT + polling).
+    // Fail-closed: fazenda migrada sem sessão no backend novo lança aqui e o
+    // comando não é criado em lugar nenhum.
+    let db;
     try {
-      const { data: userRes } = await supabase.auth.getUser();
-      const { data: ins, error: insErr } = await supabase
+      db = assertOperationalClient(farmId);
+    } catch (e) {
+      push("err", (e as Error).message);
+      setBusy(false);
+      return;
+    }
+    try {
+      const { data: userRes } = await db.auth.getUser();
+      const { data: ins, error: insErr } = await db
         .from("agent_commands")
         .insert({
           farm_id: farmId,
@@ -121,21 +135,26 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
         .select("id")
         .single();
       if (insErr || !ins) {
-        push("err", `Falha ao enviar: ${insErr?.message ?? "sem id retornado"}`);
+        // Sem comando criado: nada a acompanhar, e nada de TX.
+        push("err", `Falha ao enfileirar: ${insErr?.message ?? "sem id retornado"}`);
         return;
       }
+      // O que sabemos até aqui é APENAS que o comando entrou na fila.
+      push("info", `CMD enfileirado: ${label}`);
 
       const deadline = Date.now() + MAX_TIMEOUT_MS;
       while (Date.now() < deadline) {
         await sleep(2_000);
-        const { data: row } = await supabase
+        const { data: row } = await db
           .from("agent_commands")
           .select("status,result,error_message")
           .eq("id", ins.id)
           .maybeSingle();
         if (!row) continue;
         if (row.status === "done") {
-          const d = ((row.result as { data?: { responses?: string[]; elapsed_ms?: number; parsed?: { status: string } } } | null)?.data) ?? null;
+          const d = ((row.result as { data?: { sent?: string; responses?: string[]; elapsed_ms?: number; parsed?: { status: string } } } | null)?.data) ?? null;
+          // TX real: só depois do agente confirmar, e com o frame que ELE enviou.
+          if (d?.sent) push("tx", d.sent);
           if (d && d.responses && d.responses.length) {
             d.responses.forEach((r: string) => push("rx", r));
           } else {
@@ -149,7 +168,7 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
           return;
         }
       }
-      push("err", "TIMEOUT - sem resposta em 30s (agente offline ou serial ocupada?)");
+      push("err", `TIMEOUT - comando ${ins.id.slice(0, 8)} sem resposta em 30s`);
     } catch (e) {
       push("err", (e as Error).message);
     } finally {
@@ -183,10 +202,17 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
   const startSniff = async (durationMs: number) => {
     if (!farmId) return;
     setSniffing(true);
-    push("info", `Captura iniciada (${durationMs / 1000}s) - modo passivo`);
+    let db;
     try {
-      const { data: userRes } = await supabase.auth.getUser();
-      const { data: ins, error: insErr } = await supabase
+      db = assertOperationalClient(farmId);
+    } catch (e) {
+      push("err", (e as Error).message);
+      setSniffing(false);
+      return;
+    }
+    try {
+      const { data: userRes } = await db.auth.getUser();
+      const { data: ins, error: insErr } = await db
         .from("agent_commands")
         .insert({
           farm_id: farmId,
@@ -198,14 +224,15 @@ export default function PlatformSerialTerminal({ isAdmin }: { isAdmin: boolean }
         .select("id")
         .single();
       if (insErr || !ins) {
-        push("err", `Falha ao iniciar sniff: ${insErr?.message ?? "sem id"}`);
+        push("err", `Falha ao enfileirar sniff: ${insErr?.message ?? "sem id"}`);
         return;
       }
+      push("info", `Captura enfileirada (${durationMs / 1000}s) - modo passivo`);
       const deadline = Date.now() + durationMs + 15_000;
       const seen = new Set<string>();
       while (Date.now() < deadline) {
         await sleep(2_000);
-        const { data: row } = await supabase
+        const { data: row } = await db
           .from("agent_commands")
           .select("status,result")
           .eq("id", ins.id)
