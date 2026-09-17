@@ -59,7 +59,7 @@ export function useSiteHealth(farmId: string | null) {
     if (!farmId) { setHealth({ ...EMPTY, loading: false }); return; }
     // Cliente resolvido UMA VEZ por execução do effect (keyed em farmId).
     const routed = tryGetSupabaseForFarm(farmId);
-    if (!routed.client) { setHealth({ ...EMPTY, loading: false, lastError: routed.reason }); return; }
+    if ("reason" in routed) { setHealth({ ...EMPTY, loading: false, lastError: routed.reason }); return; }
     const client = routed.client;
     let mounted = true;
 

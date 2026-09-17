@@ -78,7 +78,7 @@ export function useEquipmentMaintenance() {
       // 2) Se solicitado, envia desligamento agora (desired_running=false é permitido).
       if (shutdownNow) {
         try {
-          await enqueueManualPumpCommand({ equipmentId, turnOn: false, userId: user?.id ?? null, userName: userLabel });
+          await enqueueManualPumpCommand({ farmId, equipmentId, turnOn: false, userId: user?.id ?? null, userName: userLabel });
         } catch (err) {
           // Não falha a operação inteira — bloqueio já está ativo.
           console.warn("[manutencao] falha ao enviar desligamento:", err);
