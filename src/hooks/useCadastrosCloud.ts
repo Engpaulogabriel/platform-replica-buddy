@@ -10,6 +10,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+// DUAL-BACKEND: dados da fazenda seguem o backend do farmId. Resolução de
+// fazenda e permissões (profiles/user_roles) continuam no backend ANTIGO,
+// que é onde vive a sessão.
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isFarmMigrated } from "@/lib/migrationRegistry";
 import { useAuth } from "@/contexts/AuthContext";
 import { notifyRegistry } from "@/lib/notify";
 import { enqueue, isOnline } from "@/lib/offlineQueue";
@@ -157,10 +162,12 @@ export function useCadastrosCloud() {
   const reloadDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadAll = useCallback(async (farmId: string) => {
+    // Cliente resolvido UMA VEZ a partir do farmId desta carga.
+    const client = getSupabaseForFarm(farmId);
     const [plcsRes, equipsRes, sectorsRes] = await Promise.all([
-      supabase.from("plc_groups").select("id,farm_id,name,hw_id,output_count").eq("farm_id", farmId).order("name"),
-      supabase.from("equipments").select(EQUIP_COLS).eq("farm_id", farmId).order("name"),
-      supabase.from("sectors").select("id,farm_id,name").eq("farm_id", farmId).order("name"),
+      client.from("plc_groups").select("id,farm_id,name,hw_id,output_count").eq("farm_id", farmId).order("name"),
+      client.from("equipments").select(EQUIP_COLS).eq("farm_id", farmId).order("name"),
+      client.from("sectors").select("id,farm_id,name").eq("farm_id", farmId).order("name"),
 
     ]);
     if (plcsRes.error) throw new Error(`plcs: ${plcsRes.error.message}`);
@@ -390,10 +397,23 @@ export function useCadastrosCloud() {
         if (!cancelled) setState((s) => ({ ...s, loading: false, error: e instanceof Error ? e.message : String(e) }));
       }
     };
+    // Fazenda migrada: backend novo com Realtime publication=0 — sem um
+    // refresh por relógio os cards congelariam após a carga inicial.
+    let migratedPollTimer: ReturnType<typeof setInterval> | null = null;
+    const startMigratedPoll = (fid: string) => {
+      if (!isFarmMigrated(fid) || migratedPollTimer) return;
+      migratedPollTimer = setInterval(() => {
+        if (cancelled) return;
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+        void refresh();
+      }, 15_000);
+    };
+    void (async () => { const fid = farmIdRef.current; if (fid) startMigratedPoll(fid); })();
 
     void boot();
     return () => {
       cancelled = true;
+      if (migratedPollTimer) clearInterval(migratedPollTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (fallbackPoller) clearInterval(fallbackPoller);
       if (channel) { try { void supabase.removeChannel(channel); } catch { /* ignore */ } }
@@ -451,7 +471,7 @@ export function useCadastrosCloud() {
       notifyRegistry.queuedOffline(`PLC "${payload.name}"`);
       return null;
     }
-    const { data, error } = await supabase.from("plc_groups").insert(payload).select("*").single();
+    const { data, error } = await getSupabaseForFarm(farmIdRef.current).from("plc_groups").insert(payload).select("*").single();
     if (error) { notifyRegistry.error("PLC", `falha ao criar — ${error.message}`); return null; }
     notifyRegistry.created("PLC", payload.name);
     return data as CloudPlc;
@@ -475,7 +495,7 @@ export function useCadastrosCloud() {
       notifyRegistry.queuedOffline(`PLC "${label}"`);
       return true;
     }
-    const { error } = await supabase.from("plc_groups").update(next).eq("id", id);
+    const { error } = await getSupabaseForFarm(farmIdRef.current).from("plc_groups").update(next).eq("id", id);
     if (error) { notifyRegistry.error("PLC", error.message); return false; }
     notifyRegistry.updated("PLC", label);
     return true;
@@ -494,7 +514,7 @@ export function useCadastrosCloud() {
       notifyRegistry.queuedOffline(`Exclusão de PLC "${label}"`);
       return true;
     }
-    const { error } = await supabase.from("plc_groups").delete().eq("id", id);
+    const { error } = await getSupabaseForFarm(farmIdRef.current).from("plc_groups").delete().eq("id", id);
     if (error) { notifyRegistry.error("PLC", error.message); return false; }
     notifyRegistry.removed("PLC", label);
     return true;
@@ -530,7 +550,7 @@ export function useCadastrosCloud() {
 
   const syncPlcOutputCount = async (plcGroupId: string, type: EquipTipo, outputCount?: number) => {
     const next = type === "bombeamento" ? (outputCount === 6 ? 6 : 1) : 1;
-    const { error } = await supabase.from("plc_groups").update({ output_count: next }).eq("id", plcGroupId);
+    const { error } = await getSupabaseForFarm(farmIdRef.current).from("plc_groups").update({ output_count: next }).eq("id", plcGroupId);
     if (error) throw new Error(error.message);
   };
 
@@ -583,7 +603,7 @@ export function useCadastrosCloud() {
       return null;
     }
     await syncPlcOutputCount(input.plc_group_id, input.type, input.output_count);
-    const { data, error } = await supabase.from("equipments").insert(payload as never).select("*").single();
+    const { data, error } = await getSupabaseForFarm(farmIdRef.current).from("equipments").insert(payload as never).select("*").single();
     if (error) { notifyRegistry.error("Equipamento", error.message); return null; }
     notifyRegistry.created("Equipamento", payload.name);
     return data as CloudEquipamento;
@@ -644,7 +664,7 @@ export function useCadastrosCloud() {
       return true;
     }
     await syncPlcOutputCount(newPlcId!, input.type ?? current.type, input.output_count);
-    const { error } = await supabase.from("equipments").update(patch as never).eq("id", id);
+    const { error } = await getSupabaseForFarm(farmIdRef.current).from("equipments").update(patch as never).eq("id", id);
     if (error) { notifyRegistry.error("Equipamento", error.message); return false; }
     notifyRegistry.updated("Equipamento", label);
     return true;
@@ -659,7 +679,7 @@ export function useCadastrosCloud() {
       notifyRegistry.queuedOffline(`Exclusão de equipamento "${label}"`);
       return true;
     }
-    const { error } = await supabase.from("equipments").delete().eq("id", id);
+    const { error } = await getSupabaseForFarm(farmIdRef.current).from("equipments").delete().eq("id", id);
     if (error) { notifyRegistry.error("Equipamento", error.message); return false; }
     notifyRegistry.removed("Equipamento", label);
     return true;
@@ -673,7 +693,7 @@ export function useCadastrosCloud() {
     const trimmed = name.trim();
     const payload = { farm_id: farmId, name: trimmed };
     if (!isOnline()) { enqueue({ table: "sectors", op: "insert", payload }); notifyRegistry.queuedOffline(`Setor "${trimmed}"`); return null; }
-    const { data, error } = await supabase.from("sectors").insert(payload).select("*").single();
+    const { data, error } = await getSupabaseForFarm(farmIdRef.current).from("sectors").insert(payload).select("*").single();
     if (error) { notifyRegistry.error("Setor", error.message); return null; }
     notifyRegistry.created("Setor", trimmed);
     return data as CloudSector;
@@ -684,7 +704,7 @@ export function useCadastrosCloud() {
     const trimmed = name.trim();
     const patch = { name: trimmed };
     if (!isOnline()) { enqueue({ table: "sectors", op: "update", payload: patch, matchId: id }); notifyRegistry.queuedOffline(`Setor "${trimmed}"`); return true; }
-    const { error } = await supabase.from("sectors").update(patch).eq("id", id);
+    const { error } = await getSupabaseForFarm(farmIdRef.current).from("sectors").update(patch).eq("id", id);
     if (error) { notifyRegistry.error("Setor", error.message); return false; }
     notifyRegistry.updated("Setor", trimmed);
     return true;
@@ -695,7 +715,7 @@ export function useCadastrosCloud() {
     const current = state.sectors.find((s) => s.id === id);
     const label = current?.name ?? id;
     if (!isOnline()) { enqueue({ table: "sectors", op: "delete", payload: {}, matchId: id }); notifyRegistry.queuedOffline(`Exclusão de setor "${label}"`); return true; }
-    const { error } = await supabase.from("sectors").delete().eq("id", id);
+    const { error } = await getSupabaseForFarm(farmIdRef.current).from("sectors").delete().eq("id", id);
     if (error) { notifyRegistry.error("Setor", error.message); return false; }
     notifyRegistry.removed("Setor", label);
     return true;

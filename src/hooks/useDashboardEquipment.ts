@@ -14,7 +14,8 @@ import { useCadastrosCloud, type CloudEquipamento } from "@/hooks/useCadastrosCl
 import type { Pump } from "@/components/dashboard/PumpTable";
 import type { Reservoir } from "@/components/dashboard/ReservoirGauges";
 import { buildCommandHistory, buildStatusHistory, logEvent, useAutomationLog, type AutomationLogEntry } from "@/lib/automationLog";
-import { supabase } from "@/integrations/supabase/client";
+// DUAL-BACKEND: leitura operacional segue o backend do farmId.
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { notify } from "@/lib/notify";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { enqueueResetPumpCommand } from "@/lib/commandQueue";
@@ -371,7 +372,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
       const monthStart = new Date();
       monthStart.setDate(1);
       monthStart.setHours(0, 0, 0, 0);
-      const { data } = await supabase.rpc("get_horimetro_daily", {
+      const { data } = await getSupabaseForFarm(farmId).rpc("get_horimetro_daily", {
         _farm_id: farmId,
         _from: monthStart.toISOString(),
         _to: new Date().toISOString(),
@@ -395,7 +396,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
     if (!farmId) { setActiveFarmCommTimeout(null); return; }
     let cancelled = false;
     void (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("farms")
         .select("comm_timeout_minutes" as any)
         .eq("id", farmId)
@@ -938,7 +939,7 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
       const today = new Date();
       const first = new Date(today.getFullYear(), today.getMonth(), 1);
       const iso = first.toISOString().slice(0, 10);
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("daily_consumption")
         .select("equipment_id,total_m3")
         .eq("farm_id", farmId)
