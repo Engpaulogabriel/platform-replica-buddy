@@ -5,7 +5,8 @@
 //   • > 180s ou sem registro → offline (badge vermelho)
 
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+// DUAL-BACKEND: site_health segue o backend do farmId.
+import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
 
 // Mantém "unstable" no union por compatibilidade de tipo com consumidores antigos,
 // mas o hook NUNCA retorna esse valor — só "online" ou "offline".
@@ -56,6 +57,10 @@ export function useSiteHealth(farmId: string | null) {
 
   useEffect(() => {
     if (!farmId) { setHealth({ ...EMPTY, loading: false }); return; }
+    // Cliente resolvido UMA VEZ por execução do effect (keyed em farmId).
+    const routed = tryGetSupabaseForFarm(farmId);
+    if (!routed.client) { setHealth({ ...EMPTY, loading: false, lastError: routed.reason }); return; }
+    const client = routed.client;
     let mounted = true;
 
     const apply = (row: any) => {
@@ -79,7 +84,7 @@ export function useSiteHealth(farmId: string | null) {
     };
 
     const fetchOnce = async () => {
-      const { data } = await supabase
+      const { data } = await client
         .from("site_health")
         .select("*")
         .eq("farm_id", farmId)
@@ -94,7 +99,7 @@ export function useSiteHealth(farmId: string | null) {
 
     // Realtime opcional (best-effort — se estiver ativo, atualiza instantâneo)
     const channelName = `site_health:${farmId}:${Math.random().toString(36).slice(2, 8)}`;
-    const channel = supabase.channel(channelName);
+    const channel = client.channel(channelName);
     channel.on(
       "postgres_changes",
       { event: "*", schema: "public", table: "site_health", filter: `farm_id=eq.${farmId}` },
@@ -117,7 +122,7 @@ export function useSiteHealth(farmId: string | null) {
     return () => {
       mounted = false;
       clearInterval(pollId);
-      try { supabase.removeChannel(channel); } catch { /* ignore */ }
+      try { client.removeChannel(channel); } catch { /* ignore */ }
       clearInterval(tick);
     };
   }, [farmId]);

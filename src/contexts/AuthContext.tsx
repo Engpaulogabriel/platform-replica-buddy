@@ -3,6 +3,10 @@ import type { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import { resetAutomationLogSync } from "@/lib/automationLog";
 import { signInViaProxy, claimActiveSession } from "@/lib/loginProxy";
+// DUAL-BACKEND: sessão secundária no projeto novo, para as fazendas migradas.
+// Não substitui nada do fluxo atual (login-proxy, setSession, claim_active_session,
+// brokeredPreviewStorage, watchdog); apenas acrescenta.
+import { signInNewBackend, signOutNewBackend } from "@/lib/supabaseRouter";
 import { startBehavioralGuard, stopBehavioralGuard, trackHit } from "@/lib/apiHitTracker";
 import { startFingerprintGuard, stopFingerprintGuard } from "@/lib/fingerprintGuard";
 import { getStoredSessionId, clearStoredSessionId } from "@/lib/sessionId";
@@ -82,6 +86,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     pendingLogoutReasonRef.current = reason;
     logAuthLogout(reason);
     try { await supabase.auth.signOut(); } catch { /* noop */ }
+    // Ponto único de saída: encerra também a sessão do backend novo, para não
+    // deixar sessão órfã da fazenda migrada. Vale para logout manual e para
+    // todos os watchdogs que chamam esta função.
+    try { await signOutNewBackend(); } catch { /* noop */ }
   }, []);
 
   useEffect(() => {
@@ -357,6 +365,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       takeoverShownRef.current = false;
       await claimActiveSession(res.sessionId);
+      // Credenciais ainda em memória: autentica também no backend novo.
+      // Falha aqui NÃO impede o acesso — só deixa as fazendas migradas
+      // fail-closed. A senha não é armazenada nem registrada em log.
+      try { await signInNewBackend(email, password); } catch { /* noop */ }
       return { ok: true };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : "Falha ao entrar" };

@@ -114,9 +114,22 @@ describe("código-fonte: garantias estruturais", () => {
   });
 
   it("10. hook de pendências não faz polling contínuo", () => {
-    expect(PEND).not.toContain("setInterval");
+    // Invariante: nenhuma fazenda faz polling INCONDICIONAL de pendências —
+    // o caminho normal continua por evento (Realtime).
+    //
+    // Exceção deliberada da migração dual-backend: a fazenda migrada roda no
+    // backend novo, com Realtime publication=0. Lá o canal conecta mas nunca
+    // entrega evento, e sem refresh por relógio o card ficaria preso em
+    // "Ligando…/Desligando…". Por isso existe UM setInterval, guardado por
+    // isFarmMigrated(farmId).
+    // conta CHAMADAS, não a anotação de tipo ReturnType<typeof setInterval>
+    const intervals = PEND.match(/setInterval\(/g) ?? [];
+    expect(intervals.length).toBeLessThanOrEqual(1);
+    if (intervals.length === 1) {
+      expect(PEND).toMatch(/isFarmMigrated\(farmId\)[\s\S]{0,160}setInterval/);
+    }
     expect(PEND).not.toMatch(/timer = setTimeout\(loop/);
-    expect(PEND).toContain('status === "SUBSCRIBED"');   // reconcilia ao reconectar
+    expect(PEND).toContain('status === "SUBSCRIBED"');
   });
 
   it("reconciliação pontual existe e é por equipment_id", () => {

@@ -5,7 +5,9 @@
 // para mostrar quantos comandos estão na fila aguardando envio.
 
 import { useEffect, useState, useCallback } from "react";
-import { supabase } from "@/integrations/supabase/client";
+// DUAL-BACKEND: dados farm-scoped seguem o backend do farmId.
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isFarmMigrated } from "@/lib/migrationRegistry";
 
 export interface CommandQueueStats {
   pending: number;
@@ -19,9 +21,9 @@ export function useCommandQueueStatus(farmId: string | null | undefined): Comman
   const refresh = useCallback(async () => {
     if (!farmId) return;
     const [pendingRes, sentRes, lastRes] = await Promise.all([
-      supabase.from("commands").select("id", { count: "exact", head: true }).eq("farm_id", farmId).eq("status", "pending"),
-      supabase.from("commands").select("id", { count: "exact", head: true }).eq("farm_id", farmId).eq("status", "sent"),
-      supabase.from("commands").select("responded_at").eq("farm_id", farmId).eq("status", "executed").order("responded_at", { ascending: false }).limit(1).maybeSingle(),
+      getSupabaseForFarm(farmId).from("commands").select("id", { count: "exact", head: true }).eq("farm_id", farmId).eq("status", "pending"),
+      getSupabaseForFarm(farmId).from("commands").select("id", { count: "exact", head: true }).eq("farm_id", farmId).eq("status", "sent"),
+      getSupabaseForFarm(farmId).from("commands").select("responded_at").eq("farm_id", farmId).eq("status", "executed").order("responded_at", { ascending: false }).limit(1).maybeSingle(),
     ]);
     setStats({
       pending: pendingRes.count ?? 0,
@@ -34,7 +36,7 @@ export function useCommandQueueStatus(farmId: string | null | undefined): Comman
     if (!farmId) return;
     void refresh();
     const channelName = `queue-stats-${farmId}-${Math.random().toString(36).slice(2, 8)}`;
-    const ch = supabase.channel(channelName);
+    const ch = getSupabaseForFarm(farmId).channel(channelName);
     ch.on(
       "postgres_changes",
       { event: "*", schema: "public", table: "commands", filter: `farm_id=eq.${farmId}` },
@@ -44,7 +46,7 @@ export function useCommandQueueStatus(farmId: string | null | undefined): Comman
     const interval = setInterval(refresh, 60_000); // Realtime é primário; fallback 60s p/ cota Cloud
     return () => {
       clearInterval(interval);
-      try { supabase.removeChannel(ch); } catch { /* ignore */ }
+      try { getSupabaseForFarm(farmId).removeChannel(ch); } catch { /* ignore */ }
     };
   }, [farmId, refresh]);
 

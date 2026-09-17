@@ -27,6 +27,8 @@ import { logEvent } from "@/lib/automationLog";
 import { useAuth } from "@/contexts/AuthContext";
 import { useDefaultFarm } from "@/hooks/useDefaultFarm";
 import { supabase } from "@/integrations/supabase/client";
+// DUAL-BACKEND: leituras/escritas operacionais seguem o backend do farmId.
+import { getSupabaseForFarm, assertOperationalClient } from "@/lib/supabaseRouter";
 import { toast } from "sonner";
 
 // Diagrama hidráulico só carrega quando a aba "Diagrama" é aberta.
@@ -155,7 +157,7 @@ const Dashboard = () => {
   useEffect(() => {
     if (!farmId) { setSedeCoords(null); return; }
     let cancelled = false;
-    void supabase.from("farms").select("name, latitude_sede, longitude_sede" as any).eq("id", farmId).maybeSingle()
+    void getSupabaseForFarm(farmId).from("farms").select("name, latitude_sede, longitude_sede" as any).eq("id", farmId).maybeSingle()
       .then(({ data }) => {
         if (cancelled) return;
         const d = data as any;
@@ -274,7 +276,7 @@ const Dashboard = () => {
     if (!farmId) return;
     let cancelled = false;
     void (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("dashboard_layouts")
         .select("layout")
         .eq("farm_id", farmId)
@@ -308,7 +310,7 @@ const Dashboard = () => {
         },
       )
       .subscribe();
-    return () => { cancelled = true; void supabase.removeChannel(channel); };
+    return () => { cancelled = true; void getSupabaseForFarm(farmId).removeChannel(channel); };
   }, [farmId]);
 
   // Farms / Sectors / PLC groups for visual grouping in dashboard
@@ -567,13 +569,14 @@ const Dashboard = () => {
           if (willTurnOn) {
             const cloudEq = cloudEquipments.find((e) => e.id === id);
             if (cloudEq?.forced_shutdown_enabled === true) {
-              await supabase
+              await assertOperationalClient(farmId)
                 .from("equipments")
                 .update({ forced_shutdown_enabled: false })
                 .eq("id", id);
             }
           }
           const enq = await enqueueManualPumpCommand({
+            farmId: farmId ?? "",
             equipmentId: target.id,
             turnOn: willTurnOn,
             userId: user?.id ?? null,
@@ -585,7 +588,7 @@ const Dashboard = () => {
           // só porque a bomba respondeu o estado antigo (0 ao ligar / 1 ao desligar).
           // O comando só finaliza antes de 120s se a telemetria confirmar o estado esperado
           // ou se o agente retornar erro real.
-          const result = await waitForCommand(enq.commandId, 140_000);
+          const result = await waitForCommand(enq.commandId, 140_000, { farmId });
           const succeeded = result.status === "executed";
           const isCommFail = !succeeded && (result.status === "timeout" || result.status === "unknown");
 
@@ -718,6 +721,7 @@ const Dashboard = () => {
       void (async () => {
         try {
           const enq = await enqueueResetPumpCommand({
+            farmId: farmId ?? "",
             equipmentId: target.id,
             userId: user?.id ?? null,
             userName: userEmail,
@@ -733,7 +737,7 @@ const Dashboard = () => {
 
           // Reset também respeita confirmação física: só finaliza antes de 120s
           // quando a bomba confirmar 0; resposta antiga não corta o estado visual.
-          const result = await waitForCommand(enq.commandId, 140_000);
+          const result = await waitForCommand(enq.commandId, 140_000, { farmId });
           const succeeded = result.status === "executed";
           const isCommFail = !succeeded && (result.status === "timeout" || result.status === "unknown");
 
@@ -822,6 +826,7 @@ const Dashboard = () => {
               : false;
 
           await enqueueManualStatusRead({
+            farmId: farmId ?? "",
             equipmentId: pump.id,
             userId: user?.id ?? null,
             desiredRunning: (() => {
@@ -993,7 +998,7 @@ const Dashboard = () => {
             const res = orderedReservoirs.find(r => r.id === id);
             const name = res?.name ?? "Reservatório";
             notify.tip("Dashboard", `Atualizando nível de ${name}...`);
-            void enqueueManualLevelRead({ equipmentId: id, userId: user?.id ?? null })
+            void enqueueManualLevelRead({ farmId: farmId ?? "", equipmentId: id, userId: user?.id ?? null })
               .catch((e: any) => notify.fail("Dashboard", `${name}: falha ao enfileirar leitura — ${e?.message ?? e}`));
           }} />
         </div>

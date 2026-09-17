@@ -4,7 +4,9 @@
 // Estratégia: sem Realtime, sem polling contínuo, sem kill switch.
 // Faz no máximo 3 SELECTs em commands, agendados por setTimeout: 1s, +2s, +3s.
 
-import { supabase } from "@/integrations/supabase/client";
+// DUAL-BACKEND: o acompanhamento ocorre no MESMO backend em que o comando
+// foi criado. O farmId vem da operação, nunca da seleção visual.
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 export type CommandFinalStatus = "executed" | "timeout" | "error" | "cancelled";
 
@@ -24,6 +26,8 @@ const POLL_INTERVAL_MS = 1_500;
 const INITIAL_DELAY_MS = 800;
 
 interface CommandTrackerOptions {
+  /** Fazenda dona do comando. Decide o backend do acompanhamento. */
+  farmId?: string | null;
   cfgFallback?: {
     farmId: string;
     tsnn: string;
@@ -32,6 +36,8 @@ interface CommandTrackerOptions {
 }
 
 export function waitForCommand(commandId: string, timeoutMs: number = 12_000, _options: CommandTrackerOptions = {}): Promise<CommandResult> {
+  // Resolvido UMA VEZ, antes de qualquer await.
+  const client = getSupabaseForFarm(_options.farmId ?? _options.cfgFallback?.farmId ?? null);
   return new Promise((resolve) => {
     const start = Date.now();
     let resolved = false;
@@ -61,7 +67,7 @@ export function waitForCommand(commandId: string, timeoutMs: number = 12_000, _o
       // Usa RPC SECURITY DEFINER para bypassar RLS: após o Electron (service_role)
       // fazer UPDATE em commands, a policy pode ocultar a linha do usuário
       // autenticado. A função get_command_result garante visibilidade.
-      const { data } = await supabase
+      const { data } = await client
         .rpc("get_command_result", { p_command_id: commandId })
         .maybeSingle();
       return data as { status?: string; response?: string | null; error_message?: string | null } | null;

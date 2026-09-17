@@ -10,7 +10,9 @@
 // Polling curto (3s) enquanto houver algum comando ativo; 10s ocioso.
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { supabase } from "@/integrations/supabase/client";
+// DUAL-BACKEND: dados farm-scoped seguem o backend do farmId.
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isFarmMigrated } from "@/lib/migrationRegistry";
 
 // FIX dashboard preso: 5min → 120s, alinhado ao PENDING_MAX_MS do
 // useDashboardEquipment. Status pending/sent NÃO é confirmação física: é apenas
@@ -36,7 +38,7 @@ export function usePendingManualCommands(farmId: string | null | undefined): Map
       return;
     }
     const since = new Date(Date.now() - PENDING_WINDOW_MS).toISOString();
-    const { data, error } = await supabase
+    const { data, error } = await getSupabaseForFarm(farmId)
       .from("commands")
       .select("id,equipment_id,created_at,status")
       .eq("farm_id", farmId)
@@ -99,7 +101,12 @@ export function usePendingManualCommands(farmId: string | null | undefined): Map
         void refresh();
       }, 200);
     };
-    const channel = supabase
+    // Fazenda migrada: Realtime do backend novo está com publication=0 — o
+    // canal conecta mas não entrega evento. Sem isto a pendência congelaria.
+    const migratedPoll: ReturnType<typeof setInterval> | null = isFarmMigrated(farmId)
+      ? setInterval(() => { void refresh(); }, 10_000)
+      : null;
+    const channel = getSupabaseForFarm(farmId)
       .channel(`pending-manual-cmds-${farmId}-${Date.now().toString(36)}`)
       .on(
         "postgres_changes",
@@ -115,7 +122,8 @@ export function usePendingManualCommands(farmId: string | null | undefined): Map
     return () => {
       cancelled = true;
       if (coalesce) clearTimeout(coalesce);
-      try { void supabase.removeChannel(channel); } catch { /* ignore */ }
+      try { void getSupabaseForFarm(farmId).removeChannel(channel); } catch { /* ignore */ }
+      if (migratedPoll) clearInterval(migratedPoll);
     };
   }, [farmId, refresh]);
 
