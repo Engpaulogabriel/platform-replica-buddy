@@ -8,11 +8,6 @@ import { notify } from "@/lib/notify";
 import { supabase } from "@/integrations/supabase/client";
 import renovLogo from "@/assets/renov-logo.png";
 
-const SUPABASE_URL = "https://feqyexitblmhyzykttgu.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZlcXlleGl0YmxtaHl6eWt0dGd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE5MzU0MDQsImV4cCI6MjA4NzUxMTQwNH0.zy3VEqRg_wicaHH9annVoDxq1YLEsN327Z9ksppSnkc";
-
-// A senha master NÃO fica no cliente — é validada server-side pela Edge Function
-// "verify-master-password" (compara contra o secret MASTER_PASSWORD). Ver handleMasterLogin.
 const MAX_ATTEMPTS = 3;
 const CHALLENGE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -104,35 +99,31 @@ const RestrictedAuth = ({ children, title, description }: RestrictedAuthProps) =
 
   const handleMasterLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (masterLocked || validating) return;
+    if (masterLocked) return;
 
     setValidating(true);
-    setError("");
+    let ok = false;
     try {
-      // Validação SERVER-SIDE: a senha nunca vive no cliente. A Edge Function
-      // compara contra o secret MASTER_PASSWORD (tempo constante).
-      const { data, error: fnError } = await supabase.functions.invoke("verify-master-password", {
-        body: { password: masterPassword.trim() },
+      const { data, error } = await supabase.functions.invoke("verify-master-password", {
+        body: { password: masterPassword },
       });
+      ok = !error && !!(data as any)?.valid;
+    } catch {
+      ok = false;
+    } finally {
+      setValidating(false);
+    }
 
-      // Erro de configuração/servidor (ex.: secret ausente) → não gasta tentativa.
-      if (fnError || (data && data.error && !("valid" in data))) {
-        setError("Não foi possível validar agora (serviço indisponível). Tente novamente.");
-        return;
-      }
-
-      if (data?.valid === true) {
-        setAuthenticated(true);
-        setRestrictedAuthenticated();
-        setAttempts(0);
-        notify.ok("Acesso Restrito", "Acesso autorizado");
-        return;
-      }
-
-      // Senha incorreta — mantém o rate-limiter de 3 tentativas (camada extra).
+    if (ok) {
+      setAuthenticated(true);
+      setRestrictedAuthenticated();
+      setAttempts(0);
+      notify.ok("Acesso Restrito", "Acesso autorizado");
+    } else {
       const newAttempts = attempts + 1;
       setAttempts(newAttempts);
       const remaining = MAX_ATTEMPTS - newAttempts;
+
       if (newAttempts >= MAX_ATTEMPTS) {
         setMasterLocked(true);
         setError("Login Master bloqueado por excesso de tentativas. Use a autenticação online (2FA).");
@@ -140,10 +131,6 @@ const RestrictedAuth = ({ children, title, description }: RestrictedAuthProps) =
       } else {
         setError(`Senha incorreta. ${remaining} tentativa${remaining > 1 ? "s" : ""} restante${remaining > 1 ? "s" : ""}.`);
       }
-    } catch (_) {
-      setError("Falha de conexão ao validar. Verifique a internet e tente novamente.");
-    } finally {
-      setValidating(false);
     }
   };
 
@@ -160,23 +147,11 @@ const RestrictedAuth = ({ children, title, description }: RestrictedAuthProps) =
     setError("");
 
     try {
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/validate-2fa`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-        },
-        body: JSON.stringify({
-          action: "validate",
-          challenge: challenge,
-          response: code,
-        }),
+      const { data, error } = await supabase.functions.invoke("validate-2fa", {
+        body: { action: "validate", challenge, response: code },
       });
 
-      const data = await res.json();
-
-      if (res.ok && data?.valid) {
+      if (!error && (data as any)?.valid) {
         setAuthenticated(true);
         setRestrictedAuthenticated();
         notify.ok("Acesso Restrito", "Acesso autorizado");
@@ -283,12 +258,9 @@ const RestrictedAuth = ({ children, title, description }: RestrictedAuthProps) =
                     </div>
                   </div>
                   {error && <p className="text-xs text-destructive">{error}</p>}
-                  <Button type="submit" className="w-full" disabled={validating}>
-                    {validating ? (
-                      <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Validando…</>
-                    ) : (
-                      <><LogIn className="w-4 h-4 mr-2" /> Acessar</>
-                    )}
+                  <Button type="submit" className="w-full">
+                    <LogIn className="w-4 h-4 mr-2" />
+                    Acessar
                   </Button>
                 </form>
               )}

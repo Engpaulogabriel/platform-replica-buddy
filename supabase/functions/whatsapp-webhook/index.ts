@@ -9,6 +9,15 @@ import { routeWithAi, type RouterContext, type RouterResult } from "./ai-router.
 function currentGroupId(): string | null { return null; }
 function isInGroup(): boolean { return false; }
 
+// ─── SUPER ADMIN GLOBAL (hardcode) ─────────────────────────────────────────
+// Números do dono do sistema: acesso irrestrito a TODAS as fazendas.
+const GLOBAL_SUPER_ADMIN_TAILS = ["99608294", "81503951"];
+
+function isGlobalSuperAdminPhone(phone: string | null | undefined): boolean {
+  const tail = String(phone ?? "").replace(/\D/g, "").slice(-8);
+  return tail.length === 8 && GLOBAL_SUPER_ADMIN_TAILS.includes(tail);
+}
+
 // Dedup de greetings/unknown (in-memory, per worker). Evita respostas duplicadas
 // quando o mesmo operador envia a mesma mensagem em janela curta (<60s).
 const recentGreetingDedup = new Map<string, number>();
@@ -2570,7 +2579,7 @@ async function runFarmWideAutoMode(
   from: string,
   op: any,
 ): Promise<void> {
-  if (!isSuperAdmin(op) && op.farm_id !== farm.id && op.default_farm_id !== farm.id) {
+  if (!isGlobalSuperAdminPhone(phone ?? from) && !isSuperAdmin(op) && op.farm_id !== farm.id && op.default_farm_id !== farm.id) {
     await sendWhatsAppText(from, "🚫 Você não tem acesso a essa fazenda.", op?.farm_id ?? null);
     return;
   }
@@ -2714,7 +2723,7 @@ async function handleAutoMode(
     return;
   }
 
-  if (!isSuperAdmin(op) && op.farm_id !== farm.id && op.default_farm_id !== farm.id) {
+  if (!isGlobalSuperAdminPhone(phone ?? from) && !isSuperAdmin(op) && op.farm_id !== farm.id && op.default_farm_id !== farm.id) {
     await sendWhatsAppText(from, "🚫 Você não tem acesso a essa fazenda.", farmId);
     return;
   }
@@ -2917,91 +2926,6 @@ async function dispatchMaintenanceNotify(args: {
 //  3. Usa template `alerta_equipamento` com mensagem específica.
 //  4. Quem enviou o comando NÃO recebe o broadcast.
 // ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// Setor Técnico — CRIAÇÃO de ordem de manutenção pelo WhatsApp.
-//   "Manutenção Poço 07 Fazenda Semear Nível zerado"
-// Detecta o TIPO por palavra-chave; sem tipo reconhecido → não intercepta (deixa
-// o roteador normal seguir). NÃO colide com "manutenção concluída" (checada antes)
-// nem com "colocar modo manutenção"/"bloquear" (comandos próprios).
-const MAINT_PROBLEM_PATTERNS: Array<{ type: string; label: string; re: RegExp; priority: "alta" | "media" | "baixa" }> = [
-  { type: "nivel_zerado", label: "Nível zerado", re: /(nivel zerado|nivel zero|sem nivel|nivel nao confiavel|zerou o nivel)/, priority: "alta" },
-  { type: "sem_comunicacao", label: "Sem comunicação", re: /(sem comunica|nao comunica|nao responde|sem resposta|offline)/, priority: "alta" },
-  { type: "vazamento", label: "Vazamento", re: /(vazamento|vazando|vaza\b|furo|furou)/, priority: "alta" },
-  { type: "sensor_defeito", label: "Sensor com defeito", re: /(sensor|boia|defeito no sensor|sensor com defeito)/, priority: "media" },
-  { type: "bomba_ruido", label: "Bomba com ruído", re: /(ruido|barulho|rangendo|rangido|vibrando|vibra[cç]ao)/, priority: "media" },
-  { type: "preventiva", label: "Manutenção preventiva", re: /(preventiva|preventivo|revisao|revisar|inspe[cç]ao)/, priority: "baixa" },
-];
-
-function parseMaintenanceOrder(text: string): { type: string; label: string; priority: "alta" | "media" | "baixa"; target: string } | null {
-  if (!text) return null;
-  const s = stripAccents(text.toLowerCase()).replace(/[.!?]+$/g, "").replace(/\s+/g, " ").trim();
-  // Precisa começar com "manutenção/manutencao" e NÃO ser modo/bloqueio/conclusão.
-  if (!/^(manuten[cç]?[aã]o|reparo)\b/.test(s)) return null;
-  if (/\b(modo|colocar|bloquear|bloqueio|concluida|conclu[ií]da|resolvida|finalizada|liberar|pronto|pronta)\b/.test(s)) return null;
-  const hit = MAINT_PROBLEM_PATTERNS.find((p) => p.re.test(s));
-  if (!hit) return null; // sem tipo reconhecido → não intercepta
-  // target = texto sem "manutenção/reparo" e sem as palavras do problema → alimenta o resolver.
-  const target = s
-    .replace(/^(manuten[cç]?[aã]o|reparo)\b/, " ")
-    .replace(hit.re, " ")
-    .replace(/\b(fazenda|com|de|do|da|no|na|o|a|problema|defeito)\b/g, " ")
-    .replace(/\s+/g, " ").trim();
-  return { type: hit.type, label: hit.label, priority: hit.priority, target };
-}
-
-async function handleMaintenanceOrderCreate(
-  from: string,
-  phone: string,
-  op: any,
-  text: string,
-  farmIdHint: string | null,
-): Promise<boolean> {
-  const parsed = parseMaintenanceOrder(text);
-  if (!parsed) return false;
-
-  const role = String(op?.role ?? "").toLowerCase();
-  const allowed = role === "super_admin" || role === "admin" || op?.is_super_admin === true;
-  if (!allowed) {
-    await sendWhatsAppText(from, "🚫 Apenas administradores podem registrar manutenção.", farmIdHint);
-    return true;
-  }
-
-  const { equipment, farm } = await resolveEquipmentFromText(parsed.target || text, farmIdHint || "");
-  if (!farm) {
-    await sendWhatsAppText(from, "❓ Não identifiquei a fazenda. Ex.: 'Manutenção Poço 07 Fazenda Semear Nível zerado'.", farmIdHint);
-    return true;
-  }
-  if (!equipment) {
-    await sendWhatsAppText(from, `❓ Não identifiquei o equipamento em ${farm.name}. Ex.: 'Manutenção poço 07 ${farm.name.toLowerCase()} nível zerado'.`, farm.id);
-    return true;
-  }
-
-  const { error } = await supabase.from("maintenance_orders").insert({
-    farm_id: farm.id,
-    equipment_id: equipment.id,
-    equipment_name: equipment.name,
-    problem_type: parsed.type,
-    description: null,
-    priority: parsed.priority,
-    status: "aberto",
-    created_by: (op as any)?.user_id ?? null,
-    created_by_name: op?.name ?? `WhatsApp ${phone.slice(-4)}`,
-  });
-  if (error) {
-    console.error("[maintenance_order] insert failed", error.message);
-    await sendWhatsAppText(from, "❌ Falha ao registrar a manutenção. Tente novamente.", farm.id);
-    return true;
-  }
-
-  const prioLabel = parsed.priority === "alta" ? "Alta" : parsed.priority === "media" ? "Média" : "Baixa";
-  await sendWhatsAppText(
-    from,
-    `✅ Manutenção registrada: ${equipment.name} (${farm.name}) — ${parsed.label}. Prioridade: ${prioLabel}.\n\nO equipamento segue operando; um alerta ficará visível no dashboard até a conclusão.`,
-    farm.id,
-  );
-  return true;
-}
-
 function isMaintenanceCompletedText(text: string): boolean {
   if (!text) return false;
   const s = stripAccents(text.toLowerCase()).replace(/[.!?]+$/g, "").replace(/\s+/g, " ").trim();
@@ -3258,17 +3182,8 @@ const APPROVER_ROLES = new Set(["super_admin", "manager", "approver"]);
 const MANAGER_ROLES = new Set(["super_admin", "manager"]);
 
 // ─── Super admin bypass: dono do sistema tem TODAS permissões, sempre ──
-// HARDCODE dos super_admins GLOBAIS (últimos 8 dígitos do WhatsApp). Acesso a
-// TODAS as fazendas, SEM depender de env, platform_admins ou whatsapp_operators.role
-// (o cruzamento por env/tabela não pegava em produção). Fonte única e à prova de
-// config externa. 99608294 = Paulo Gabriel; 81503951 = 2º dono.
-const GLOBAL_SUPER_ADMIN_TAILS = ["99608294", "81503951"];
-function isGlobalSuperAdminPhone(phone: string): boolean {
-  const tail = String(phone ?? "").replace(/\D/g, "").slice(-8);
-  return tail.length === 8 && GLOBAL_SUPER_ADMIN_TAILS.includes(tail);
-}
-
 function isSuperAdmin(op: any): boolean {
+  if (isGlobalSuperAdminPhone(op?.phone ?? op?.whatsapp_phone ?? op?.phone_number)) return true;
   if (!op) return false;
   return op.role === "super_admin" || op.is_super_admin === true;
 }
@@ -7766,25 +7681,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
   });
   // Se houver registros duplicados para o mesmo WhatsApp, super_admin vence sempre.
   // Isso evita cair em um registro comum/antigo e bloquear permissões do dono.
-  let matched = operatorMatches.find((o: any) => isSuperAdmin(o)) ?? operatorMatches[0];
-
-  // ═══ SUPER_ADMIN GLOBAL — HARDCODE, ANTES DE QUALQUER 🔒 ════════════════════
-  // Se o remetente está na allowlist fixa (GLOBAL_SUPER_ADMIN_TAILS), ele é
-  // super_admin com acesso a TODAS as fazendas — SEMPRE, sem depender de env,
-  // platform_admins nem whatsapp_operators.role. Se por acaso não tiver linha em
-  // whatsapp_operators, sintetiza uma op mínima de super_admin para não travar.
-  if (isGlobalSuperAdminPhone(phone)) {
-    if (matched) {
-      (matched as any).is_super_admin = true;
-      (matched as any).role = "super_admin";
-    } else {
-      matched = {
-        id: null, phone, name: "Super Admin", role: "super_admin", is_super_admin: true,
-        is_active: true, farm_id: null, default_farm_id: null,
-      } as any;
-    }
-    console.log(`[super-admin] ${incomingTail8} é super_admin GLOBAL (hardcode) — acesso a todas as fazendas`);
-  }
+  const matched = operatorMatches.find((o: any) => isSuperAdmin(o)) ?? operatorMatches[0];
 
   // ── STEP B: unknown/revoked sender → permitir fluxo de cadastro por código ──
   if (!matched) {
@@ -8635,13 +8532,6 @@ async function processMessage(from: string, text: string, location: WaLocation =
       if (await handleMaintenanceCompleted(from, phone, op, text, farmIdM)) return;
     }
 
-    // 0b) NOVA INTENÇÃO: "Manutenção <equip> <fazenda> <tipo>" → cria ORDEM de
-    // manutenção (Setor Técnico). Só intercepta se reconhecer o tipo de problema.
-    if (text && parseMaintenanceOrder(text)) {
-      console.log("[maintenance_order] detected", { phone_tail: phone.slice(-4), text: text.slice(0, 80) });
-      if (await handleMaintenanceOrderCreate(from, phone, op, text, farmIdM)) return;
-    }
-
 
     // 1) Há uma "manutenção pendente" para este telefone? Tratar este texto como motivo/confirmação.
     const { data: pendMRows } = await supabase
@@ -9473,12 +9363,9 @@ async function processMessage(from: string, text: string, location: WaLocation =
   const fmtHb = (d: Date | null) => d
     ? d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" })
     : "—";
-  // Mensagens ao CLIENTE (resposta ao comando/consulta): SEM termos técnicos
-  // ("Bridge", "computador da Bridge"). O cliente só vê que está indisponível e
-  // deve tentar depois — o detalhe técnico vai para os admins pelos alertas.
-  const bridgeOfflineMsg = (_h: BridgeHealth) =>
-    `⚠️ *Status temporariamente indisponível*\n\nO sistema está reconectando com os equipamentos. Tente novamente em alguns minutos.`;
-  const bridgeOfflineCmdMsg = "⚠️ Sistema temporariamente indisponível. Não foi possível executar o comando agora — tente novamente em alguns minutos.";
+  const bridgeOfflineMsg = (h: BridgeHealth) =>
+    `🚨 *Bridge OFFLINE*\n\nSem comunicação com os equipamentos ${h.lastTs ? `desde ${fmtHb(h.lastTs)}` : "há muito tempo"}.\nOs dados de status não estão disponíveis no momento.\n\nVerifique o computador da Bridge e a conexão de internet.`;
+  const bridgeOfflineCmdMsg = "🚨 Bridge OFFLINE. Comando não pode ser executado — sem comunicação com os equipamentos.";
 
   // ===== status_all: lista todos os equipamentos de TODAS as fazendas
   // acessíveis ao operador, com badge AUTO quando há programação ativa. =====
@@ -9532,7 +9419,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
         const fn = stripAccents(String(f.name ?? "").toLowerCase()).replace(/[^a-z0-9 ]+/g, " ");
         return mentionTokens.length > 0 && mentionTokens.every((tok) => fn.includes(tok));
       });
-      if (globalMatch && isSuperAdmin(op)) {
+      if (globalMatch && (isSuperAdmin(op) || isGlobalSuperAdminPhone(phone ?? from))) {
         // super_admin tem acesso a TODAS as fazendas — nunca bloqueia
         explicitFarm = { id: globalMatch.id, name: globalMatch.name, is_demo: globalMatch.is_demo } as any;
       } else {
@@ -9753,7 +9640,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
           const fn = stripAccents(String(f.name ?? "").toLowerCase()).replace(/[^a-z0-9 ]+/g, " ");
           return mentionTokens.length > 0 && mentionTokens.every((tok) => fn.includes(tok));
         });
-        if (globalMatch && isSuperAdmin(op)) {
+        if (globalMatch && (isSuperAdmin(op) || isGlobalSuperAdminPhone(phone ?? from))) {
           // super_admin tem acesso a TODAS as fazendas — nunca bloqueia
           targetFarmId = globalMatch.id;
           targetFarmName = globalMatch.name;

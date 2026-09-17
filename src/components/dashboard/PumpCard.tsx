@@ -11,8 +11,11 @@ import {
   CheckCircle2, MapPin, Layers, Tractor, Zap, ZapOff, MessageCircle, Lock,
   Hand, Info, Wrench,
 } from "lucide-react";
+import { AUTO_IS_FAILURE, AUTO_LABEL, type AutoState } from "@/lib/automaticPumpState";
 
 import { formatLastSeen } from "@/hooks/useDashboardEquipment";
+import { useCanViewTechnicalTelemetry, useShowTechnicalTimes } from "@/hooks/useTechnicalTelemetry";
+import { MINI_ORIGIN_CLASS, commBarsFor } from "@/lib/dashboardMiniHistory";
 import { useOpenMaintenance } from "@/contexts/MaintenanceContext";
 import { problemLabel } from "@/lib/maintenanceTypes";
 import { clearAutomationGuard } from "@/lib/automationGuard";
@@ -38,6 +41,12 @@ export interface PumpCardProps {
    *  useAutomationActiveEquipments — funciona igualmente para poços e
    *  bombas de captação (não depende do flag eventual `pump.mode`). */
   isAutoSchedule?: boolean;
+  /**
+   * Estado do indicador AUTO, JÁ CALCULADO na PumpTable (autoState()). O card
+   * não reimplementa scheduler — apenas apresenta. `undefined` mantém o badge
+   * exatamente como era.
+   */
+  autoState?: AutoState;
   /** True quando o equipamento está em MANUTENÇÃO (bloqueado individualmente). */
   inMaintenance?: boolean;
   /** Tooltip detalhado da manutenção (motivo + início). */
@@ -61,7 +70,7 @@ export interface PumpCardProps {
 function PumpCardImpl(props: PumpCardProps) {
   const {
     pump, expanded, refreshing, refreshResult, lastFailed, flashStatus,
-    isGuarded, isAutoSchedule, inMaintenance, maintenanceTooltip,
+    isGuarded, isAutoSchedule, autoState, inMaintenance, maintenanceTooltip,
     userOnline, maintenanceActive, voltageEnabled, currentEnabled,
     farms, sectors, defaultFarmName, guardFarmId, virtualize,
     onToggle, onReset, onRefresh, onOpenDialog, onToggleExpand,
@@ -94,7 +103,23 @@ function PumpCardImpl(props: PumpCardProps) {
   const inMaint = maintIsBlue || maintIsYellow; // usado só para suprimir o glow
   // Minutos desde a última comunicação real — alimenta o indicador discreto "⏱ Xmin"
   // (instável, sem alarme) e o tooltip de offline. null quando nunca comunicou.
-  const minutesSinceComm = pump.lastCommunication
+  // TEMPO TÉCNICO: oculto por padrão para TODOS, inclusive platform_admin.
+  // Só aparece com a chave "Exibir tempos técnicos nos cards" (Setor Técnico
+  // → Exibição) ligada, e apenas para platform_admin/platform_support.
+  // `showTimes` já combina as duas condições. A regra de Offline, as cores e
+  // o cálculo de comunicação continuam idênticos — some só a renderização.
+  const canViewTechnical = useCanViewTechnicalTelemetry();
+  // ── Barras de comunicação: faixas por idade da última RESPOSTA física ────
+  //   ≤5min → 4 · ≤8min → 3 · ≤11min → 2 · <15min → 1 · ≥15min → 0 (Offline)
+  // Recalcula a cada render; como `lastCommunication` chega por Realtime, as
+  // barras acompanham sozinhas, sem F5 e sem polling novo no frontend.
+  const commBars = commBarsFor(
+    pump.lastCommunication
+      ? Date.now() - new Date(pump.lastCommunication).getTime()
+      : Number.POSITIVE_INFINITY,
+  );
+  const showTimes = useShowTechnicalTimes();
+  const minutesSinceComm = showTimes && pump.lastCommunication
     ? Math.max(0, Math.floor((Date.now() - new Date(pump.lastCommunication).getTime()) / 60_000))
     : null;
 
@@ -109,9 +134,11 @@ function PumpCardImpl(props: PumpCardProps) {
   // ── Botão/badge RESET (forçar desligamento) ───────────────────────────────
   // Regra absoluta: SÓ durante uma transição travada (Ligando/Desligando que já
   // passou do tempo de confirmação). NUNCA em estado estável nem no estado "error".
-  const RESET_STUCK_MS = 60_000;
-  const transitionStuckMs = pump.pendingStartedAt ? (Date.now() - pump.pendingStartedAt) : Infinity;
-  const showReset = isActiveTransition && transitionStuckMs >= RESET_STUCK_MS;
+  // RESET não é mais mecanismo de recuperação: ao expirar a janela sem
+  // confirmação física, a pendência é limpa e o último estado FÍSICO volta.
+  const showReset = false;
+  // Aviso NÃO-BLOQUEANTE de comando não confirmado (não muda a cor do card).
+  const commandUnconfirmed = !!pump.commandUnconfirmedAt && !isTransitioning;
 
   const bg = maintIsBlue
     // AZUL = manutenção bloqueante (técnico/admin, maintenance_mode).
@@ -123,8 +150,6 @@ function PumpCardImpl(props: PumpCardProps) {
       // OFFLINE = CINZA (sem comunicação), independente do último estado. Nunca
       // vermelho — vermelho é DESLIGADO comunicando. Restaurado (v3.25.56 quebrou).
       ? "bg-muted/60 border-muted-foreground/30 opacity-70 grayscale"
-      : isCommFail
-        ? "bg-destructive/25 border-destructive/70"
         : isTransitioning
           ? "bg-warning/20 border-warning/60"
           : pump.running
@@ -137,8 +162,6 @@ function PumpCardImpl(props: PumpCardProps) {
       ? "bg-amber-500"
     : isOffline
       ? "bg-muted-foreground"
-      : isCommFail
-        ? "bg-destructive animate-pulse"
         : isTransitioning
           ? "bg-warning animate-pulse"
           : pump.running
@@ -149,7 +172,7 @@ function PumpCardImpl(props: PumpCardProps) {
   const cardNode = (
     <div
       className={`flex flex-col gap-1 px-2 py-1.5 rounded-md border-2 ${bg} transition-all duration-300 cursor-pointer select-none ${
-        !inMaint && !isOffline && pump.running && !isPending ? "animate-pump-glow" : ""
+        !inMaint && !isOffline && pump.running && !isTransitioning ? "animate-pump-glow" : ""
       }`}
 
       onClick={() => onToggleExpand(pump.id)}
@@ -157,7 +180,7 @@ function PumpCardImpl(props: PumpCardProps) {
     >
       <div className="flex items-center justify-between gap-1">
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${dotColor} ${!isOffline && pump.running && !isPending ? "animate-dot-pulse" : ""}`} />
+          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${dotColor} ${!isOffline && pump.running && !isTransitioning ? "animate-dot-pulse" : ""}`} />
           <Popover>
             <PopoverTrigger asChild>
               <button
@@ -217,15 +240,18 @@ function PumpCardImpl(props: PumpCardProps) {
           {isOffline && (
             <span
               className="text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded bg-destructive/20 text-destructive border border-destructive/50 shrink-0"
-              title={`Sem comunicação${minutesSinceComm != null ? ` há ${minutesSinceComm} min` : ""}. Última: ${formatLastSeen(pump.lastCommunication)}`}
+              title={minutesSinceComm != null
+                ? `Sem comunicação há ${minutesSinceComm} min. Última: ${formatLastSeen(pump.lastCommunication)}`
+                : "Sem comunicação com o equipamento."}
             >
               ⚠️ Offline
             </span>
           )}
-          {isUnstable && minutesSinceComm != null && (
+          {showTimes && minutesSinceComm != null && (
             <span
               className="text-[9px] font-medium tracking-wide px-1 py-0.5 rounded bg-muted/60 text-muted-foreground shrink-0"
-              title={`Último estado conhecido — sem nova comunicação há ${minutesSinceComm} min (ainda dentro do tempo de proteção). Última: ${formatLastSeen(pump.lastCommunication)}`}
+              data-testid="technical-comm-age"
+              title={`Diagnóstico técnico: sem nova comunicação há ${minutesSinceComm} min. Última: ${formatLastSeen(pump.lastCommunication)}`}
             >
               ⏱ {minutesSinceComm}min
             </span>
@@ -293,29 +319,35 @@ function PumpCardImpl(props: PumpCardProps) {
       </div>
       <div className="flex items-center gap-2 h-4">
         <div className="flex items-center gap-2">
-          {pump.signalRF != null && (
+          {/* BARRAS DE COMUNICAÇÃO — recência da ÚLTIMA RESPOSTA FÍSICA.
+              Não é RSSI, não é potência de rádio e não é o horário do último
+              comando ENVIADO: é há quanto tempo o poço respondeu de fato.
+              É independente de Ligado/Desligado — um poço pode estar verde e
+              com 1 barra. O cliente vê só a quantidade de barras: sem número,
+              sem porcentagem, sem minutos e sem tooltip técnico. */}
+          {pump.lastCommunication && (
             <span
+              data-testid="comm-bars"
+              data-bars={commBars}
               className="flex items-center gap-1"
-              title={
-                isOffline
-                  ? `Sem sinal RF — última comunicação ${formatLastSeen(pump.lastCommunication)}`
-                  : isUnstable
-                    ? `Sinal instável — última comunicação ${formatLastSeen(pump.lastCommunication)}`
-                    : `Sinal RF: ${pump.signalRF}% — última comunicação ${formatLastSeen(pump.lastCommunication)}`
-              }
+              // O title só ganha tempo para admin/técnico com a chave ligada.
+              title={showTimes
+                ? `Última resposta física: ${formatLastSeen(pump.lastCommunication)}`
+                : undefined}
             >
+
               <span className="flex gap-[1px] items-end h-3">
-                {[25, 50, 75, 100].map((threshold) => (
+                {[1, 2, 3, 4].map((n) => (
                   <span
-                    key={threshold}
+                    key={n}
+                    data-testid={`comm-bar-${n}`}
+                    data-on={n <= commBars}
                     className={`w-[3px] rounded-[1px] ${
-                      isOffline
-                        ? "bg-border"
-                        : pump.signalRF! >= threshold
-                          ? pump.signalRF! >= 70 ? "bg-primary" : pump.signalRF! >= 40 ? "bg-warning" : "bg-destructive"
-                          : "bg-border"
+                      n <= commBars
+                        ? commBars >= 3 ? "bg-primary" : commBars === 2 ? "bg-warning" : "bg-destructive"
+                        : "bg-border"
                     }`}
-                    style={{ height: `${threshold / 100 * 12}px` }}
+                    style={{ height: `${n * 3}px` }}
                   />
                 ))}
               </span>
@@ -328,6 +360,7 @@ function PumpCardImpl(props: PumpCardProps) {
             <PopoverTrigger asChild>
               <button
                 onClick={(e) => e.stopPropagation()}
+                data-testid="pump-refresh-button"
                 className={`flex items-center shrink-0 transition-colors hover:text-primary ${
                   isOffline
                     ? "text-muted-foreground"
@@ -337,9 +370,10 @@ function PumpCardImpl(props: PumpCardProps) {
                         ? "text-primary"
                         : refreshResult === "fail" || lastFailed
                           ? "text-destructive"
-                          : isUnstable
-                            ? "text-info"
-                            : "text-primary"
+                          // ÚNICA mudança: comunicação instável NÃO pinta o
+                          // ícone de azul — `text-info` é a cor da manutenção
+                          // técnica. Volta à cor operacional normal.
+                          : "text-primary"
                 }`}
                 title={
                   refreshing
@@ -366,45 +400,36 @@ function PumpCardImpl(props: PumpCardProps) {
                 )}
               </button>
             </PopoverTrigger>
-            <PopoverContent side="top" align="end" className="w-[320px] p-0 text-xs overflow-hidden">
+            <PopoverContent side="top" align="end" className="w-[360px] p-0 text-xs overflow-hidden">
               <div className="flex items-center justify-between gap-2 px-3 py-2 bg-secondary/70 border-b border-border">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <Droplets className="w-3.5 h-3.5 text-primary shrink-0" />
                   <span className="text-xs font-bold text-foreground truncate">{pump.name}</span>
                 </div>
-                {isCommFail ? (
-                  <span
-                    className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-destructive/20 text-destructive border border-destructive/40"
-                    title="Falha de comunicação — sem confirmação física em 120s"
-                  >
-                    <XCircle className="w-3 h-3" />
-                    Falha de Comm
-                  </span>
-                ) : showLocal && !isTransitioning ? (
-                  <span
-                    className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-warning/20 text-warning border border-warning/40"
-                    title="Último acionamento via painel local"
-                  >
-                    <Hand className="w-3 h-3" />
-                    Local
-                  </span>
-                ) : (
-                  <span className={`text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                {/* CABEÇALHO = ESTADO FÍSICO ATUAL, e só isso.
+                    Antes, `showLocal` e `isCommFail` ganhavam do estado e o
+                    cabeçalho exibia "LOCAL" ou "Falha de Comm" ao lado do nome
+                    do poço — origem e alerta técnico, não estado. As origens
+                    (Local, Remoto, WhatsApp, Automação, Automático) continuam
+                    nas linhas de histórico abaixo, onde elas significam algo. */}
+                <span
+                  data-testid="header-state"
+                  className={`text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded ${
                     isOffline
-                      ? "bg-destructive/20 text-destructive"
+                      ? "bg-muted text-muted-foreground border border-border"
                       : pump.running
                         ? "bg-primary/20 text-primary"
                         : "bg-destructive/20 text-destructive"
-                  }`}>
-                    {/* Instável → mostra o ÚLTIMO estado conhecido (Ligado/Desligado),
-                        nunca "offline"; o "⏱ Xmin" fica no badge. */}
-                    {isOffline ? "⚠️ Offline" : pump.running ? "Ligado" : "Desligado"}
-                  </span>
-                )}
+                  }`}
+                >
+                  {/* Instável → mostra o ÚLTIMO estado conhecido (Ligado/
+                      Desligado), nunca "offline". */}
+                  {isOffline ? "Offline" : pump.running ? "Ligado" : "Desligado"}
+                </span>
               </div>
 
               <div className="p-3 space-y-2">
-                {pump.lastReading && (
+                {showTimes && pump.lastReading && (
                   <div className="flex items-start gap-1.5 text-muted-foreground bg-muted/40 rounded-md px-2 py-1.5">
                     <Signal className="w-3 h-3 mt-0.5 shrink-0 text-primary" />
                     <div className="flex-1 min-w-0">
@@ -434,29 +459,46 @@ function PumpCardImpl(props: PumpCardProps) {
                     <div className="space-y-1">
                       {pump.commandHistory.slice(0, 3).map((cmd, i) => {
                         const isOn = /ligar/i.test(cmd.action);
-                        const isLocal = /local/i.test(cmd.action);
+                        // A origem vem PRONTA da classificação canônica do
+                        // Relatório (miniOrigin). O card não reinterpreta nem
+                        // reduz origem — WhatsApp e Automático sobrevivem.
+                        const isLocal = cmd.source
+                          ? cmd.source === "local"
+                          : /local/i.test(cmd.action);
                         const failed = !isLocal && cmd.result === "fail";
                         return (
-                          <div key={i} className="flex items-center gap-1.5 px-1.5 py-1 rounded bg-secondary/40">
-                            {isOn ? (
-                              <Zap className={`w-3 h-3 shrink-0 ${failed ? "text-destructive" : "text-primary"}`} />
-                            ) : (
-                              <ZapOff className={`w-3 h-3 shrink-0 ${failed ? "text-destructive" : "text-muted-foreground"}`} />
+                          <div key={i} className="px-1.5 py-1 rounded bg-secondary/40">
+                            {/* Linha 1: ação, origem e horário. */}
+                            <div className="flex items-center gap-1.5">
+                              {isOn ? (
+                                <Zap className={`w-3 h-3 shrink-0 ${failed ? "text-destructive" : "text-primary"}`} />
+                              ) : (
+                                <ZapOff className={`w-3 h-3 shrink-0 ${failed ? "text-destructive" : "text-muted-foreground"}`} />
+                              )}
+                              <span className={`font-semibold ${isOn ? "text-primary" : "text-foreground"}`}>
+                                {isOn ? "Ligar" : "Desligar"}
+                              </span>
+                              <span
+                                data-testid="cmd-origin"
+                                className={`text-[9px] font-bold uppercase tracking-wide px-1 py-px rounded border shrink-0 ${
+                                  (cmd.source && MINI_ORIGIN_CLASS[cmd.source])
+                                  ?? "bg-secondary text-secondary-foreground border-border"
+                                }`}
+                              >
+                                {cmd.label ?? (isLocal ? "LOCAL" : "REMOTO")}
+                              </span>
+                              {failed && (
+                                <span className="text-[9px] font-bold text-destructive uppercase">Falhou</span>
+                              )}
+                              <span data-testid="cmd-time" className="text-[10px] text-muted-foreground ml-auto whitespace-nowrap">{cmd.time}</span>
+                            </div>
+                            {/* Linha 2: nome COMPLETO. Quebra linha em vez de
+                                cortar — regra e pessoa nunca viram "Desligamento 1…". */}
+                            {cmd.actor && (
+                              <p data-testid="cmd-actor" className="text-[10px] text-muted-foreground break-words leading-tight pl-[18px]">
+                                {cmd.actor}
+                              </p>
                             )}
-                            <span className={`font-semibold ${isOn ? "text-primary" : "text-foreground"}`}>
-                              {isOn ? "Ligar" : "Desligar"}
-                            </span>
-                            <span className={`text-[9px] font-bold uppercase tracking-wide px-1 py-px rounded border ${
-                              isLocal
-                                ? "bg-warning/15 text-warning border-warning/30"
-                                : "bg-info/15 text-info border-info/30"
-                            }`}>
-                              {isLocal ? "Local" : "Remoto"}
-                            </span>
-                            {failed && (
-                              <span className="text-[9px] font-bold text-destructive uppercase">Falhou</span>
-                            )}
-                            <span className="text-[10px] text-muted-foreground ml-auto whitespace-nowrap">{cmd.time}</span>
                           </div>
                         );
                       })}
@@ -474,19 +516,27 @@ function PumpCardImpl(props: PumpCardProps) {
                       {pump.statusHistory.slice(0, 3).map((st, i) => {
                         const isLocal = st.source === "local";
                         return (
-                          <div key={i} className="flex items-center gap-1.5 px-1.5 py-1 rounded bg-secondary/40">
-                            <span className={`w-2 h-2 rounded-full shrink-0 ${st.status === "Ligado" ? "bg-primary" : "bg-destructive"}`} />
-                            <span className={`font-semibold ${st.status === "Ligado" ? "text-primary" : "text-destructive"}`}>
-                              {st.status}
-                            </span>
-                            <span className={`text-[9px] font-bold uppercase tracking-wide px-1 py-px rounded border ${
-                              isLocal
-                                ? "bg-warning/15 text-warning border-warning/30"
-                                : "bg-info/15 text-info border-info/30"
-                            }`}>
-                              {isLocal ? "Local" : "Remoto"}
-                            </span>
-                            <span className="text-[10px] text-muted-foreground ml-auto whitespace-nowrap">{st.time}</span>
+                          <div key={i} className="px-1.5 py-1 rounded bg-secondary/40">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`w-2 h-2 rounded-full shrink-0 ${st.status === "Ligado" ? "bg-primary" : "bg-destructive"}`} />
+                              <span className={`font-semibold ${st.status === "Ligado" ? "text-primary" : "text-destructive"}`}>
+                                {st.status}
+                              </span>
+                              <span
+                                data-testid="status-origin"
+                                className={`text-[9px] font-bold uppercase tracking-wide px-1 py-px rounded border shrink-0 ${
+                                  MINI_ORIGIN_CLASS[st.source] ?? "bg-secondary text-secondary-foreground border-border"
+                                }`}
+                              >
+                                {st.label ?? (isLocal ? "LOCAL" : "REMOTO")}
+                              </span>
+                              <span data-testid="status-time" className="text-[10px] text-muted-foreground ml-auto whitespace-nowrap">{st.time}</span>
+                            </div>
+                            {st.actor && (
+                              <p data-testid="status-actor" className="text-[10px] text-muted-foreground break-words leading-tight pl-[14px]">
+                                {st.actor}
+                              </p>
+                            )}
                           </div>
                         );
                       })}
@@ -558,16 +608,39 @@ function PumpCardImpl(props: PumpCardProps) {
                 <MessageCircle className="w-3 h-3 text-[#1ea952]" />
               </span>
             )}
-            {inAutoMode && !isOffline && (
-              <span
-                className="flex items-center gap-0.5 px-1 py-0 rounded bg-info/20 text-info font-bold text-[9px] uppercase tracking-wide border border-info/40 shrink-0"
-                title="Bomba em modo Automático — controlada por programação"
-                aria-label="Modo automático"
-              >
-                <Bot className="w-2.5 h-2.5" />
-                AUTO
-              </span>
-            )}
+            {inAutoMode && !isOffline && (() => {
+              // O indicador AUTO tem estados PRÓPRIOS e NUNCA altera a cor
+              // operacional do card — o estado físico continua sendo o estado
+              // físico. Só `failed` pinta vermelho e pisca; fila e falta de
+              // comunicação, não. Sem a prop, o visual é idêntico ao anterior.
+              const st: AutoState = autoState ?? "idle";
+              const falha = AUTO_IS_FAILURE[st];
+              const rotulo = st === "idle" || st === "off" ? "AUTO" : AUTO_LABEL[st];
+              const dica = falha
+                ? "Falha no automático: a bomba deveria estar ligada, mas o ligamento não foi confirmado."
+                : st === "waiting_start"
+                  ? "Aguardando a vez na partida escalonada — não é falha."
+                  : st === "starting"
+                    ? "Comando de ligar em andamento."
+                    : st === "no_comm"
+                      ? "Sem estado físico confiável — aguardando comunicação."
+                      : "Bomba em modo Automático — controlada por programação";
+              return (
+                <span
+                  className={`flex items-center gap-0.5 px-1 py-0 rounded font-bold text-[9px] uppercase tracking-wide border shrink-0 ${
+                    falha
+                      ? "bg-destructive/20 text-destructive border-destructive/60 animate-pulse"
+                      : "bg-info/20 text-info border-info/40"
+                  }`}
+                  title={dica}
+                  aria-label={falha ? "Falha no modo automático" : "Modo automático"}
+                  data-auto-state={st}
+                >
+                  <Bot className="w-2.5 h-2.5" />
+                  {rotulo}
+                </span>
+              );
+            })()}
 
           </div>
         </div>
@@ -685,6 +758,7 @@ function areEqual(prev: PumpCardProps, next: PumpCardProps): boolean {
     prev.flashStatus !== next.flashStatus ||
     prev.isGuarded !== next.isGuarded ||
     prev.isAutoSchedule !== next.isAutoSchedule ||
+    prev.autoState !== next.autoState ||
     prev.inMaintenance !== next.inMaintenance ||
     prev.maintenanceTooltip !== next.maintenanceTooltip
   ) return false;

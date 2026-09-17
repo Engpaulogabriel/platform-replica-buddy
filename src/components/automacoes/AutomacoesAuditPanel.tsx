@@ -247,8 +247,7 @@ export function AutomacoesAuditPanel({ farmId, equipments, automacaoNameById }: 
         </div>
       </div>
 
-      <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-      <div className="overflow-x-auto -mx-2 px-2">
+      <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead className="bg-muted/50 text-[10px] uppercase tracking-wide text-muted-foreground">
             <tr>

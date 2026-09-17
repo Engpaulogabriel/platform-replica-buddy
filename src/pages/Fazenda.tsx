@@ -4,13 +4,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Building2, Copy, KeyRound, Check, FileText, RotateCw, Loader2, Timer } from "lucide-react";
+import { Building2, Copy, KeyRound, Check, FileText } from "lucide-react";
 import { notify } from "@/lib/notify";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
-import { usePlatformAdmin } from "@/hooks/usePlatformAdmin";
 import { supabase } from "@/integrations/supabase/client";
-import { runAgentCommand } from "@/lib/agentCommands";
-import { confirmAction } from "@/lib/confirmDialog";
 import SedeCoordsCard from "@/components/SedeCoordsCard";
 
 export const FAZENDA_STORAGE_KEY = "fazenda_data";
@@ -104,177 +101,96 @@ function InemaToggleCard({ farmId }: { farmId: string | null }) {
   );
 }
 
-// Timeout de comunicação — SÓ super-admin. Grava farms.comm_timeout_minutes:
-// tempo (min) sem comunicação real antes de um equipamento ser considerado offline.
-// Deve bater com o parâmetro de proteção do PLC (que mantém o último estado com
-// autonomia local durante esse período). Lido pelo frontend, backend e agente.
-function CommTimeoutCard({ farmId }: { farmId: string | null }) {
-  const { isPlatformAdmin, loading } = usePlatformAdmin();
-  const [value, setValue] = useState<string>("15");
-  const [initial, setInitial] = useState<number>(15);
-  const [loadingVal, setLoadingVal] = useState(true);
-  const [saving, setSaving] = useState(false);
+interface FarmProfileForm {
+  name: string;
+  proprietario: string;
+  cnpj: string;
+  endereco: string;
+  zip_code: string;
+  city: string;
+  state: string;
+  phone: string;
+  email: string;
+}
+
+const EMPTY_PROFILE: FarmProfileForm = {
+  name: "", proprietario: "", cnpj: "", endereco: "", zip_code: "",
+  city: "", state: "", phone: "", email: "",
+};
+
+const FazendaContent = () => {
+  const farmId = useDefaultFarmId();
+  const [copied, setCopied] = useState(false);
+  const [profile, setProfile] = useState<FarmProfileForm>(EMPTY_PROFILE);
+  const [loadingProfile, setLoadingProfile] = useState(true);
+  const [savingProfile, setSavingProfile] = useState(false);
 
   useEffect(() => {
     let alive = true;
     if (!farmId) return;
-    setLoadingVal(true);
+    setLoadingProfile(true);
     (async () => {
       const { data, error } = await supabase
         .from("farms")
-        .select("comm_timeout_minutes" as any)
+        .select("name, proprietario, cnpj, endereco, zip_code, city, state, phone, email" as any)
         .eq("id", farmId)
         .maybeSingle();
       if (!alive) return;
-      const v = !error && data ? (data as any).comm_timeout_minutes : null;
-      const n = typeof v === "number" && v > 0 ? v : 15;
-      setValue(String(n));
-      setInitial(n);
-      setLoadingVal(false);
+      if (!error && data) {
+        const d: any = data;
+        setProfile({
+          name: d.name ?? "",
+          proprietario: d.proprietario ?? "",
+          cnpj: d.cnpj ?? "",
+          endereco: d.endereco ?? "",
+          zip_code: d.zip_code ?? "",
+          city: d.city ?? "",
+          state: d.state ?? "",
+          phone: d.phone ?? "",
+          email: d.email ?? "",
+        });
+      }
+      setLoadingProfile(false);
     })();
     return () => { alive = false; };
   }, [farmId]);
 
-  if (loading || !isPlatformAdmin) return null;
+  const setP = <K extends keyof FarmProfileForm>(k: K, v: string) =>
+    setProfile((p) => ({ ...p, [k]: v }));
 
-  const parsed = Math.round(Number(value));
-  const valid = Number.isFinite(parsed) && parsed >= 1 && parsed <= 120;
-  const dirty = valid && parsed !== initial;
-
-  const save = async () => {
-    if (!farmId || saving || !dirty) return;
-    setSaving(true);
-    const { error } = await supabase
-      .from("farms")
-      .update({ comm_timeout_minutes: parsed } as any)
-      .eq("id", farmId);
-    setSaving(false);
+  const saveProfile = async () => {
+    if (!farmId || savingProfile) return;
+    const name = profile.name.trim();
+    if (!name) { notify.fail("Fazenda", "Nome da fazenda é obrigatório."); return; }
+    if (profile.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profile.email.trim())) {
+      notify.fail("Fazenda", "E-mail inválido."); return;
+    }
+    setSavingProfile(true);
+    const payload = {
+      name,
+      proprietario: profile.proprietario.trim() || null,
+      cnpj: profile.cnpj.trim() || null,
+      endereco: profile.endereco.trim() || null,
+      zip_code: profile.zip_code.trim() || null,
+      city: profile.city.trim() || null,
+      state: profile.state.trim().toUpperCase() || null,
+      phone: profile.phone.trim() || null,
+      email: profile.email.trim() || null,
+    };
+    const { error } = await supabase.from("farms").update(payload as any).eq("id", farmId);
+    setSavingProfile(false);
     if (error) {
-      notify.fail("Timeout de comunicação", "Não foi possível salvar o timeout.");
+      notify.fail("Fazenda", "Não foi possível salvar o perfil da fazenda.");
     } else {
-      setInitial(parsed);
-      setValue(String(parsed));
-      notify.ok("Timeout de comunicação", `Equipamentos ficam offline após ${parsed} min sem comunicação.`);
+      notify.ok("Fazenda", "Perfil da fazenda salvo com sucesso!");
+      localStorage.setItem(FAZENDA_STORAGE_KEY, JSON.stringify({
+        nome: name,
+        proprietario: payload.proprietario ?? "",
+        cidadeEstado: [payload.city, payload.state].filter(Boolean).join(" - "),
+        telefone: payload.phone ?? "",
+      }));
+      window.dispatchEvent(new Event("fazenda-updated"));
     }
-  };
-
-  return (
-    <Card className="bg-card border-border">
-      <CardHeader>
-        <CardTitle className="text-base text-foreground flex items-center gap-2">
-          <Timer className="w-4 h-4 text-primary" /> Timeout de comunicação
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex flex-col gap-2">
-          <div className="flex items-end gap-3">
-            <div className="flex-1 max-w-[220px]">
-              <Label htmlFor="comm-timeout" className="text-sm text-foreground">
-                Tempo sem comunicação (minutos)
-              </Label>
-              <Input
-                id="comm-timeout"
-                type="number"
-                min={1}
-                max={120}
-                inputMode="numeric"
-                value={value}
-                disabled={loadingVal || saving}
-                onChange={(e) => setValue(e.target.value)}
-                className="mt-1"
-              />
-            </div>
-            <Button onClick={save} disabled={!dirty || saving || loadingVal} className="shrink-0">
-              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : "Salvar"}
-            </Button>
-          </div>
-          {!valid && (
-            <p className="text-xs text-destructive">Informe um valor entre 1 e 120 minutos.</p>
-          )}
-          <p className="text-xs text-muted-foreground">
-            Tempo sem comunicação antes de considerar o equipamento offline. Deve corresponder
-            ao parâmetro de proteção configurado no PLC. Enquanto a plataforma aguarda este tempo,
-            o PLC mantém o último estado com autonomia local (proteção ativa). Interferências
-            momentâneas de RF (1–2 ciclos) não derrubam mais o equipamento para offline.
-          </p>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-// Reiniciar Agente — SÓ super-admin (platform_admin). Enfileira agent_restart em
-// agent_commands; o agente Electron executa app.relaunch()+app.exit(0) e volta em
-// segundos. Elimina AnyDesk para reiniciar o .exe da fazenda remotamente.
-function AgentRestartCard({ farmId }: { farmId: string | null }) {
-  const { isPlatformAdmin, loading } = usePlatformAdmin();
-  const [busy, setBusy] = useState(false);
-
-  if (loading || !isPlatformAdmin) return null;
-
-  const restart = async () => {
-    if (!farmId || busy) return;
-    const ok = await confirmAction({
-      title: "Reiniciar o Agente desta fazenda?",
-      description:
-        "O Renov Agent (.exe) no PC da fazenda vai reiniciar. A comunicação com as " +
-        "bombas fica indisponível por alguns segundos enquanto o processo sobe de novo.",
-      confirmLabel: "Reiniciar Agente",
-      variant: "destructive",
-    });
-    if (!ok) return;
-    setBusy(true);
-    try {
-      // expira em 5min: se o agente estiver offline agora, executa ao voltar (dentro da janela).
-      const { result } = await runAgentCommand({
-        farmId, kind: "agent_restart", payload: {}, expiresInSec: 300, timeoutMs: 20_000,
-      });
-      if (result.status === "done") {
-        notify.ok("Agente", "Reinício confirmado — o agente está subindo novamente.");
-      } else if (result.status === "expired") {
-        notify.warn("Agente",
-          "Comando enfileirado, mas o agente não respondeu (offline ou travado). " +
-          "Se estiver travado, o watchdog do PC reinicia automaticamente.");
-      } else {
-        notify.fail("Agente", `Falha ao reiniciar: ${result.error_message ?? "erro desconhecido"}`);
-      }
-    } catch (e: any) {
-      notify.fail("Agente", e?.message ?? "Falha ao enviar o comando de reinício.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Card className="bg-card border-border">
-      <CardHeader>
-        <CardTitle className="text-base text-foreground flex items-center gap-2">
-          <RotateCw className="w-4 h-4 text-primary" /> Reiniciar Agente
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-xs text-muted-foreground">
-          Reinicia o Renov Agent instalado no PC da fazenda remotamente, sem AnyDesk.
-          Útil para destravar o agente ou aplicar mudanças de configuração.
-        </p>
-        <Button variant="destructive" onClick={restart} disabled={busy || !farmId}>
-          {busy ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <RotateCw className="w-4 h-4 mr-1.5" />}
-          {busy ? "Enviando…" : "Reiniciar Agente"}
-        </Button>
-      </CardContent>
-    </Card>
-  );
-}
-
-const FazendaContent = () => {
-  const [form, setForm] = useState<FazendaData>(loadFazendaData);
-  const farmId = useDefaultFarmId();
-  const [copied, setCopied] = useState(false);
-
-  const save = () => {
-    localStorage.setItem(FAZENDA_STORAGE_KEY, JSON.stringify(form));
-    window.dispatchEvent(new Event("fazenda-updated"));
-    notify.ok("Fazenda", "Dados da fazenda salvos com sucesso!");
   };
 
   const copyFarmId = async () => {
@@ -288,8 +204,6 @@ const FazendaContent = () => {
   return (
     <div className="space-y-4">
       <SedeCoordsCard />
-      <AgentRestartCard farmId={farmId} />
-      <CommTimeoutCard farmId={farmId} />
       <InemaToggleCard farmId={farmId} />
       <Card className="bg-card border-border">
         <CardHeader>
@@ -300,27 +214,58 @@ const FazendaContent = () => {
         <CardContent className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <Label className="text-foreground">Nome da Fazenda</Label>
-              <Input className="bg-secondary border-border mt-1" value={form.nome} onChange={e => setForm(f => ({ ...f, nome: e.target.value }))} />
+              <Label className="text-foreground">Nome da Fazenda *</Label>
+              <Input className="bg-secondary border-border mt-1" value={profile.name} maxLength={120}
+                onChange={e => setP("name", e.target.value)} disabled={loadingProfile} />
             </div>
             <div>
               <Label className="text-foreground">Proprietário</Label>
-              <Input className="bg-secondary border-border mt-1" value={form.proprietario} onChange={e => setForm(f => ({ ...f, proprietario: e.target.value }))} />
+              <Input className="bg-secondary border-border mt-1" value={profile.proprietario} maxLength={120}
+                onChange={e => setP("proprietario", e.target.value)} disabled={loadingProfile} />
             </div>
             <div>
-              <Label className="text-foreground">Cidade / Estado</Label>
-              <Input className="bg-secondary border-border mt-1" value={form.cidadeEstado} onChange={e => setForm(f => ({ ...f, cidadeEstado: e.target.value }))} />
+              <Label className="text-foreground">CNPJ / CPF</Label>
+              <Input className="bg-secondary border-border mt-1" value={profile.cnpj} maxLength={20}
+                onChange={e => setP("cnpj", e.target.value)} disabled={loadingProfile} />
             </div>
             <div>
               <Label className="text-foreground">Telefone</Label>
-              <Input className="bg-secondary border-border mt-1" value={form.telefone} onChange={e => setForm(f => ({ ...f, telefone: e.target.value }))} />
+              <Input className="bg-secondary border-border mt-1" value={profile.phone} maxLength={20}
+                onChange={e => setP("phone", e.target.value)} disabled={loadingProfile} />
+            </div>
+            <div className="sm:col-span-2">
+              <Label className="text-foreground">Endereço</Label>
+              <Input className="bg-secondary border-border mt-1" value={profile.endereco} maxLength={200}
+                onChange={e => setP("endereco", e.target.value)} disabled={loadingProfile} />
+            </div>
+            <div>
+              <Label className="text-foreground">CEP</Label>
+              <Input className="bg-secondary border-border mt-1" value={profile.zip_code} maxLength={10}
+                onChange={e => setP("zip_code", e.target.value)} disabled={loadingProfile} />
+            </div>
+            <div>
+              <Label className="text-foreground">Cidade</Label>
+              <Input className="bg-secondary border-border mt-1" value={profile.city} maxLength={80}
+                onChange={e => setP("city", e.target.value)} disabled={loadingProfile} />
+            </div>
+            <div>
+              <Label className="text-foreground">Estado (UF)</Label>
+              <Input className="bg-secondary border-border mt-1" value={profile.state} maxLength={2}
+                onChange={e => setP("state", e.target.value.toUpperCase())} disabled={loadingProfile} />
+            </div>
+            <div>
+              <Label className="text-foreground">E-mail</Label>
+              <Input className="bg-secondary border-border mt-1" type="email" value={profile.email} maxLength={160}
+                onChange={e => setP("email", e.target.value)} disabled={loadingProfile} />
             </div>
           </div>
-          <Button className="bg-primary text-primary-foreground" onClick={save}>
-            Salvar Alterações
+          <Button className="bg-primary text-primary-foreground" onClick={saveProfile}
+            disabled={loadingProfile || savingProfile || !farmId}>
+            {savingProfile ? "Salvando..." : "Salvar Alterações"}
           </Button>
         </CardContent>
       </Card>
+
 
       <Card className="bg-card border-border">
         <CardHeader>

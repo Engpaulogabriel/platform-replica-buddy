@@ -2,11 +2,15 @@ import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Bot, ChevronLeft, ChevronRight, Download, Eye, FileText, Hand, MessageCircle, Monitor, Power, Radio, RefreshCw, Server, WifiOff } from "lucide-react";
+import { Bot, ChevronLeft, ChevronRight, Download, Eye, FileText, Hand, MessageCircle, Monitor, Power, Radio, RefreshCw, Server, WifiOff, Workflow } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { useAutomationLog, loadAutomationLogRange, type AutomationLogEntry } from "@/lib/automationLog";
+import { useAutomationLog, loadAutomationLogRange, loadTechnicalReadings, sanitizeOfficialLabel, type AutomationLogEntry, type TechnicalReading } from "@/lib/automationLog";
+import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { exportAutomacaoCSV, exportAutomacaoPDF } from "@/lib/reportExport";
 import { notifyReport } from "@/lib/notify";
+import {
+  resolveReportOrigin, REPORT_ORIGIN_ICON, REPORT_ORIGIN_ICON_CLASS, REPORT_ORIGIN_BADGE,
+} from "@/lib/reportOrigin";
 import { guardExport } from "@/lib/securityClient";
 import { toast } from "sonner";
 
@@ -35,29 +39,28 @@ const SYSTEM_ACTIONS = new Set<string>([
   "Leitura OK",
 ]);
 
-function getOriginIcon(origin: string) {
-  if (origin === "Automático") return <Bot className="w-4 h-4 text-primary" />;
-  if (origin === "Remoto") return <Monitor className="w-4 h-4 text-info" />;
-  if (origin === "Sistema") return <Server className="w-4 h-4 text-muted-foreground" />;
-  if (origin === "WhatsApp") return <MessageCircle className="w-4 h-4 text-[#25D366]" />;
-  return <Hand className="w-4 h-4 text-warning" />;
+/** ORIGEM: quatro casos do produto — Remoto, Local, Automação e Modo
+ *  Automático. A decisão mora em `@/lib/reportOrigin` (puro e testado); aqui
+ *  fica só o mapeamento nome-do-ícone → componente lucide. */
+const ORIGIN_ICON_COMPONENT = {
+  Monitor, Hand, Workflow, Bot, MessageCircle, Server,
+} as const;
+
+function getOriginIcon(origin: string, sourceDevice?: string | null) {
+  const o = resolveReportOrigin(origin, sourceDevice);
+  const Icon = ORIGIN_ICON_COMPONENT[REPORT_ORIGIN_ICON[o] ?? "Hand"] ?? Hand;
+  return <Icon className={`w-4 h-4 ${REPORT_ORIGIN_ICON_CLASS[o] ?? "text-warning"}`} />;
 }
 
-function getOriginLabel(origin: string) {
-  if (origin === "Manual") return "Local";
-  if (origin === "Automático") return "Automação"; // desligamento programado
-  return origin;
+function getOriginLabel(origin: string, sourceDevice?: string | null) {
+  // FASE B: origem sem prova não recebe rótulo inventado — resolveReportOrigin
+  // devolve o valor cru quando não reconhece.
+  return resolveReportOrigin(origin, sourceDevice);
 }
 
-function getOriginBadge(origin: string) {
-  const styles: Record<string, string> = {
-    "Automático": "bg-primary/10 text-primary",
-    "Remoto": "bg-info/10 text-info",
-    "Manual": "bg-warning/15 text-warning border border-warning/30",
-    "Sistema": "bg-muted text-muted-foreground border border-border",
-    "WhatsApp": "bg-[#25D366]/10 text-[#1ea952] border border-[#25D366]/30",
-  };
-  return styles[origin] || "bg-secondary text-muted-foreground";
+function getOriginBadge(origin: string, sourceDevice?: string | null) {
+  return REPORT_ORIGIN_BADGE[resolveReportOrigin(origin, sourceDevice)]
+      ?? "bg-secondary text-muted-foreground";
 }
 
 function getActionStyle(action: string): { cls: string; Icon: typeof Power } {
@@ -82,9 +85,48 @@ function getActionStyle(action: string): { cls: string; Icon: typeof Power } {
 }
 
 function getUserLabel(user?: string | null) {
-  // actor_label vem pronto do banco (trigger). Usa DIRETO; se null/vazio → "Desconhecido"
-  // (nunca "Remoto (usuário não registrado)").
-  return user && user.trim() ? user.trim() : "Desconhecido";
+  // actor_label vem pronto do banco (trigger). Passa pelo sanitizeOfficialLabel
+  // para barrar rótulo técnico/UUID que por acaso tenha escapado. Sem ator,
+  // mostra "—": não inventamos pessoa nem escrevemos "Remoto não identificado".
+  // Quando a autoria histórica é comprovadamente indisponível, a frase
+  // explicativa fica só na auditoria técnica, não no relatório.
+  const limpo = sanitizeOfficialLabel(user);
+  return limpo ? limpo : "—";
+}
+
+/** Célula da coluna Usuário. Só nome humano real, nome de regra ou
+ *  "Acionamento local". FASE B removeu os rótulos provisórios: um evento sem
+ *  autoria provada não chega mais ao relatório oficial — ele fica na fila
+ *  administrativa até o platform_admin decidir. Não há fallback genérico. */
+function UserCell({ item }: { item: AutomationLogEntry }) {
+  const label = getUserLabel(item.user);
+  return <span className="text-foreground" title={item.confirmationMethod ?? undefined}>{label}</span>;
+}
+
+/** Detalhe técnico do evento — só platform_admin/owner. */
+function TechDetail({ item }: { item: AutomationLogEntry }) {
+  const t = item.tech;
+  if (!t) return null;
+  const linhas = [
+    `ID do evento: ${t.id}`,
+    `Data/hora BRT: ${t.occurredAtBrt}`,
+    `origin: ${t.origin || "—"}`,
+    `confirmation_method: ${t.confirmationMethod ?? "—"}`,
+    `origem declarada pelo agente: ${t.agentDeclaredOrigin ?? "—"}`,
+    `autoria (fonte): ${t.authorshipSource ?? "—"}`,
+    `autoria (confiança): ${t.authorshipConfidence ?? "—"}`,
+    `pendência de revisão: ${t.attributionUnavailable ? "aberta" : "não"}`,
+  ];
+  return (
+    <details className="mt-1">
+      <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
+        detalhe técnico
+      </summary>
+      <div className="mt-1 rounded border border-border bg-muted/40 p-2 text-[10px] font-mono leading-relaxed text-muted-foreground">
+        {linhas.map((l) => <div key={l}>{l}</div>)}
+      </div>
+    </details>
+  );
 }
 
 function buildPageList(current: number, total: number): Array<number | "..."> {
@@ -100,6 +142,8 @@ function buildPageList(current: number, total: number): Array<number | "..."> {
 }
 
 export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedPump }: AutomacaoReportTabProps) {
+  const { role } = useFarmAccess();
+  const canSeeTech = role === "platform_admin" || role === "owner";
   const [showReadings, setShowReadings] = useState(false);
   const [logPage, setLogPage] = useState(1);
   const [loadingRange, setLoadingRange] = useState(false);
@@ -154,6 +198,25 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
     return { from: parsedRange.from.getTime(), to: parsedRange.to.getTime() };
   }, [parsedRange]);
 
+  // Telemetria técnica (status_read) — conjunto SEPARADO, carregado só sob demanda.
+  // Nunca é mesclado ao histórico oficial.
+  const [readings, setReadings] = useState<TechnicalReading[]>([]);
+  const [loadingReadings, setLoadingReadings] = useState(false);
+  useEffect(() => {
+    if (!showReadings || !farmId || !parsedRange) { setReadings([]); return; }
+    let cancelled = false;
+    setLoadingReadings(true);
+    loadTechnicalReadings(farmId, parsedRange.from.toISOString(), parsedRange.to.toISOString())
+      .then((rs) => { if (!cancelled) setReadings(rs); })
+      .finally(() => { if (!cancelled) setLoadingReadings(false); });
+    return () => { cancelled = true; };
+  }, [showReadings, farmId, parsedRange]);
+
+  const filteredReadings = useMemo(
+    () => (selectedPump === "all" ? readings : readings.filter((r) => r.pump === selectedPump)),
+    [readings, selectedPump],
+  );
+
   const automationLog = useMemo<AutomationLogEntry[]>(() => {
     if (!farmId) return [];
     return rawAutomationLog
@@ -163,15 +226,18 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
         return t >= rangeBounds.from && t <= rangeBounds.to;
       })
       .filter((e) => {
-        const isSystem = SYSTEM_ACTIONS.has(e.action) || e.origin === "Sistema";
-        if (isSystem) return false;
-        if (!showReadings && e.action === "Leitura OK") return false;
-        return e.origin === "Remoto" || e.origin === "Manual" || e.origin === "WhatsApp"
-          || e.origin === "Automático"; // desligamento programado (origin='auto')
+        // O relatório NÃO depende de filtro visual para estar correto: a query já
+        // devolve só evento operacional canônico (transição confirmada). Aqui
+        // resta apenas descartar linhas legadas de ciclo de vida do agente.
+        if (SYSTEM_ACTIONS.has(e.action)) return false;
+        // Ligada/Desligada de QUALQUER origem é transição confirmada — inclusive
+        // origem "Sistema" (telemetria sem autoria). Escondê-la fazia a transição
+        // desaparecer do histórico enquanto o dashboard mostrava a bomba ligada.
+        return e.action === "Ligada" || e.action === "Desligada";
       });
     // O nome exibido (item.user) vem DIRETO do actor_label do banco (resolveUser já o
     // prioriza) — sem override, sem JOIN com profiles, sem resolver por user_id.
-    // null/vazio → "Desconhecido" (getUserLabel).
+    // null/vazio → travessão (getUserLabel), nunca rótulo genérico.
   }, [rawAutomationLog, farmId, showReadings, rangeBounds]);
 
   const filteredLog = useMemo(
@@ -183,14 +249,27 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
 
   useEffect(() => { setLogPage(1); }, [showReadings, selectedPump, fromDate, toDate]);
 
+  // ── ARRAY CANÔNICO ────────────────────────────────────────────────────────
+  // Tela, CSV e PDF consomem ESTE array. Não existe mais transformação de
+  // rótulo separada por formato: a origem e o usuário são resolvidos uma única
+  // vez, então os três mostram exatamente as mesmas linhas e os mesmos IDs.
+  const canonicalRows = useMemo(
+    () => filteredLog.map(r => ({
+      ...r,
+      origin: getOriginLabel(r.origin, r.sourceDevice) as AutomationLogEntry["origin"],
+      user: getUserLabel(r.user),
+    })),
+    [filteredLog],
+  );
+
   const totalLogPages = useMemo(
     () => Math.max(1, Math.ceil(filteredLog.length / LOG_PAGE_SIZE)),
     [filteredLog.length]
   );
   const currentLogPage = Math.min(logPage, totalLogPages);
   const pagedLog = useMemo(
-    () => filteredLog.slice((currentLogPage - 1) * LOG_PAGE_SIZE, currentLogPage * LOG_PAGE_SIZE),
-    [filteredLog, currentLogPage]
+    () => canonicalRows.slice((currentLogPage - 1) * LOG_PAGE_SIZE, currentLogPage * LOG_PAGE_SIZE),
+    [canonicalRows, currentLogPage]
   );
 
   return (
@@ -207,19 +286,17 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
             </div>
             <div className="flex gap-2 shrink-0">
               <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={async () => {
-                const g = await guardExport("csv", "relatorio-automacao.csv");
-                if (!g.allowed) { toast.error(`Limite de CSVs por dia atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
-                const mapped = filteredLog.map(r => ({ ...r, origin: getOriginLabel(r.origin), user: getUserLabel(r.user) }));
-                exportAutomacaoCSV(mapped);
+                const g = await guardExport("automacao", "csv", canonicalRows.length, farmId);
+                if (!g.allowed) { toast.error(`Limite de CSVs por dia atingido (${g.hits ?? 0}/${g.limit ?? 0}). Fale com o suporte.`); return; }
+                exportAutomacaoCSV(canonicalRows);
                 notifyReport.exported("CSV", "Automação");
               }}>
                 <Download className="w-3.5 h-3.5" /> CSV
               </Button>
               <Button variant="outline" size="sm" className="border-border text-muted-foreground gap-1" onClick={async () => {
-                const g = await guardExport("pdf", "relatorio-automacao.pdf");
-                if (!g.allowed) { toast.error(`Limite de PDFs por hora atingido (${g.used}/${g.limit}). Fale com o suporte.`); return; }
-                const mapped = filteredLog.map(r => ({ ...r, origin: getOriginLabel(r.origin), user: getUserLabel(r.user), result: r.result ?? "success" }));
-                exportAutomacaoPDF(mapped, farmHeader);
+                const g = await guardExport("automacao", "pdf", canonicalRows.length, farmId);
+                if (!g.allowed) { toast.error(`Limite de PDFs por hora atingido (${g.hits ?? 0}/${g.limit ?? 0}). Fale com o suporte.`); return; }
+                exportAutomacaoPDF(canonicalRows, farmHeader);
                 notifyReport.exported("PDF", "Automação");
               }}>
                 <FileText className="w-3.5 h-3.5" /> PDF
@@ -235,7 +312,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                 onChange={(e) => setShowReadings(e.target.checked)}
                 className="accent-primary"
               />
-              Mostrar leituras de status (ruidoso)
+              Mostrar telemetria técnica em seção separada (não entra no histórico)
             </label>
           </div>
         </CardHeader>
@@ -276,11 +353,13 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                         </div>
                         <div>
                           <span className="block text-muted-foreground">Origem</span>
-                          <span className="inline-flex items-center gap-1 font-medium text-foreground">{getOriginIcon(item.origin)}{getOriginLabel(item.origin)}</span>
+                          <span className="inline-flex items-center gap-1 font-medium text-foreground">{getOriginIcon(item.origin, item.sourceDevice)}{getOriginLabel(item.origin, item.sourceDevice)}</span>
                         </div>
                         <div className="col-span-2">
-                          <span className="block text-muted-foreground">Usuário</span>
-                          <span className="font-medium text-foreground">{getUserLabel(item.user)}</span>
+                          <span className="block text-muted-foreground">Nome</span>
+                          {/* só o nome: método de confirmação e detalhe técnico
+                              não aparecem no relatório oficial */}
+                          <UserCell item={item} />
                         </div>
                       </div>
                     </div>
@@ -293,11 +372,10 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                     <TableRow className="border-border hover:bg-secondary/50">
                       <TableHead className="text-muted-foreground">Data</TableHead>
                       <TableHead className="text-muted-foreground">Hora</TableHead>
-                      <TableHead className="text-muted-foreground">Equipamento</TableHead>
+                      <TableHead className="text-muted-foreground">Poço</TableHead>
                       <TableHead className="text-muted-foreground">Ação</TableHead>
                       <TableHead className="text-muted-foreground">Origem</TableHead>
-                      <TableHead className="text-muted-foreground">Usuário</TableHead>
-                      <TableHead className="text-muted-foreground">Resultado</TableHead>
+                      <TableHead className="text-muted-foreground">Nome</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -306,7 +384,7 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                       return (
                         <TableRow key={item.id} className="border-border hover:bg-secondary/50">
                           <TableCell className="text-foreground text-sm">{item.date}</TableCell>
-                          <TableCell className="text-foreground text-sm font-medium">{item.time}</TableCell>
+                          <TableCell className="text-foreground text-sm font-medium tabular-nums">{item.timeSec ?? item.time}</TableCell>
                           <TableCell className="text-foreground font-medium">{item.pump}</TableCell>
                           <TableCell>
                             <span className={`inline-flex items-center gap-1.5 text-sm font-semibold ${actionCls}`}>
@@ -315,25 +393,20 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
                           </TableCell>
                           <TableCell>
                             <div className="flex items-center gap-1.5">
-                              {getOriginIcon(item.origin)}
-                              <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${getOriginBadge(item.origin)}`}>
-                                {getOriginLabel(item.origin)}
+                              {getOriginIcon(item.origin, item.sourceDevice)}
+                              <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${getOriginBadge(item.origin, item.sourceDevice)}`}>
+                                {getOriginLabel(item.origin, item.sourceDevice)}
                               </span>
                             </div>
                           </TableCell>
+                          {/* Coluna Usuário = SÓ autoria humana. O método de confirmação
+                              física ("Telemetria RF") vive no tooltip, nunca aqui. */}
                           <TableCell className="text-muted-foreground text-sm">
-                            {getUserLabel(item.user) === "Sistema" ? (
-                              <span className="text-warning font-medium">Sistema</span>
-                            ) : (
-                              <span className="text-foreground">{getUserLabel(item.user)}</span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {isResultOk(item.result) ? (
-                              <span className="text-[11px] font-medium text-primary">OK</span>
-                            ) : (
-                              <span className="text-[11px] font-medium text-destructive">Falhou</span>
-                            )}
+                            {/* SOMENTE o nome. O método de confirmação
+                                (Telemetria RF) é técnico e vive apenas em
+                                details.confirmation_method, para auditoria —
+                                nunca na tela, no CSV ou no PDF oficiais. */}
+                            <UserCell item={item} />
                           </TableCell>
                         </TableRow>
                       );
@@ -391,6 +464,62 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
           )}
         </CardContent>
       </Card>
+
+      {/* TELEMETRIA TÉCNICA — seção SEPARADA. Nunca se mistura ao histórico
+          oficial: são leituras de estado (polling/eco/reconexão) e comandos que
+          não confirmaram, mantidos apenas para diagnóstico. */}
+      {showReadings && (
+        <Card className="bg-card border-border max-w-full overflow-x-clip">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-muted-foreground flex items-center gap-1.5">
+              <Radio className="w-4 h-4" /> Diagnóstico técnico ({filteredReadings.length})
+            </CardTitle>
+            <p className="text-[11px] text-muted-foreground">
+              Exceções para investigação: timeout de comando, erro de bridge/serial, perda e retorno de
+              comunicação, conflito de estado e tentativas não confirmadas. <strong>Não são eventos
+              operacionais</strong> — não entram no histórico, no CSV nem no PDF. Retenção de 30 dias.
+              Polling, eco e leitura de status não aparecem aqui porque não são gravados em lugar nenhum.
+            </p>
+          </CardHeader>
+          <CardContent className="p-0">
+            {loadingReadings ? (
+              <div className="px-6 py-8 text-center text-sm text-muted-foreground">Carregando telemetria…</div>
+            ) : filteredReadings.length === 0 ? (
+              <div className="px-6 py-8 text-center text-sm text-muted-foreground">
+                Nenhuma leitura técnica no período.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table className="text-xs">
+                  <TableHeader><TableRow>
+                    <TableHead>Data</TableHead><TableHead>Hora</TableHead><TableHead>Equipamento</TableHead>
+                    <TableHead>Ocorrência</TableHead><TableHead>Detalhe</TableHead>
+                  </TableRow></TableHeader>
+                  <TableBody>
+                    {filteredReadings.slice(0, 300).map((r) => (
+                      <TableRow key={r.id} className="opacity-80">
+                        <TableCell className="whitespace-nowrap">{r.date}</TableCell>
+                        <TableCell className="whitespace-nowrap">{r.time}</TableCell>
+                        <TableCell>{r.pump}</TableCell>
+                        <TableCell>{r.kindLabel}</TableCell>
+                        <TableCell className="text-muted-foreground text-[10px] max-w-[280px] truncate"
+                                   title={JSON.stringify(r.details)}>
+                          {String(r.details?.intended_action ?? r.details?.hint ?? "—")}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                {filteredReadings.length > 300 && (
+                  <p className="px-4 py-2 text-[11px] text-muted-foreground">
+                    Mostrando as 300 mais recentes de {filteredReadings.length}.
+                  </p>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

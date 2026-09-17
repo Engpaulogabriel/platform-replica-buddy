@@ -133,9 +133,8 @@ export default function Manutencao() {
               ✅ Nenhum equipamento em manutenção.
             </p>
           ) : (
-            <div className="overflow-x-auto -mx-2 px-2">
-              <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-              <Table className="md:text-xs md:[&_th]:px-2 md:[&_th]:h-9 md:[&_td]:px-2 md:[&_td]:py-1.5">
+            <div className="overflow-x-auto">
+              <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Equipamento</TableHead>
@@ -200,8 +199,7 @@ export default function Manutencao() {
               Nenhum equipamento cadastrado.
             </p>
           ) : (
-            <div className="overflow-x-auto -mx-2 px-2">
-              <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
+            <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>

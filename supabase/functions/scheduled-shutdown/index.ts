@@ -30,6 +30,13 @@ const ALERT_RECIPIENTS = ["5577999608294", "5577981503951"]; // futuro: por regr
 const COMM_STALE_MS = 30 * 60_000;
 const DOW = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
+/** Só o que logExecution usa do cliente — evita `any` sem puxar tipos do SDK. */
+type SupabaseLike = {
+  from: (t: string) => {
+    insert: (rows: unknown[]) => Promise<{ error: { message: string } | null }>;
+  };
+};
+
 type Step = { key: string; offset: number; attempt?: number; forcedAll?: boolean; alert?: 1 | 2; final?: boolean };
 
 function isRunning(los: string | null, saida: number | null): boolean {
@@ -62,6 +69,7 @@ function buildSteps(maxRetries: number, interval: number, alertAfter: boolean): 
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
   const json = (b: unknown, status = 200) =>
     new Response(JSON.stringify(b), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
@@ -126,6 +134,8 @@ Deno.serve(async (req) => {
         const off = Math.max(0, total - onPumps.length);
         await sendConsolidated(supabase, a, farmName, total, off, onPumps);
         alert2Sent = true;
+        // Alimenta o PIPELINE de notificação já existente. Ver logExecution().
+        await logExecution(supabase, a, scope, onPumps, now);
       }
 
       // persiste estado do run
@@ -157,6 +167,99 @@ Deno.serve(async (req) => {
 
   return json({ ok: true, brt: `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`, dow: dowToken, ran });
 });
+
+/**
+ * Registra o resultado do ciclo em `automation_execution_log` — a tabela que o
+ * `whatsapp-automation-notify` observa.
+ *
+ * POR QUE ISTO EXISTE
+ *   O desligamento programado aparecia no relatório (via o trigger
+ *   `trg_attribute_scheduled_shutdown` em `automation_log`) mas era INVISÍVEL
+ *   para o notificador, que lê apenas `automation_execution_log`. Resultado: os
+ *   operadores da fazenda nunca eram avisados. Aqui a lacuna é fechada
+ *   alimentando o pipeline existente — nada de um segundo sistema de WhatsApp.
+ *
+ *   O `sendConsolidated()` acima continua como está: ele vai para
+ *   ALERT_RECIPIENTS (dois números de sistema, fixos no código), público
+ *   diferente dos operadores da fazenda. Não há mensagem duplicada para a mesma
+ *   pessoa.
+ *
+ * CONTRATO — igual ao que run_automation_tick()/run_automacoes_tick() gravam:
+ *   origin='automacao' + details.automation_name faz o notificador usar o
+ *   template "Automação executada" que já existe. `notified_at` fica NULL (o
+ *   default da coluna); quem o preenche é o próprio notificador.
+ *
+ * DEDUPLICAÇÃO — uma linha por bomba por CICLO, não por tentativa.
+ *   Só é chamado no passo `final`, que roda uma única vez: `steps_done` em
+ *   `scheduled_shutdowns` é a trava de idempotência já usada por todo o motor.
+ *   As tentativas a1/a2/a3 não gravam nada. O estado vem da LEITURA física
+ *   (`onPumps` é recalculado no passo final), não do comando enviado.
+ */
+type ScopePump = { id: string; name: string };
+type OnPump = ScopePump & {
+  last_communication?: string | null;
+  last_actuation_origin?: string | null;
+};
+type ShutdownRule = {
+  id: string; farm_id: string; name?: string | null; time_brt?: string | null;
+};
+
+async function logExecution(
+  supabase: SupabaseLike, a: ShutdownRule, scope: ScopePump[],
+  stillOn: OnPump[], now: Date,
+): Promise<void> {
+  if (!scope.length) return;
+  // O motivo da falha sai do registro de `stillOn`: é ele que traz
+  // `last_communication` e `last_actuation_origin`. `fetchScopePumps` seleciona
+  // apenas id/name/saida/last_outputs_state, então ler de lá daria sempre
+  // "offline".
+  const stillOnById = new Map<string, OnPump>(stillOn.map((p) => [p.id, p]));
+  const nowIso = now.toISOString();
+  const staleAt = now.getTime() - COMM_STALE_MS;
+
+  const rows = scope.map((p) => {
+    const aindaLigada = stillOnById.get(p.id);
+    const desligou = !aindaLigada;
+    // Motivo alinhado ao que o notificador sabe traduzir: 'offline' → "offline",
+    // 'local_mode' → "modo local", qualquer outro → "sem resposta".
+    let failureReason: string | null = null;
+    if (aindaLigada) {
+      const semComm = !aindaLigada.last_communication
+        || new Date(aindaLigada.last_communication).getTime() < staleAt;
+      failureReason = semComm
+        ? "offline"
+        : (String(aindaLigada.last_actuation_origin ?? "").toLowerCase() === "local"
+            ? "local_mode" : "no_response");
+    }
+    return {
+      farm_id: a.farm_id,
+      equipment_id: p.id,
+      schedule_id: null,
+      action: "desliga",
+      origin: "automacao",
+      status: desligou ? "success" : "failed",
+      scheduled_time: a.time_brt ?? null,
+      executed_at: nowIso,
+      failure_reason: failureReason,
+      details: {
+        automation_name: (a.name && String(a.name).trim())
+          ? String(a.name).trim() : "Desligamento Programado",
+        equipment_name: p.name,
+        automation_id: a.id,
+        source: "scheduled-shutdown",
+      },
+    };
+  });
+
+  const { error } = await supabase.from("automation_execution_log").insert(rows);
+  if (error) {
+    // Não derruba o ciclo: o desligamento em si já ocorreu e o aviso de sistema
+    // já foi enviado. Mas precisa aparecer no log, senão a falha some.
+    console.error("[scheduled-shutdown] automation_execution_log falhou:", error.message);
+  } else {
+    console.log(`[scheduled-shutdown] execution_log: ${rows.length} linha(s) para "${a.name}"`);
+  }
+}
 
 async function fetchFarmName(supabase: any, farmId: string): Promise<string> {
   const { data } = await supabase.from("farms").select("name").eq("id", farmId).maybeSingle();

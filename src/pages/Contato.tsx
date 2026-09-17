@@ -68,7 +68,7 @@ const Contato = () => {
             Canais de Atendimento
           </CardTitle>
         </CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-2">
+        <CardContent className="space-y-3">
           {contactItems.map((item) => (
             <a
               key={item.label}
@@ -87,11 +87,11 @@ const Contato = () => {
                   className={`w-5 h-5 ${item.iconClass ?? "text-primary"}`}
                 />
               </div>
-              <div className="min-w-0">
+              <div>
                 <p className="text-xs text-muted-foreground font-medium">
                   {item.label}
                 </p>
-                <p className="text-sm font-semibold text-foreground break-words">
+                <p className="text-sm font-semibold text-foreground">
                   {item.value}
                 </p>
               </div>

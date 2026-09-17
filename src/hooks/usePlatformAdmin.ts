@@ -13,13 +13,14 @@ export function usePlatformAdmin(): { isPlatformAdmin: boolean; loading: boolean
     let cancelled = false;
     setLoading(true);
     void supabase
-      .from("platform_admins")
-      .select("user_id")
-      .eq("user_id", user.id)
+      .from("profiles" as any)
+      .select("is_super_admin")
+      .eq("id", user.id)
       .maybeSingle()
-      .then(({ data }) => {
+      .then(({ data, error }) => {
         if (cancelled) return;
-        setIsPlatformAdmin(!!data);
+        const profile = data as { is_super_admin?: boolean } | null;
+        setIsPlatformAdmin(!error && profile?.is_super_admin === true);
         setLoading(false);
       });
     return () => { cancelled = true; };

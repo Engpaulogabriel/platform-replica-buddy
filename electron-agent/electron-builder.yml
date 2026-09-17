@@ -12,6 +12,8 @@ files:
   # v3.9.1: empacotar o fonte CommonJS diretamente. O build v3.9.0 com
   # bytenode/ofuscação quebrava antes de inicializar o Electron em alguns PCs.
   - "main.cjs"
+  # Segredo de build (gerado pelo build-agent.bat, nunca versionado)
+  - "build-secrets.json"
   # NÃO incluir serial_bridge_persistent.py aqui — Python não consegue executar
   # arquivos dentro de app.asar. Ele vai como extraResources (solto em resources/).
   - "setup.html"
@@ -20,8 +22,6 @@ files:
   - "log-preload.cjs"
   - "config.html"
   - "config-preload.cjs"
-  - "auth.html"
-  - "auth-preload.cjs"
   - "icon.png"
   - "icon.ico"
   - "package.json"

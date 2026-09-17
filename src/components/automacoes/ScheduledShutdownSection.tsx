@@ -1,45 +1,47 @@
-import { useEffect, useMemo, useState } from "react";
-import { Power, Plus, Lock, Clock, AlertTriangle } from "lucide-react";
-import { Button } from "@/components/ui/button";
+// ScheduledShutdownSection — automações programadas (tabela scheduled_automations).
+// Lista as regras da fazenda com Nome/Horário/Dias/Equipamentos/Status e permite
+// ativar/desativar quando o usuário tem permissão de edição.
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Clock, Power, CalendarDays } from "lucide-react";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import {
-  useScheduledAutomations,
-  type ScheduledAutomation,
-  type ScheduledAutomationInput,
-  type ShutdownAction,
-  type WeekdayCode,
-} from "@/hooks/useScheduledAutomations";
+import { Button } from "@/components/ui/button";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
-interface EquipmentLite { id: string; name: string; }
+interface EquipmentLite {
+  id: string;
+  name: string;
+}
+
+interface ScheduledAutomation {
+  id: string;
+  name: string;
+  action: string;
+  time_brt: string;
+  days_of_week: string[];
+  target_equipment_ids: string[];
+  excluded_equipment_ids: string[];
+  is_active: boolean;
+  last_run_at: string | null;
+}
+
+const DAY_LABELS: Record<string, string> = {
+  mon: "Seg", tue: "Ter", wed: "Qua", thu: "Qui", fri: "Sex", sat: "Sáb", sun: "Dom",
+  seg: "Seg", ter: "Ter", qua: "Qua", qui: "Qui", sex: "Sex", sab: "Sáb", dom: "Dom",
+  "1": "Seg", "2": "Ter", "3": "Qua", "4": "Qui", "5": "Sex", "6": "Sáb", "0": "Dom",
+};
+
+const dayLabel = (d: string) => DAY_LABELS[String(d).toLowerCase()] ?? d;
 
 interface Props {
-  farmId: string | null;
+  farmId: string | null | undefined;
   equipments: EquipmentLite[];
   canEdit: boolean;
 }
 
-const DAYS: { code: WeekdayCode; label: string }[] = [
-  { code: "mon", label: "Seg" },
-  { code: "tue", label: "Ter" },
-  { code: "wed", label: "Qua" },
-  { code: "thu", label: "Qui" },
-  { code: "fri", label: "Sex" },
-  { code: "sat", label: "Sáb" },
-  { code: "sun", label: "Dom" },
-];
-const dayLabel = (c: WeekdayCode) => DAYS.find((d) => d.code === c)?.label ?? c;
-
 export function ScheduledShutdownSection({ farmId, equipments, canEdit }: Props) {
-  const { items, loading, create, update, toggleActive, remove } = useScheduledAutomations(farmId);
-  const [openForm, setOpenForm] = useState(false);
-  const [editing, setEditing] = useState<ScheduledAutomation | null>(null);
+  const [rows, setRows] = useState<ScheduledAutomation[]>([]);
+  const [loading, setLoading] = useState(false);
 
   const nameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -47,314 +49,112 @@ export function ScheduledShutdownSection({ farmId, equipments, canEdit }: Props)
     return m;
   }, [equipments]);
 
-  const openNew = () => { setEditing(null); setOpenForm(true); };
-  const openEdit = (a: ScheduledAutomation) => { setEditing(a); setOpenForm(true); };
+  const reload = useCallback(async () => {
+    if (!farmId) {
+      setRows([]);
+      return;
+    }
+    setLoading(true);
+    const { data } = await supabase
+      .from("scheduled_automations")
+      .select("id,name,action,time_brt,days_of_week,target_equipment_ids,excluded_equipment_ids,is_active,last_run_at")
+      .eq("farm_id", farmId)
+      .order("time_brt");
+    setRows(((data ?? []) as unknown) as ScheduledAutomation[]);
+    setLoading(false);
+  }, [farmId]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const toggle = async (row: ScheduledAutomation) => {
+    if (!canEdit) return;
+    const { error } = await supabase
+      .from("scheduled_automations")
+      .update({ is_active: !row.is_active })
+      .eq("id", row.id);
+    if (error) {
+      toast.error("Não foi possível alterar a automação");
+      return;
+    }
+    toast.success(row.is_active ? "Automação desativada" : "Automação ativada");
+    void reload();
+  };
+
+  if (!loading && rows.length === 0) return null;
 
   return (
     <section className="space-y-3">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-2">
-          <Power className="w-4 h-4" /> Desligamento Programado
-        </h2>
-        {canEdit ? (
-          <Button size="sm" variant="outline" onClick={openNew}>
-            <Plus className="w-4 h-4 mr-1" /> Nova regra
-          </Button>
-        ) : (
-          <span className="text-xs text-muted-foreground inline-flex items-center gap-1.5">
-            <Lock className="w-3.5 h-3.5" /> Somente leitura
-          </span>
-        )}
+      <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+        Automações Programadas ({rows.length})
+      </h2>
+      <div className="grid gap-3 md:grid-cols-2">
+        {rows.map((row) => {
+          const targets = row.target_equipment_ids?.length
+            ? row.target_equipment_ids.map((id) => nameById.get(id) ?? id)
+            : ["Todos os equipamentos"];
+          const excluded = (row.excluded_equipment_ids ?? []).map((id) => nameById.get(id) ?? id);
+          return (
+            <Card key={row.id} className="p-4 space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold truncate">{row.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {row.action === "turn_off" || row.action === "off" ? "Desligar" : row.action}
+                  </p>
+                </div>
+                <span
+                  className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                    row.is_active
+                      ? "border-primary/40 text-primary"
+                      : "border-muted-foreground/30 text-muted-foreground"
+                  }`}
+                >
+                  {row.is_active ? "Ativa" : "Inativa"}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1">
+                  <Clock className="w-3.5 h-3.5" /> {row.time_brt?.slice(0, 5)} (BRT)
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <CalendarDays className="w-3.5 h-3.5" />
+                  {(row.days_of_week ?? []).map(dayLabel).join(", ") || "Todos os dias"}
+                </span>
+              </div>
+
+              <div className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Equipamentos: </span>
+                {targets.join(", ")}
+                {excluded.length > 0 && (
+                  <>
+                    <br />
+                    <span className="font-medium text-foreground">Excluídos: </span>
+                    {excluded.join(", ")}
+                  </>
+                )}
+              </div>
+
+              {row.last_run_at && (
+                <p className="text-[11px] text-muted-foreground">
+                  Última execução: {new Date(row.last_run_at).toLocaleString("pt-BR")}
+                </p>
+              )}
+
+              {canEdit && (
+                <Button variant="outline" size="sm" onClick={() => void toggle(row)}>
+                  <Power className="w-3.5 h-3.5 mr-1.5" />
+                  {row.is_active ? "Desativar" : "Ativar"}
+                </Button>
+              )}
+            </Card>
+          );
+        })}
       </div>
-
-      <p className="text-xs text-muted-foreground max-w-2xl">
-        Desliga as bombas em um horário fixo, independente do modo (Auto/Manual). Tenta várias
-        vezes; bombas ligadas via painel local são desligadas de forma forçada. Se alguma resistir,
-        envia alerta consolidado no WhatsApp.
-      </p>
-
-      {loading ? (
-        <p className="text-sm text-muted-foreground">Carregando…</p>
-      ) : items.length === 0 ? (
-        <Card className="p-6 text-center text-sm text-muted-foreground">
-          Nenhuma regra de desligamento programado. Clique em "Nova regra" para criar.
-        </Card>
-      ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {items.map((a) => (
-            <RuleCard
-              key={a.id}
-              rule={a}
-              nameById={nameById}
-              canEdit={canEdit}
-              onToggle={(v) => toggleActive(a.id, v)}
-              onEdit={() => openEdit(a)}
-              onDelete={() => { if (confirm(`Excluir "${a.name}"?`)) void remove(a.id); }}
-            />
-          ))}
-        </div>
-      )}
-
-      <RuleFormDialog
-        open={openForm}
-        onOpenChange={setOpenForm}
-        equipments={equipments}
-        editing={editing}
-        onSubmit={async (input) => {
-          const ok = editing ? await update(editing.id, input) : await create(input);
-          if (ok) setOpenForm(false);
-          return ok;
-        }}
-      />
     </section>
   );
 }
 
-function RuleCard({
-  rule, nameById, canEdit, onToggle, onEdit, onDelete,
-}: {
-  rule: ScheduledAutomation;
-  nameById: Map<string, string>;
-  canEdit: boolean;
-  onToggle: (v: boolean) => void;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  const days = rule.days_of_week.length === 7
-    ? "Todos os dias"
-    : (["mon","tue","wed","thu","fri"] as WeekdayCode[]).every((d) => rule.days_of_week.includes(d)) && rule.days_of_week.length === 5
-      ? "Seg a Sex"
-      : rule.days_of_week.map(dayLabel).join(", ");
-  const scope = rule.action === "shutdown_specific"
-    ? `Apenas: ${rule.target_equipment_ids.map((id) => nameById.get(id) ?? "?").join(", ") || "—"}`
-    : rule.excluded_equipment_ids.length > 0
-      ? `Todas exceto: ${rule.excluded_equipment_ids.map((id) => nameById.get(id) ?? "?").join(", ")}`
-      : "Todas as bombas";
-  const last = rule.last_run_result;
-
-  return (
-    <Card className={`p-4 space-y-2 ${rule.is_active ? "" : "opacity-70"}`}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="font-semibold truncate">{rule.name}</p>
-          <p className="text-lg font-bold text-primary flex items-center gap-1.5">
-            <Clock className="w-4 h-4" /> {rule.time_brt}
-            <span className="text-xs font-normal text-muted-foreground">BRT</span>
-          </p>
-        </div>
-        <Switch checked={rule.is_active} onCheckedChange={onToggle} disabled={!canEdit} />
-      </div>
-
-      <div className="text-xs text-muted-foreground space-y-1">
-        <p>{days}</p>
-        <p>{scope}</p>
-        <p>
-          {rule.max_retries} tentativa{rule.max_retries === 1 ? "" : "s"} · a cada {rule.retry_interval_min} min ·{" "}
-          {rule.alert_after_retries ? "alerta WhatsApp se resistir" : "sem alerta"}
-        </p>
-      </div>
-
-      {last && (
-        <p className="text-[11px] text-muted-foreground">
-          Última execução:{" "}
-          {rule.last_run_at ? new Date(rule.last_run_at).toLocaleString("pt-BR") : "—"}
-          {typeof last.on === "number" && ` · ${last.on} ligada(s)`}
-        </p>
-      )}
-
-      {canEdit && (
-        <div className="flex gap-2 pt-1">
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onEdit}>Editar</Button>
-          <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive hover:text-destructive" onClick={onDelete}>Excluir</Button>
-        </div>
-      )}
-    </Card>
-  );
-}
-
-function RuleFormDialog({
-  open, onOpenChange, equipments, editing, onSubmit,
-}: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  equipments: EquipmentLite[];
-  editing: ScheduledAutomation | null;
-  onSubmit: (input: ScheduledAutomationInput) => Promise<boolean>;
-}) {
-  const [name, setName] = useState("");
-  const [action, setAction] = useState<ShutdownAction>("shutdown_all");
-  const [timeBrt, setTimeBrt] = useState("17:00");
-  const [days, setDays] = useState<WeekdayCode[]>(["mon", "tue", "wed", "thu", "fri"]);
-  const [excluded, setExcluded] = useState<string[]>([]);
-  const [targets, setTargets] = useState<string[]>([]);
-  const [interval, setInterval] = useState(5);
-  const [maxRetries, setMaxRetries] = useState(3);
-  const [alertAfter, setAlertAfter] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    if (editing) {
-      setName(editing.name);
-      setAction(editing.action);
-      setTimeBrt(editing.time_brt);
-      setDays(editing.days_of_week.length ? editing.days_of_week : ["mon", "tue", "wed", "thu", "fri"]);
-      setExcluded(editing.excluded_equipment_ids);
-      setTargets(editing.target_equipment_ids);
-      setInterval(editing.retry_interval_min);
-      setMaxRetries(editing.max_retries);
-      setAlertAfter(editing.alert_after_retries);
-    } else {
-      setName(""); setAction("shutdown_all"); setTimeBrt("17:00");
-      setDays(["mon", "tue", "wed", "thu", "fri"]);
-      setExcluded([]); setTargets([]); setInterval(5); setMaxRetries(3); setAlertAfter(true);
-    }
-  }, [open, editing]);
-
-  const canSubmit = useMemo(() => {
-    if (!name.trim() || !/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(timeBrt) || days.length === 0) return false;
-    if (action === "shutdown_specific" && targets.length === 0) return false;
-    return true;
-  }, [name, timeBrt, days, action, targets]);
-
-  const toggleDay = (d: WeekdayCode) =>
-    setDays((p) => (p.includes(d) ? p.filter((x) => x !== d) : [...p, d]));
-  const toggleId = (id: string, list: string[], set: (v: string[]) => void) =>
-    set(list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
-
-  const handleSubmit = async () => {
-    setSubmitting(true);
-    const ok = await onSubmit({
-      name: name.trim(),
-      action,
-      time_brt: timeBrt,
-      days_of_week: days,
-      excluded_equipment_ids: action === "shutdown_all" ? excluded : [],
-      target_equipment_ids: action === "shutdown_specific" ? targets : [],
-      retry_interval_min: interval,
-      max_retries: maxRetries,
-      alert_after_retries: alertAfter,
-    });
-    setSubmitting(false);
-    if (ok) onOpenChange(false);
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[95vw] sm:max-w-lg max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{editing ? "Editar regra" : "Nova regra de desligamento"}</DialogTitle>
-        </DialogHeader>
-
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label>Nome</Label>
-            <Input placeholder="Ex: Desligamento 17h Semear" value={name} onChange={(e) => setName(e.target.value)} />
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>Horário (BRT)</Label>
-              <Input type="time" value={timeBrt} onChange={(e) => setTimeBrt(e.target.value)} />
-            </div>
-            <div className="space-y-2">
-              <Label>Bombas</Label>
-              <Select value={action} onValueChange={(v) => setAction(v as ShutdownAction)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="shutdown_all">Desligar todas</SelectItem>
-                  <SelectItem value="shutdown_specific">Apenas selecionadas</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label>Dias da semana</Label>
-            <div className="flex flex-wrap gap-2">
-              {DAYS.map((d) => (
-                <button
-                  key={d.code}
-                  type="button"
-                  onClick={() => toggleDay(d.code)}
-                  className={`px-3 py-1.5 text-xs rounded-md border transition ${
-                    days.includes(d.code)
-                      ? "bg-primary text-primary-foreground border-primary"
-                      : "bg-background text-foreground border-border hover:bg-muted"
-                  }`}
-                >
-                  {d.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {action === "shutdown_all" ? (
-            <div className="space-y-2">
-              <Label>Não desligar estas bombas (exceções) — {excluded.length}</Label>
-              <EquipPicker equipments={equipments} selected={excluded} onToggle={(id) => toggleId(id, excluded, setExcluded)} />
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <Label>Desligar apenas estas bombas — {targets.length}</Label>
-              <EquipPicker equipments={equipments} selected={targets} onToggle={(id) => toggleId(id, targets, setTargets)} />
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>Tentativas</Label>
-              <Input type="number" min={1} max={10} value={maxRetries} onChange={(e) => setMaxRetries(Number(e.target.value))} />
-            </div>
-            <div className="space-y-2">
-              <Label>Intervalo (min)</Label>
-              <Input type="number" min={1} max={60} value={interval} onChange={(e) => setInterval(Number(e.target.value))} />
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 h-10 px-3 border rounded-md">
-            <Checkbox id="alert-after" checked={alertAfter} onCheckedChange={(v) => setAlertAfter(!!v)} />
-            <Label htmlFor="alert-after" className="cursor-pointer text-sm flex items-center gap-1.5">
-              <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
-              Alertar no WhatsApp se alguma bomba resistir
-            </Label>
-          </div>
-
-          <p className="text-[11px] text-muted-foreground">
-            Cronograma: às {timeBrt} a 1ª tentativa; depois +{interval} min por tentativa (total {maxRetries}).
-            Verificação final {interval} min após a última — alerta só se ainda houver bomba ligada.
-          </p>
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
-          <Button disabled={!canSubmit || submitting} onClick={handleSubmit}>
-            {submitting ? "Salvando…" : editing ? "Salvar" : "Criar regra"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function EquipPicker({
-  equipments, selected, onToggle,
-}: {
-  equipments: EquipmentLite[];
-  selected: string[];
-  onToggle: (id: string) => void;
-}) {
-  if (equipments.length === 0) {
-    return <p className="text-xs text-muted-foreground">Nenhum equipamento nesta fazenda.</p>;
-  }
-  return (
-    <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto border rounded-md p-3">
-      {equipments.map((e) => (
-        <label key={e.id} className="flex items-center gap-2 text-sm cursor-pointer">
-          <Checkbox checked={selected.includes(e.id)} onCheckedChange={() => onToggle(e.id)} />
-          <span className="truncate">{e.name}</span>
-        </label>
-      ))}
-    </div>
-  );
-}
+export default ScheduledShutdownSection;

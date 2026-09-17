@@ -138,27 +138,27 @@ const NiveisReport = ({ fromDate, toDate }: Props) => {
   return (
     <div className="space-y-4">
       <Card className="bg-card border-border">
-        <CardContent className="p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-          <div className="w-full sm:w-auto">
+        <CardContent className="p-4 flex flex-wrap items-end gap-3">
+          <div>
             <label className="text-xs text-muted-foreground">Equipamento</label>
             <Select value={selectedId} onValueChange={setSelectedId}>
-              <SelectTrigger className="bg-secondary border-border mt-1 w-full sm:w-56"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="bg-secondary border-border mt-1 w-56"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {equipments.map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
-          <div className="w-full sm:w-auto">
+          <div>
             <label className="text-xs text-muted-foreground">Nível crítico (%)</label>
             <Input
               type="number" min={0} max={100}
               value={criticalLevel}
               onChange={(e) => setCriticalLevel(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
-              className="bg-secondary border-border mt-1 w-full sm:w-28"
+              className="bg-secondary border-border mt-1 w-28"
             />
           </div>
-          <div className="w-full sm:w-auto sm:ml-auto">
-            <Button variant="outline" size="sm" className="border-border gap-1 w-full sm:w-auto" onClick={exportPDF} disabled={data.length === 0}>
+          <div className="ml-auto">
+            <Button variant="outline" size="sm" className="border-border gap-1" onClick={exportPDF} disabled={data.length === 0}>
               <FileText className="w-3.5 h-3.5" /> PDF
             </Button>
           </div>
@@ -172,7 +172,7 @@ const NiveisReport = ({ fromDate, toDate }: Props) => {
         </div>
       )}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Card className="bg-card border-border"><CardContent className="p-3">
           <p className="text-[11px] text-muted-foreground">Atual</p>
           <p className="text-xl font-bold text-primary">{summary.current?.toFixed(1) ?? "—"}%</p>

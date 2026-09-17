@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -21,18 +21,29 @@ import { useCurrentFarmMaintenance } from "@/hooks/useCurrentFarmMaintenance";
 import { LazyVisible } from "@/components/LazyVisible";
 import { PumpCard } from "./PumpCard";
 import { useAutomationActiveEquipments } from "@/hooks/useAutomationActiveEquipments";
+import { autoState, type AutoState } from "@/lib/automaticPumpState";
 import { useEquipmentMaintenance, formatMaintenanceStartedAt } from "@/hooks/useEquipmentMaintenance";
 
 export interface PumpCommandLog {
   action: string; // "Ligar remoto", "Desligar remoto", "Ligar local", "Desligar local"
   time: string;
   result: "success" | "fail";
+  source?: "remoto" | "local" | "whatsapp" | "auto" | "automatico";
+  label?: string;
+  actor?: string | null;
 }
 
 export interface PumpStatusLog {
   status: "Ligado" | "Desligado";
-  source: "remoto" | "local";
+  /** Automação é origem própria: chamá-la de "Remoto" no mini relatório é falso. */
+  /** As CINCO origens canônicas do Relatório. Reduzir Automação ou WhatsApp
+   *  para "Remoto" — ou qualquer uma para "Local" — é proibido. */
+  source: "remoto" | "local" | "whatsapp" | "auto" | "automatico";
   time: string;
+  /** Rótulo pronto: Local | Remoto | WhatsApp | Automação | Automático. */
+  label?: string;
+  /** Nome real de quem comandou, quando source = "remoto". */
+  actor?: string | null;
 }
 
 export type PumpCommunicationStatus = "online" | "unstable" | "offline";
@@ -63,8 +74,18 @@ export interface Pump {
    *  Enquanto <30s e a intenção continuar desligar (desired_running=false), um RX
    *  transitório de "ligado" (pulso {1}→{0} do desligamento forçado) NÃO reabre o card. */
   confirmedOffAt?: number;
+  /** Intenção registrada pelo BACKEND (`equipments.desired_running`). O
+   *  frontend não calcula schedule — apenas lê o que o motor gravou. */
+  desiredRunning?: boolean | null;
+  /** `equipments.automatic_on_attempt_since` em ms. Origem do relógio de 15 min
+   *  do indicador AUTO. undefined = nenhuma tentativa real em curso. */
+  automaticOnAttemptSince?: number;
   /** Origem da última mudança de estado da bomba: 'remote' (plataforma) ou 'local' (chave física). */
-  actuationOrigin?: "remote" | "local" | "whatsapp" | "tech_terminal" | null;
+  actuationOrigin?: "remote" | "local" | "whatsapp" | "tech_terminal" | "auto" | null;
+  /** timestamp (ms) da última sincronização aplicada ao card (anti-regressão de RX antigo). */
+  lastSyncAt?: number;
+  /** timestamp (ms) de comando enviado ainda sem confirmação física. */
+  commandUnconfirmedAt?: number;
   /** Timestamp ISO em que o operador reconheceu o aviso LOCAL (dismiss via double-click no badge). */
   localAckAt?: string | null;
   /** Bomba bloqueada para novos comandos até este timestamp (acionamento local detectado). */
@@ -336,6 +357,35 @@ export function PumpTable({ pumps, onToggle, onReset, onModeChange, onRefreshSta
 
   const virtualize = pumps.length > 8;
   const autoActiveSet = useAutomationActiveEquipments();
+
+  /**
+   * Estado do indicador AUTO por bomba. UMA passada por render, sobre dados que
+   * já estão em memória — nenhuma consulta nova, nenhuma consulta por card.
+   *
+   * `engineEnabled` vem de `useAutomationActiveEquipments`, que já combina
+   * `automation_engine.enabled` da fazenda com programação ativa. `desired` é o
+   * `desired_running` que o MOTOR gravou — a tabela não recalcula horário.
+   * `waiting_start` é o caso residual (deveria estar ON, está OFF, sem comando
+   * e sem tentativa registrada), então não é preciso consultar
+   * `automation_execution_log` por card.
+   */
+  const autoStates = useMemo(() => {
+    const m = new Map<string, AutoState>();
+    const agora = new Date();
+    for (const p of pumps) {
+      const confiavel = p.online && p.communicationStatus !== "offline";
+      m.set(p.id, autoState({
+        engineEnabled: autoActiveSet.has(p.id),
+        desired: p.desiredRunning === true ? "on" : p.desiredRunning === false ? "off" : null,
+        physicalRunning: confiavel ? p.running : null,
+        hasPendingCommand: p.pending === "turning_on" || p.pending === "turning_off",
+        attemptSince: p.automaticOnAttemptSince ? new Date(p.automaticOnAttemptSince) : null,
+        online: confiavel,
+        now: agora,
+      }));
+    }
+    return m;
+  }, [pumps, autoActiveSet]);
   const { rows: maintRows } = useEquipmentMaintenance();
   const maintMap = new Map(maintRows.map((r) => [r.id, r]));
 
@@ -362,6 +412,7 @@ export function PumpTable({ pumps, onToggle, onReset, onModeChange, onRefreshSta
                 flashStatus={flashStatus[pump.id]}
                 isGuarded={guardSet.has(pump.id)}
                 isAutoSchedule={autoActiveSet.has(pump.id)}
+                autoState={autoStates.get(pump.id)}
                 inMaintenance={inMaint}
                 maintenanceTooltip={maintTip}
                 userOnline={userOnline}

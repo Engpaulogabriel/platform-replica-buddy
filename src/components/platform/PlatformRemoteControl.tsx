@@ -202,9 +202,9 @@ export default function PlatformRemoteControl({ isAdmin }: { isAdmin: boolean })
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <CardTitle className="text-base flex items-center gap-2"><Power className="w-4 h-4" />Controle remoto</CardTitle>
-            <div className="flex gap-2 w-full sm:w-auto">
+            <div className="flex gap-2">
               <Select value={farmId} onValueChange={setFarmId}>
-                <SelectTrigger className="w-full sm:w-[260px]"><SelectValue placeholder="Selecione a fazenda" /></SelectTrigger>
+                <SelectTrigger className="w-[260px]"><SelectValue placeholder="Selecione a fazenda" /></SelectTrigger>
                 <SelectContent>
                   {farms.map(f => <SelectItem key={f.farm_id} value={f.farm_id}>{f.name}</SelectItem>)}
                 </SelectContent>
@@ -293,13 +293,13 @@ export default function PlatformRemoteControl({ isAdmin }: { isAdmin: boolean })
           <CardContent className="space-y-3">
             <ModuleToggle label="Vazão" hint="Habilita aba e cards de vazão"
               checked={!!modules.vazao} disabled={!farmId || busy?.startsWith("module-")}
-              onChange={(v) => toggleModule("vazao", v)} />
+              onChange={(v: boolean) => toggleModule("vazao", v)} />
             <ModuleToggle label="Consumo" hint="Habilita medições de consumo elétrico"
               checked={!!modules.consumo} disabled={!farmId || busy?.startsWith("module-")}
-              onChange={(v) => toggleModule("consumo", v)} />
+              onChange={(v: boolean) => toggleModule("consumo", v)} />
             <ModuleToggle label="Assistente WhatsApp (IA)" hint="Libera integração WhatsApp + IA"
               checked={!!modules.ai_whatsapp} disabled={!farmId || busy?.startsWith("module-")}
-              onChange={(v) => toggleModule("ai_whatsapp", v)} />
+              onChange={(v: boolean) => toggleModule("ai_whatsapp", v)} />
             <div className="pt-2 mt-2 border-t border-border" />
             <ModuleToggle
               label="Sino de alertas (Falhas + Sistema)"

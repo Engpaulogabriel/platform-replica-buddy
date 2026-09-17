@@ -8,7 +8,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.0";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+    "authorization, x-client-info, apikey, content-type, x-cron-secret",
 };
 
 // Comparação de strings em tempo constante (evita timing attacks)
@@ -24,40 +24,39 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  // ── Auth: aceita SERVICE_ROLE, CRON_SECRET, ou QUALQUER JWT válido emitido por
-  // este projeto Supabase (anon/authenticated). Cron envia apikey/Authorization
-  // com a publishable key do projeto — basta validar o `ref` do payload.
-  const projectRef = "vabguxllyguztneumahq";
-  const serviceRole = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-  const cronSecret = Deno.env.get("CRON_SECRET") ?? "";
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const apiKeyHeader = req.headers.get("apikey") ?? "";
-  const bearerToken = authHeader.replace(/^Bearer\s+/i, "").trim();
-  const candidates = [bearerToken, apiKeyHeader].filter(Boolean);
+  // ── Auth ────────────────────────────────────────────────────────────────
+  // Aceita, nesta ordem: `x-cron-secret` (como `cron_invoke()` envia) ou
+  // `Authorization: Bearer <segredo>`, casando com CRON_SECRET **ou** com o
+  // rotacionado CRON_SECRET_V2; e bearer com a service_role key.
+  //
+  // POR QUE V2: `cron_invoke()` lê o segredo do Vault. Quando ele foi
+  // rotacionado, o Vault passou a mandar o valor novo enquanto esta função só
+  // comparava com CRON_SECRET — 401 a cada minuto. Durante a janela de rotação
+  // os DOIS valores são válidos; nenhum aparece aqui, só o nome do env.
+  //
+  // O QUE SAIU: a validação `isValidProjectJwt`, que aceitava QUALQUER JWT do
+  // projeto — inclusive a anon key, que é pública e vai no bundle do frontend.
+  // Isso é bypass anônimo. Além disso o `projectRef` estava fixado em
+  // "vabguxllyguztneumahq", que não é o projeto real (`dnyukgfedredvxpzjpqz`),
+  // então a comparação nunca casava: era um bypass quebrado — inseguro por
+  // intenção e não-funcional na prática. Removido, não consertado.
+  const cronSecret   = (Deno.env.get("CRON_SECRET") ?? "").trim();
+  const cronSecretV2 = (Deno.env.get("CRON_SECRET_V2") ?? "").trim();
+  const serviceRole  = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim();
 
-  function isValidProjectJwt(token: string): boolean {
-    try {
-      const parts = token.split(".");
-      if (parts.length !== 3) return false;
-      const padded = parts[1] + "=".repeat((4 - (parts[1].length % 4)) % 4);
-      const payload = JSON.parse(
-        atob(padded.replace(/-/g, "+").replace(/_/g, "/")),
-      );
-      return payload?.ref === projectRef && (
-        payload?.role === "anon" ||
-        payload?.role === "authenticated" ||
-        payload?.role === "service_role"
-      );
-    } catch {
-      return false;
-    }
-  }
+  const presented = (req.headers.get("x-cron-secret") ?? "").trim();
+  const authHeader = (req.headers.get("Authorization") ?? "").trim();
+  const bearer = /^bearer\s+/i.test(authHeader)
+    ? authHeader.replace(/^bearer\s+/i, "").trim()
+    : "";
 
-  const isAuthorized = candidates.some((token) =>
-    (serviceRole && safeEquals(token, serviceRole)) ||
-    (cronSecret && safeEquals(token, cronSecret)) ||
-    isValidProjectJwt(token),
-  );
+  // Só segredos realmente configurados viram candidatos: um env vazio jamais
+  // pode casar com uma requisição sem credencial.
+  const secrets = [cronSecret, cronSecretV2].filter((s) => s.length > 0);
+  const isAuthorized =
+    (presented.length > 0 && secrets.some((s) => safeEquals(presented, s))) ||
+    (bearer.length > 0 && secrets.some((s) => safeEquals(bearer, s))) ||
+    (bearer.length > 0 && serviceRole.length > 0 && safeEquals(bearer, serviceRole));
 
   if (!isAuthorized) {
     return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), {
@@ -73,6 +72,10 @@ Deno.serve(async (req) => {
     );
 
     const { data, error } = await supabase.rpc("run_automation_tick");
+    // RETURNS TABLE(enqueued_count, schedules_evaluated) chega como ARRAY de
+    // linhas. Ler `data.enqueued_count` direto dá undefined e o log da tick
+    // mostrava "0 enfileirados" mesmo quando havia comando criado.
+    const tick = Array.isArray(data) ? data[0] : data;
     if (error) {
       console.error("[automation-tick] RPC error:", error);
       return new Response(
@@ -172,7 +175,7 @@ Deno.serve(async (req) => {
 
 
 
-    const result = data as { enqueued_count?: number; schedules_evaluated?: number } | null;
+    const result = tick as { enqueued_count?: number; schedules_evaluated?: number } | null;
     console.log(
       `[automation-tick] enqueued=${result?.enqueued_count ?? 0} evaluated=${result?.schedules_evaluated ?? 0}`,
     );

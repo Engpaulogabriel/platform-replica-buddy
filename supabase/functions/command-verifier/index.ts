@@ -3,10 +3,11 @@
 // to the operator who issued the command.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { guardCron } from "../_shared/cronAuth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret, x-internal-secret",
 };
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -73,6 +74,10 @@ async function sendWhatsAppText(phone: string, body: string, farmId: string | nu
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // ── GUARDA DE CRON ───────────────────────────────────────────────────────
+  // Função exclusiva do pg_cron: exige x-cron-secret (ou service role).
+  { const blocked = guardCron(req, corsHeaders); if (blocked) return blocked; }
 
   try {
     // Multi-attempt verification window to avoid false positives from slow

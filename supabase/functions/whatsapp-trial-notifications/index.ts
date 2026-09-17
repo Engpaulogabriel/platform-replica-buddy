@@ -77,8 +77,28 @@ async function sendProactive(api_token: string, phone_number_id: string, op: { p
   return sendTpl(api_token, phone_number_id, op.phone, params);
 }
 
+function safeEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
+  const serviceRole = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  const cronSecret = Deno.env.get("CRON_SECRET") ?? "";
+  const bearer = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  const xCron = req.headers.get("x-cron-secret") ?? "";
+  const isAuthorized =
+    (serviceRole && safeEquals(bearer, serviceRole)) ||
+    (cronSecret && (safeEquals(bearer, cronSecret) || safeEquals(xCron, cronSecret)));
+  if (!isAuthorized) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
 
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,

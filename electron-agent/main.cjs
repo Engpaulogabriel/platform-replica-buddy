@@ -25,69 +25,22 @@ const crypto = require("crypto");
 // ─── BOOT LOG (escrito ANTES de qualquer coisa que possa falhar) ───────────
 // Sempre grava em %APPDATA%\GestorDeBombasKey\boot.log para diagnosticar
 // crashes silenciosos no startup. Não depende de pushLog/Supabase/janelas.
-// v3.25.47: NO-OP. boot.log continha diagnóstico de boot/crash/segurança e era um
-// arquivo LOCAL legível — removido por decisão de segurança (nenhum arquivo no PC).
-// Mantido como função para não quebrar as ~50 chamadas. Trade-off assumido: sem
-// boot.log, um crash silencioso no startup (antes da nuvem subir) não deixa rastro
-// em disco. `void msg` evita "unused".
-function _bootLog(msg) { void msg; }
+function _bootLog(msg) {
+  try {
+    const dir = (app && app.getPath) ? app.getPath("userData") : path.join(os.homedir(), "AppData", "Roaming", "GestorDeBombasKey");
+    try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+    const line = `[${new Date().toISOString()}] ${msg}\n`;
+    fs.appendFileSync(path.join(dir, "boot.log"), line);
+  } catch (_) {}
+}
 _bootLog(`=== boot main.cjs pid=${process.pid} packaged=${app.isPackaged} platform=${process.platform} arch=${process.arch} node=${process.versions.node} electron=${process.versions.electron} ===`);
 
-// ─── v3.25.47 SEGURANÇA: ZERO LOG EM DISCO E ZERO CONSOLE ───────────────────
-// Nenhum arquivo no PC da fazenda pode conter frames TX/RX, endereços de PLC ou
-// protocolo — nem admin/SYSTEM pode ler porque NÃO EXISTE. Portanto:
-//  (1) console.* = NO-OP (descarta tudo — nada para stdout/stderr nem arquivo).
-//  (2) process.stdout/stderr.write = NO-OP (nada aparece no CMD ao rodar o exe).
-//  (3) _bootLog e appendLogFile também viram no-op (ver definições abaixo) — sem
-//      boot.log, sem console.log, sem agent-*.log em disco.
-//  (4) Só liveness.txt sobrevive (apenas timestamp, sem dado sensível).
-// NÃO afeta a serial: a bridge usa pipes do processo FILHO (bridgeProcess.stdin /
-// proc.stdout), independentes do process.stdout deste agente.
-console.log   = () => {};
-console.info  = () => {};
-console.warn  = () => {};
-console.error = () => {};
-console.debug = () => {};
-console.trace = () => {};
-const _noopWrite = (_chunk, enc, cb) => {
-  const done = typeof enc === "function" ? enc : cb;
-  if (typeof done === "function") { try { done(); } catch (_) {} }
-  return true;
-};
-try { process.stdout.write = _noopWrite; } catch (_) {}
-try { process.stderr.write = _noopWrite; } catch (_) {}
-
-// Purga arquivos de log SENSÍVEIS deixados por versões anteriores (contêm frames).
-// liveness.txt é preservado (só timestamp). Best-effort, nunca lança.
-(function _purgeSensitiveLogFiles() {
-  try {
-    const dir = (app && app.getPath) ? app.getPath("userData") : null;
-    if (!dir) return;
-    for (const f of ["boot.log", "console.log", "debug.log"]) {
-      try { fs.unlinkSync(path.join(dir, f)); } catch (_) {}
-    }
-    try {
-      const logDir = path.join(dir, "logs");
-      for (const f of fs.readdirSync(logDir)) {
-        if (f.startsWith("agent-") && f.endsWith(".log")) { try { fs.unlinkSync(path.join(logDir, f)); } catch (_) {} }
-      }
-    } catch (_) {}
-  } catch (_) {}
-})();
-
-// v3.25.40 (#8): qualquer crash inesperado termina em RESTART, nunca em morte
-// permanente. Os handlers NUNCA chamam process.exit() direto — delegam para
-// relaunchAgent(), que loga, avisa a nuvem (3s) e só então relaunch+exit.
-const _PROCESS_START_MS = Date.now();
 process.on("uncaughtException", (err) => {
   _bootLog(`uncaughtException: ${err && err.stack || err}`);
   try { console.error("[FATAL]", err); } catch (_) {}
-  try { handleFatalError("unhandled_exception", err); }
-  catch (_) { try { app.relaunch(); app.exit(1); } catch (__) {} }
 });
 process.on("unhandledRejection", (err) => {
   _bootLog(`unhandledRejection: ${err && err.stack || err}`);
-  try { noteUnhandledRejection(err); } catch (_) {}
 });
 
 // Auto-update DESATIVADO. O repositório público de releases não existe e o
@@ -129,60 +82,32 @@ const SUPABASE_URL_DEFAULT = process.env.RENOV_SUPABASE_URL
 const SUPABASE_ANON_DEFAULT = process.env.RENOV_SUPABASE_ANON
   || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRueXVrZ2ZlZHJlZHZ4cHpqcHF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2ODU1OTQsImV4cCI6MjA5MjI2MTU5NH0.OSg44w0CRVvD-f6Ts_U9DVeQkQ-4c37passKEK5X0kk";
 
-// Segredo HMAC para assinar reportes de tampering. Embutido em build-time
-// via env var RENOV_TAMPER_SECRET. Caso ausente (dev), usa valor inerte.
-const TAMPER_SIGNING_SECRET = process.env.RENOV_TAMPER_SECRET
-  || "dev-only-tamper-secret-replace-in-build";
-
-// ── FASE 2 (v3.25.50): token rotativo + credenciais machine-bound (DPAPI) ──
-// FLAG-GATED (default OFF, mesmo padrão de SECURITY_BLOCK_ENFORCEMENT): enquanto
-// false, NADA muda o comportamento — o token é obtido/rotacionado e as
-// credenciais espelhadas em %ProgramData%, mas QUALQUER falha (DPAPI, rede,
-// 403) é NÃO-FATAL: o agente segue conectando com anon+config como sempre. Só
-// quando true a falha de credenciais machine-bound impede a operação. Ver
-// [[renov-agent-resilience-policy]] — nunca morre por falta de nuvem.
-const SECURITY_PHASE2_ENFORCEMENT = false;
-// credentials.enc: cópia machine-bound (DPAPI) das credenciais de conexão em
-// %ProgramData%\Renov\ — se a pasta for copiada p/ outro PC, o DPAPI falha ao
-// decifrar (chave atrelada à máquina) e o clone não obtém credenciais.
-const CREDENTIALS_ENC_FILE = path.join("C:\\ProgramData", "Renov", "credentials.enc");
-const AGENT_TOKEN_TTL_MS = 10 * 60 * 1000;     // TTL do token (servidor manda 600s)
-const AGENT_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000; // renova ~5min antes de expirar → refresh a cada ~5min
-let agentToken = null;                 // JWT rotativo atual (em memória)
-let agentTokenExpiresAt = 0;           // epoch ms de expiração
-let lastTokenRefreshAt = 0;
-let credentialsDpapiFailed = false;    // true se credentials.enc existe mas não decifra
-// FASE 2 só ATIVA quando farms.security_phase >= 2 (lido em refreshCommTimeout).
-// Enquanto < 2, o agente NÃO rotaciona token nem grava agent_security_events —
-// comporta-se exatamente como antes (anon+config). Testar só na Sykue.
-let farmSecurityPhase = 0;
-const SECURITY_PHASE2_MIN = 2;
-let lastSecurityEventAt = {};          // dedup por tipo (evita flood no banco)
-let fase3FallbackLogged = false;       // one-shot: registra fase3_fallback só 1x por sessão
+// Segredo HMAC para assinar reportes de tampering.
+// Fontes aceitas: env var RENOV_TAMPER_SECRET (dev/CI) ou build-secrets.json
+// gerado pelo build-agent.bat no empacotamento.
+// SEM FALLBACK: sem segredo, o reporte NÃO é enviado (falha fechada). Um valor
+// hardcoded conhecido permitiria forjar reportes e revogar licenças.
+function _loadBuildSecret(name) {
+  try {
+    const s = require("./build-secrets.json");
+    const v = s && s[name];
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  } catch (_) {
+    return null;
+  }
+}
+const TAMPER_SIGNING_SECRET = (process.env.RENOV_TAMPER_SECRET && process.env.RENOV_TAMPER_SECRET.trim())
+  || _loadBuildSecret("tamperSecret")
+  || null;
 
 const LOG_DIR = path.join(app.getPath("userData"), "logs");
 const POLL_INTERVAL_MS = 10_000; // v3.7.8: aumentado de 3s para 10s — comandos manuais chegam via Realtime fast-path; reduz IO no banco em 70%
 // v3.9.10: gap entre o FIM (RX/timeout) de uma comunicação de polling e o INÍCIO (TX) da próxima.
 // Após RX bem sucedido, espera 8s para não saturar o canal de rádio (colisão/eco).
 // Após timeout, basta um gap curto (3s) para não atrasar demais o ciclo.
-const POLLING_GAP_AFTER_RX_MS = 3_000;
+const POLLING_GAP_AFTER_RX_MS = 8_000;
 const POLLING_GAP_AFTER_TIMEOUT_MS = 3_000;
 const MANUAL_FIRST_TX_GAP_MS = 3_000; // v3.8.13: gap mínimo entre último TX da mesma PLC e primeiro TX manual
-// v3.25.7: quando há OUTROS manuais pendentes na fila, não segura o barramento os
-// 13s completos esperando o RX deste manual — libera após 3s para o próximo manual
-// sair em ~3s (TX_MIN_GAP_MS). A confirmação física deste comando continua garantida
-// pelos reforços TX (+15/30/45s) e pela janela de late-RX/safety de 120s no backend.
-const MANUAL_QUEUED_HOLD_MS = 3_000;
-// v3.25.7: desligamento forçado de bomba ligada localmente. Quando o operador
-// desliga (bit=0) pela plataforma uma bomba com last_actuation_origin='local' e
-// forced_shutdown_enabled=true, o agente executa (v3.25.29): FASE 1 — manda {1}
-// e espera RX (bomba respondeu), retransmitindo a cada ciclo até no máx 5 tentativas;
-// FASE 2 — assim que o RX confirma o {1}, manda {0} UMA vez (bomba desliga). Fallback:
-// se após 5 tentativas de {1} nunca veio RX, manda {0} mesmo assim. Sem tempo fixo
-// entre TX (o ritmo é o RX/timeout). Ver runForcedShutdownSequence().
-const FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS = 13_000; // v3.25.29: janela p/ esperar o RX de cada TX
-const FORCED_MAX_ON_ATTEMPTS = 5;                // v3.25.29: máx tentativas de {1} até RX (Fase 1)
-const FORCED_MAX_CYCLES = 3;                     // v3.25.32: se o {0} não confirmar off, repete o ciclo ({1}->{0}) até 3x
 let lastPollingEndAt = 0;             // timestamp do último RX/timeout de polling
 let lastPollingEndedWithTimeout = false; // true se o último polling acabou em timeout
 const lastTxByTsnn = new Map(); // TSNN -> { at, type, cmdId, frame }
@@ -198,13 +123,8 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 // ============================================================================
 let lastTxTimestamp = 0;
 let lastRxTimestamp = 0;
-// v3.25.16: timestamp da última ATIVIDADE útil da fila (TX real OU descarte de
-// polling DESNEC/STALE). O watchdog usa isto — descartar polling é atividade
-// normal (a fila está processando), não stall. Só é stall quando há frame para
-// enviar e a serial não transmite (aí este timestamp para de avançar).
-let lastTxOrSkipAt = 0;
 const txQueue = []; // [{ frame, priority, queuedAt, tsnn }]
-const TX_MIN_GAP_MS = 3000;
+const TX_MIN_GAP_MS = 5000;
 const RX_AVOID_GAP_MS = 2000;
 const POLLING_QUEUE_DROP_THRESHOLD = 5;
 
@@ -218,7 +138,6 @@ function _txWriteNow(frame) {
   try {
     bridgeProcess.stdin.write(Buffer.from(`SEND:${frame}\n`, "utf8"));
     lastTxTimestamp = Date.now();
-    lastTxOrSkipAt = lastTxTimestamp; // atividade da fila (para o watchdog)
     return true;
   } catch (e) {
     try { pushLog("error", "serial", `[TX QUEUE] stdin write falhou: ${e.message}`); } catch (_) {}
@@ -268,7 +187,6 @@ function processTxQueue() {
   const item = txQueue.shift();
   const gap = lastTxTimestamp > 0 ? (now - lastTxTimestamp) : -1;
   if (_txWriteNow(item.frame)) {
-    watchdogRestartCount = 0; // TX efetivo: reseta watchdog
     try { pushLog("info", "tx", `[TX QUEUE] Enviando frame para TSNN ${item.tsnn} (gap: ${gap}ms desde ultimo TX)`); } catch (_) {}
   } else {
     // bridge caiu: devolve para fila para tentar de novo
@@ -277,192 +195,6 @@ function processTxQueue() {
 }
 
 setInterval(processTxQueue, 1000);
-
-// ============================================================================
-// Cloud auth resilience + TX watchdog
-// ----------------------------------------------------------------------------
-// Objetivo: manter o loop de polling/TX vivo mesmo quando o token do Supabase
-// expira ou a nuvem devolve "Sem permissao" (RLS/JWT). O loop TX
-// (processTxQueue) já é 100% offline — só consome txQueue e escreve na porta
-// serial. O que trava é o loop QUE ENFILEIRA (tickEnqueuePolling e
-// processNextCommand): se essas chamadas retornam erro de auth, nenhum
-// frame novo entra na fila. Aqui:
-//   1) Detectamos erros de autenticação/permissão.
-//   2) Disparamos re-autenticação em background (refreshSession → fallback
-//      signInWithPassword com credenciais salvas). NUNCA bloqueia o loop TX.
-//   3) Watchdog independente: se não sai TX por >60s com PLCs cadastradas e
-//      bridge ok, reinicia o ciclo de polling. Após 3 tentativas seguidas,
-//      dispara alerta crítico via whatsapp-alerts (best-effort, sem bloquear).
-// ============================================================================
-function isCloudAuthError(err) {
-  if (!err) return false;
-  const msg = String(err.message || err.error_description || err || "").toLowerCase();
-  const code = String(err.code || err.status || "").toLowerCase();
-  if (
-    msg.includes("sem permissao")
-    || msg.includes("permission denied")
-    || msg.includes("jwt expired")
-    || msg.includes("invalid jwt")
-    || msg.includes("jwt is invalid")
-    || msg.includes("token is expired")
-    || msg.includes("token has invalid claims")
-    || msg.includes("not authenticated")
-  ) return true;
-  if (code === "401" || code === "403" || code === "pgrst301" || code === "pgrst302") return true;
-  return false;
-}
-
-let reauthInProgress = false;
-let lastReauthAt = 0;
-const REAUTH_MIN_GAP_MS = 15_000; // evita loop apertado ao repetir 401
-
-async function triggerReauth(reason) {
-  if (reauthInProgress) return;
-  if (Date.now() - lastReauthAt < REAUTH_MIN_GAP_MS) return;
-  reauthInProgress = true;
-  lastReauthAt = Date.now();
-  try {
-    pushLog("warn", "cloud", `[AUTH] Token expirado detectado (${reason || "unknown"}). Tentando re-autenticação...`);
-    // Tenta refresh primeiro (mais barato)
-    if (supabase && supabase.auth && typeof supabase.auth.refreshSession === "function") {
-      try {
-        const { data, error } = await supabase.auth.refreshSession();
-        if (!error && data && data.session) {
-          activeAccessToken = data.session.access_token || activeAccessToken;
-          pushLog("info", "cloud", "[AUTH] Refresh de token bem-sucedido");
-          void flushTelemetryQueue();
-          return;
-        }
-        if (error) pushLog("warn", "cloud", `[AUTH] refreshSession falhou: ${error.message || error}`);
-      } catch (e) {
-        pushLog("warn", "cloud", `[AUTH] refreshSession exception: ${e && e.message || e}`);
-      }
-    }
-    // Fallback: login completo com credenciais salvas
-    const cfg = (typeof loadConfig === "function") ? loadConfig() : null;
-    if (!cfg || !cfg.email || !cfg.password || !cfg.supabaseUrl || !cfg.supabaseAnonKey) {
-      pushLog("error", "cloud", "[AUTH] Re-autenticação impossível: config incompleta");
-      return;
-    }
-    try {
-      const newClient = await authenticate(cfg.email, cfg.password, cfg.supabaseUrl, cfg.supabaseAnonKey);
-      supabase = newClient;
-      // reseta canal de broadcast (cliente novo)
-      broadcastChannelRef = null;
-      pushLog("info", "cloud", `[AUTH] Re-autenticação bem-sucedida (${cfg.email})`);
-      void flushTelemetryQueue();
-    } catch (e) {
-      pushLog("error", "cloud", `[AUTH] Re-autenticação falhou: ${e && e.message || e}`);
-    }
-  } finally {
-    reauthInProgress = false;
-  }
-}
-
-// Wrapper leve para ser chamado nos catch/error paths dos loops que falam
-// com a nuvem. NUNCA lança — é fire-and-forget.
-function noteCloudError(err, context) {
-  try {
-    if (isCloudAuthError(err)) {
-      void triggerReauth(context || "cloud-error");
-    }
-  } catch (_) {}
-}
-
-// --- Watchdog TX QUEUE -----------------------------------------------------
-let watchdogRestartCount = 0;
-let lastWatchdogAlertAt = 0;
-const WATCHDOG_INTERVAL_MS = 15_000;
-const WATCHDOG_TX_SILENCE_MS = 60_000;
-const WATCHDOG_MAX_RESTARTS = 3;
-
-function hasActivePLCs() {
-  // Usa cache de equipamentos carregado do Supabase (map por hw_id).
-  // Se ainda não carregou, assume "sim" para não silenciar o watchdog.
-  return equipmentByHwId.size > 0 || equipmentCacheLoadedAt === 0;
-}
-
-async function sendTxStalledCriticalAlert(silenceSec) {
-  if (!supabase || !farmId) return;
-  // Rate-limit: no máximo 1 alerta a cada 10 min
-  if (Date.now() - lastWatchdogAlertAt < 10 * 60_000) return;
-  lastWatchdogAlertAt = Date.now();
-  const message = `Agente Electron: TX QUEUE travada há ${Math.round(silenceSec)}s. Comunicação com PLCs interrompida. Verificar computador local.`;
-  try {
-    // Insere notificação no sino (aba Sistema) — dispara pipeline padrão
-    await supabase.from("farm_notifications").insert({
-      farm_id: farmId,
-      kind: "failure",
-      severity: "critical",
-      title: "Agente sem TX há mais de 3 minutos",
-      message,
-      source: "agent-watchdog",
-      source_ref: `tx-stalled:${Date.now()}`,
-    });
-  } catch (e) {
-    pushLog("warn", "cloud", `[WATCHDOG] Falha ao registrar notificação crítica: ${e && e.message || e}`);
-  }
-  try {
-    // WhatsApp direto (best-effort — pode falhar sem bloquear)
-    await supabase.functions.invoke("whatsapp-alerts", {
-      body: {
-        kind: "agent_tx_stalled",
-        farm_id: farmId,
-        message,
-        silence_seconds: Math.round(silenceSec),
-      },
-    });
-  } catch (e) {
-    pushLog("warn", "cloud", `[WATCHDOG] whatsapp-alerts invoke falhou: ${e && e.message || e}`);
-  }
-}
-
-function watchdogTxTick() {
-  try {
-    if (!bridgeReady) return;                 // sem porta serial não é problema de TX
-    if (!hasActivePLCs()) return;             // sem PLCs cadastradas nada a enviar
-    if (licenseKillSwitchTriggered) return;   // desligamento intencional
-    if (pollingPaused) return;                // pausa administrativa
-    // v3.25.16: mede silêncio pela última ATIVIDADE da fila (TX real OU descarte de
-    // polling DESNEC/STALE), não só por TX. Assim, quando todos os pollings são
-    // descartados (estado real já bate com desired), isso conta como atividade
-    // normal e o watchdog NÃO dispara falso-positivo. Só dispara em stall real:
-    // frame para enviar e serial não transmite → lastTxOrSkipAt para de avançar.
-    const activityAt = Math.max(lastTxTimestamp, lastTxOrSkipAt);
-    const silenceMs = activityAt > 0 ? (Date.now() - activityAt) : (Date.now() - agentStartupAt);
-    if (silenceMs < WATCHDOG_TX_SILENCE_MS) return;
-
-    watchdogRestartCount++;
-    pushLog(
-      "warn",
-      "system",
-      `[WATCHDOG] TX QUEUE travada há ${Math.round(silenceMs / 1000)}s. Reinício #${watchdogRestartCount}`,
-    );
-
-    if (watchdogRestartCount <= WATCHDOG_MAX_RESTARTS) {
-      // Limpa estado que pode ter ficado preso e força novo ciclo.
-      try { txQueue.length = 0; } catch (_) {}
-      processing = false;
-      processingSince = 0;
-      inflightCmd = null;
-      inflightTsnn = null;
-      if (inflightTimer) { try { clearTimeout(inflightTimer); } catch (_) {} inflightTimer = null; }
-      // Re-auth em background (se o problema for token) e força enfileirar já
-      void triggerReauth("watchdog-tx-stalled");
-      void tickEnqueuePolling();
-      void processNextCommand();
-    } else {
-      pushLog("error", "system", "[WATCHDOG] 3 reinícios falharam. Enviando alerta WhatsApp...");
-      void sendTxStalledCriticalAlert(silenceMs / 1000);
-      watchdogRestartCount = 0; // reseta para poder tentar de novo depois
-    }
-  } catch (e) {
-    try { pushLog("warn", "system", `[WATCHDOG] exception: ${e && e.message || e}`); } catch (_) {}
-  }
-}
-setInterval(watchdogTxTick, WATCHDOG_INTERVAL_MS);
-
-// (contador do watchdog é resetado em processTxQueue após TX bem-sucedido)
 
 function uniqueExistingPythonCandidates(items) {
   const seen = new Set();
@@ -531,224 +263,8 @@ function resolvePythonBridgePath() {
   return resourcePath || devPath;
 }
 
-// v3.25.42: bridge COMPILADA (PyInstaller --onefile --noconsole --name serial_bridge).
-// O .py em texto puro expunha o protocolo inteiro na pasta de instalação; o pacote
-// de distribuição passa a levar só o binário. Fala o MESMO protocolo stdio
-// (READY / RX: / SEND:), então a única diferença é o spawn: `serial_bridge.exe <porta>`
-// em vez de `python serial_bridge_persistent.py <porta>` — e não precisa de Python
-// nem de pyserial na máquina. Se o .exe não estiver presente (dev/macOS, ou pacote
-// antigo), cai no caminho Python de sempre: nunca deixa a fazenda sem bridge.
-function resolveCompiledBridgePath() {
-  try {
-    const exe = process.platform === "win32" ? "serial_bridge.exe" : "serial_bridge";
-    const dirs = [process.resourcesPath, __dirname].filter(Boolean);
-    // v3.25.60: PREFERE o layout PyInstaller --onedir → as dependências ficam numa
-    // subpasta FIXA (resources/serial_bridge/) e NÃO usam %TEMP%\_MEI*. Assim, QUALQUER
-    // limpeza de Temp deixa de derrubar a bridge (bug recorrente da Sykue).
-    for (const d of dirs) {
-      const oneDir = path.join(d, "serial_bridge", exe);
-      if (fs.existsSync(oneDir)) return oneDir;
-    }
-    // Fallback: --onefile legado (serial_bridge.exe na raiz) durante a transição.
-    for (const d of dirs) {
-      const oneFile = path.join(d, exe);
-      if (fs.existsSync(oneFile)) return oneFile;
-    }
-  } catch (_) {}
-  return null;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// v3.25.61 — AUTO-COMPILAÇÃO da bridge (--onedir) no boot, sem AnyDesk.
-// Fazendas que atualizaram de versões antigas têm só o serial_bridge.exe --onefile
-// (depende de %TEMP%\_MEI e falha). Se a pasta onedir não existir, o agente
-// RECOMPILA sozinho com o Python da máquina. Best-effort: qualquer falha (sem
-// Python, sem internet, timeout) NÃO trava — cai no fallback do .exe antigo.
-function findPython() {
-  return new Promise((resolve) => {
-    const { execFile } = require("child_process");
-    const cands = process.platform === "win32"
-      ? [["py", ["-3"]], ["python", []], ["python3", []]]
-      : [["python3", []], ["python", []]];
-    let i = 0;
-    const tryNext = () => {
-      if (i >= cands.length) return resolve(null);
-      const [cmd, prefix] = cands[i++];
-      execFile(cmd, [...prefix, "--version"], { windowsHide: true, timeout: 8_000 }, (err) => {
-        if (!err) resolve({ cmd, prefix });
-        else tryNext();
-      });
-    };
-    tryNext();
-  });
-}
-function execAsync(cmd, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const { execFile } = require("child_process");
-    execFile(cmd, args, { windowsHide: true, ...opts }, (err, stdout, stderr) => {
-      if (err) { err.stdout = stdout; err.stderr = stderr; return reject(err); }
-      resolve({ stdout, stderr });
-    });
-  });
-}
-async function checkCommand(cmd, args) {
-  try { await execAsync(cmd, args, { timeout: 20_000 }); return true; } catch (_) { return false; }
-}
-function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const https = require("https"); const http = require("http"); const fs = require("fs");
-    const doGet = (u, redirects) => {
-      const lib = u.startsWith("https:") ? https : http;
-      lib.get(u, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) {
-          res.resume(); return doGet(res.headers.location, redirects - 1);
-        }
-        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-        const f = fs.createWriteStream(dest);
-        res.pipe(f);
-        f.on("finish", () => f.close((e) => (e ? reject(e) : resolve())));
-        f.on("error", reject);
-      }).on("error", reject);
-    };
-    doGet(url, 5);
-  });
-}
-
-// v3.25.62: fonte do .py só como ÚLTIMO fallback (compile local). O caminho normal
-// baixa a pasta JÁ COMPILADA (zip) via signed URL — não expõe o .py, não precisa
-// de Python/PyInstaller. Path no bucket agent-releases.
-const BRIDGE_PY_URL = "https://raw.githubusercontent.com/Engpaulogabriel/platform-replica-buddy/main/electron-agent/app/serial_bridge_persistent.py";
-// Caminho no bucket agent-releases (assinado por agent-release-signed-url via `path`).
-const BRIDGE_ZIP_STORAGE_PATH = "bridge-releases/serial_bridge_onedir_win64.zip";
-let bridgeVersion = null; // versão da bridge (de version.txt no zip), se houver
-
-// Baixa um .zip de `url` e extrai em `destDir` (PowerShell Expand-Archive), apagando
-// o .zip ao final. Retorna o caminho onde ficou a pasta extraída (destDir).
-async function downloadAndExtractZip(url, destDir) {
-  const fs = require("fs");
-  const zipPath = path.join(app.getPath("userData"), "updates", "_bridge_dl.zip");
-  try { fs.mkdirSync(path.dirname(zipPath), { recursive: true }); } catch (_) {}
-  await withCloudTimeout(downloadFile(url, zipPath), "zip download", 120_000);
-  const st = fs.statSync(zipPath);
-  if (st.size < 200 * 1024) { try { fs.unlinkSync(zipPath); } catch (_) {} throw new Error(`zip pequeno (${st.size}B)`); }
-  try { fs.rmSync(destDir, { recursive: true, force: true }); } catch (_) {}
-  await execAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-    `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force`],
-    { windowsHide: true, timeout: 120_000 });
-  try { fs.unlinkSync(zipPath); } catch (_) {}
-  return destDir;
-}
-
-// Baixa o zip da pasta onedir (Storage, via signed URL) e extrai em
-// resources/serial_bridge/. Retorna true se ficou com serial_bridge.exe.
-async function _downloadBridgeOnedir(resourcesDir, onedirExe) {
-  const fs = require("fs");
-  const res = await requestAgentReleaseSignedUrl(null, "BRIDGE-DL", BRIDGE_ZIP_STORAGE_PATH);
-  if (!res.ok || !res.signed || !res.signed.url) {
-    pushLog("warn", "bridge", `[BRIDGE-DL] signed-url indisponível (${res.status}: ${res.text || "sem url"})`);
-    return false;
-  }
-  const staging = path.join(resourcesDir, "serial_bridge.dl");
-  try { await downloadAndExtractZip(res.signed.url, staging); }
-  catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] download/extração falhou: ${(e && e.message) || e}`); try { fs.rmSync(staging, { recursive: true, force: true }); } catch (_) {} return false; }
-
-  // o zip pode conter serial_bridge/ dentro ou os arquivos direto.
-  let newRoot = staging;
-  if (!fs.existsSync(path.join(newRoot, "serial_bridge.exe")) &&
-      fs.existsSync(path.join(staging, "serial_bridge", "serial_bridge.exe"))) {
-    newRoot = path.join(staging, "serial_bridge");
-  }
-  if (!fs.existsSync(path.join(newRoot, "serial_bridge.exe"))) {
-    pushLog("warn", "bridge", "[BRIDGE-DL] zip sem serial_bridge.exe");
-    try { fs.rmSync(staging, { recursive: true, force: true }); } catch (_) {}
-    return false;
-  }
-  const targetDir = path.join(resourcesDir, "serial_bridge");
-  try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch (_) {}
-  try { fs.renameSync(newRoot, targetDir); }
-  catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] mover pasta falhou: ${(e && e.message) || e}`); return false; }
-  try { fs.rmSync(staging, { recursive: true, force: true }); } catch (_) {}
-
-  // Versionamento (item 7): se o zip trouxe version.txt, registra a versão da bridge.
-  try {
-    const vf = path.join(targetDir, "version.txt");
-    if (fs.existsSync(vf)) {
-      const bv = String(fs.readFileSync(vf, "utf8")).trim().slice(0, 40);
-      if (bv) { bridgeVersion = bv; pushLog("info", "bridge", `[BRIDGE-DL] versão da bridge: ${bv}`); }
-    }
-  } catch (_) {}
-  return fs.existsSync(onedirExe);
-}
-
-// FALLBACK (v3.25.61): compila a bridge --onedir com o Python da máquina.
-async function _compileBridgeOnedir(resourcesDir, onedirExe) {
-  const fs = require("fs");
-  let py;
-  try { py = await findPython(); } catch (_) { py = null; }
-  if (!py) { pushLog("warn", "bridge", "[BRIDGE-AUTOCOMPILE] Python não encontrado"); return false; }
-  const run = (extra, opts) => execAsync(py.cmd, [...py.prefix, ...extra], opts);
-  try {
-    if (!(await checkCommand(py.cmd, [...py.prefix, "-m", "PyInstaller", "--version"]))) {
-      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Instalando pyserial + pyinstaller...");
-      await run(["-m", "pip", "install", "--user", "pyserial", "pyinstaller"], { timeout: 120_000 });
-    }
-    let pyFile = (typeof PYTHON_BRIDGE === "string" && PYTHON_BRIDGE && fs.existsSync(PYTHON_BRIDGE)) ? PYTHON_BRIDGE : null;
-    let downloaded = null;
-    if (!pyFile) {
-      downloaded = path.join(resourcesDir, "_bridge_build.py");
-      pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Baixando fonte da bridge (fallback)...");
-      await downloadFile(BRIDGE_PY_URL, downloaded);
-      pyFile = downloaded;
-    }
-    pushLog("info", "bridge", "[BRIDGE-AUTOCOMPILE] Compilando serial_bridge (--onedir)...");
-    await run(
-      ["-m", "PyInstaller", "--onedir", "--noconsole", "--name", "serial_bridge",
-       "--clean", "--distpath", resourcesDir, "--workpath", path.join(resourcesDir, "build"),
-       "--specpath", resourcesDir, pyFile],
-      { timeout: 180_000, cwd: resourcesDir },
-    );
-    try { fs.rmSync(path.join(resourcesDir, "build"), { recursive: true, force: true }); } catch (_) {}
-    try { fs.unlinkSync(path.join(resourcesDir, "serial_bridge.spec")); } catch (_) {}
-    if (downloaded) { try { fs.unlinkSync(downloaded); } catch (_) {} }
-    return fs.existsSync(onedirExe);
-  } catch (e) {
-    pushLog("error", "bridge", `[BRIDGE-AUTOCOMPILE] erro: ${(e && e.message) || e}`);
-    try { fs.rmSync(path.join(resourcesDir, "build"), { recursive: true, force: true }); } catch (_) {}
-    return false;
-  }
-}
-
-async function ensureBridgeOnedir() {
-  if (process.platform !== "win32") return;
-  const fs = require("fs");
-  const resourcesDir = process.resourcesPath || __dirname;
-  const onedirExe = path.join(resourcesDir, "serial_bridge", "serial_bridge.exe");
-  if (fs.existsSync(onedirExe)) return; // já tem onedir → nada a fazer
-
-  // 1) CAMINHO NORMAL: baixa a pasta JÁ COMPILADA (zip) via signed URL — seguro
-  // (não expõe o .py) e não precisa de Python na fazenda.
-  pushLog("info", "bridge", "[BRIDGE] serial_bridge/ ausente — baixando zip pré-compilado (Storage)...");
-  let ok = false;
-  try { ok = await _downloadBridgeOnedir(resourcesDir, onedirExe); }
-  catch (e) { pushLog("warn", "bridge", `[BRIDGE-DL] exceção: ${(e && e.message) || e}`); }
-  if (ok) { COMPILED_BRIDGE = onedirExe; pushLog("info", "bridge", "[BRIDGE] ✅ onedir instalada via download (Storage)"); return; }
-
-  // 2) FALLBACK: sem internet/Starlink em espera → compila com Python local.
-  pushLog("warn", "bridge", "[BRIDGE] download indisponível — fallback: compilar com Python local...");
-  try { ok = await _compileBridgeOnedir(resourcesDir, onedirExe); }
-  catch (_) { ok = false; }
-  if (ok && fs.existsSync(onedirExe)) {
-    COMPILED_BRIDGE = onedirExe;
-    pushLog("info", "bridge", "[BRIDGE] ✅ onedir compilada localmente (fallback)");
-  } else {
-    // 3) ambos falharam → segue com o .exe antigo (onefile) se existir; senão bridge_dead.
-    pushLog("error", "bridge", "[BRIDGE] ❌ download e compilação falharam — usando fallback do .exe antigo");
-  }
-}
-
 const PYTHON_BRIDGE = resolvePythonBridgePath();
-let COMPILED_BRIDGE = resolveCompiledBridgePath();
-const AGENT_VERSION = require("./package.json").version;
+const AGENT_VERSION = "3.12.1";
 const LOG_RETENTION_DAYS = 7;
 const LOG_FILE_MAX_BYTES = 50 * 1024 * 1024; // 50MB por arquivo
 const MEMORY_CLEANUP_INTERVAL_MS = 30 * 60 * 1000; // 30min
@@ -756,22 +272,10 @@ const BRIDGE_PING_INTERVAL_MS = 10_000;
 const BRIDGE_PING_TIMEOUT_MS = 4_000;
 const AUTO_RESET_TIMEOUT_THRESHOLD = 3;
 const BRIDGE_RESET_SETTLE_MS = 800;
-// v3.25.49 — supervisão da bridge: auto-recovery com backoff, COM travada e morte silenciosa.
-const BRIDGE_BACKOFF_MS = [3000, 5000, 10000, 15000, 30000]; // 3→5→10→15→30s
-const BRIDGE_MAX_RELAUNCH = 5;
-const COM_STUCK_MS = 60_000;   // bridge aberta mas sem RX por 60s = COM travada
-const COM_STUCK_MAX = 3;       // 3 travamentos na mesma COM → tenta a próxima
-const COM_CYCLE = ["COM1","COM2","COM3","COM4","COM5","COM6","COM7","COM8","COM9","COM10","COM11","COM12","COM13","COM14","COM15"];
-let bridgeRelaunchAttempts = 0;
-let bridgeRelaunchTimer = null;
-let bridgeDead = false;        // 5 tentativas falharam → serial morta; polling HTTP segue
-let comStuckCount = 0;
 const LOG_FLUSH_MAX_BUFFER = 50;
-// v3.25.39 HARDENING: teto de 10s em TODA chamada de nuvem (Starlink standby).
-// Nuvem é best-effort: se estourar, loga e segue operação local (COM). Nunca bloqueia.
-const CLOUD_READ_TIMEOUT_MS = 8_000;   // era 15s
-const CLOUD_WRITE_TIMEOUT_MS = 8_000;  // era 15s
-const CLOUD_LOGIN_TIMEOUT_MS = 10_000; // era 30s
+const CLOUD_READ_TIMEOUT_MS = 15_000;
+const CLOUD_WRITE_TIMEOUT_MS = 15_000;
+const CLOUD_LOGIN_TIMEOUT_MS = 30_000;
 const CLOUD_TELEMETRY_TIMEOUT_MS = 8_000; // 8s para gravacao IMEDIATA de estado
 const TELEMETRY_QUEUE_MAX = 500;
 const TELEMETRY_RETRY_MS = 3_000; // fila so eh fallback - retry rapido
@@ -782,369 +286,6 @@ const CLOUD_READ_BACKOFF_MS = 15_000;
 // e isso fazia o sistema "travar" quando a janela ficava minimizada.
 const POLLING_ENQUEUE_INTERVAL_MS = 11_000;
 const POLLING_TIMEOUT_SWEEP_MS = 5_000;
-// v3.12.2 — Configuração remota (tabela agent_config). Os valores abaixo
-// começam com os defaults compilados e são sobrescritos a cada hot-reload
-// (a cada 60s) pelo registro de agent_config da fazenda.
-let activePollingEnqueueIntervalMs = POLLING_ENQUEUE_INTERVAL_MS;
-let activeSweepTimeoutMs = POLLING_TIMEOUT_SWEEP_MS;
-
-// ─── v3.25.39 HARDENING: modo degradado + watchdog interno + liveness ───────
-const DEGRADED_RTT_MS = 2_000;             // RTT de nuvem acima disto → modo degradado
-const DEGRADED_POLL_MS = 15_000;           // polling HTTP mais lento em degradado
-const REALTIME_MAX_FAILS = 3;              // 3 quedas seguidas de Realtime → desliga, só HTTP
-const INTERNAL_WATCHDOG_INTERVAL_MS = 60_000;
-const INTERNAL_WATCHDOG_MAX_STRIKES = 3;   // bridge caído 3 ciclos (3min) → relaunch do processo
-const LIVENESS_INTERVAL_MS = 30_000;       // escrita do liveness.txt (o watchdog .bat lê o mtime)
-let degradedMode = false;
-let lastCloudRttMs = 0;
-let realtimeConsecutiveFails = 0;
-let realtimeDisabled = false;              // após REALTIME_MAX_FAILS: opera só por polling HTTP
-let internalWatchdogTimer = null;
-let internalWatchdogStrikes = 0;
-let bridgeWasEverReady = false;            // só escala p/ relaunch se a bridge já funcionou nesta sessão
-
-// LIVENESS: o watchdog externo (.bat) lê o mtime deste arquivo. Escrito a cada 30s
-// pelo timer indestrutível de site_health. Se parar de ser atualizado por >5min, o
-// agente está congelado (deadlock/leak) e o .bat mata+relança. (boot.log NÃO serve:
-// só é escrito no boot, então um agente saudável nunca o toca → mataria em falso.)
-const LIVENESS_FILE = process.resourcesPath
-  ? path.join(process.resourcesPath, "..", "liveness.txt")   // C:\Renov\liveness.txt
-  : path.join(app.getPath("userData"), "liveness.txt");
-function writeLiveness() {
-  try { fs.writeFileSync(LIVENESS_FILE, new Date().toISOString()); } catch (_) {}
-}
-
-// ─── v3.25.42 BLOQUEIO PERMANENTE (kill-file) ───────────────────────────────
-// Clone detectado ou app.asar adulterado NÃO podem terminar em "encerra e o
-// watchdog ressuscita" — o watchdog .bat relança todo processo ausente, então
-// sem isto o agente comprometido voltaria a cada minuto num laço. O flag em
-// disco (ao lado do liveness.txt, mesma pasta de instalação) é a trava:
-//   • o watchdog .bat vê o arquivo e NÃO relança;
-//   • o próprio agente checa no boot e recusa iniciar a operação.
-// Some apenas por ação humana: apagar o arquivo = reconfiguração autorizada.
-let agentBlocked = false;
-// ─── v3.25.48 KILL-SWITCH DO ENFORCEMENT DE SEGURANÇA ───────────────────────
-// Desativa TODOS os bloqueios de segurança que podem PARAR uma fazenda por falso
-// positivo: anti-clone por hardware (agent_hardware), anti-clone server-side
-// (license-validate machine_mismatch) e integridade do asar contra o banco
-// (verifyAsarAgainstServer / asar_tampered). Com o flag OFF os checks ainda RODAM
-// e LOGAM (warn), mas NUNCA chamam blockAgentPermanently — a operação das bombas
-// jamais é interrompida por essas heurísticas. Ativar novamente só após testar a
-// causa raiz dos falsos positivos (hash de release divergente, wmic ausente etc.).
-// NÃO afeta a revogação/suspensão EXPLÍCITA de licença pelo servidor (billing).
-const SECURITY_BLOCK_ENFORCEMENT = false;
-const BLOCK_FLAG_FILE = process.resourcesPath
-  ? path.join(process.resourcesPath, "..", "agent-blocked.flag")
-  : path.join(app.getPath("userData"), "agent-blocked.flag");
-
-function readBlockFlag() {
-  try {
-    if (!fs.existsSync(BLOCK_FLAG_FILE)) return null;
-    return JSON.parse(fs.readFileSync(BLOCK_FLAG_FILE, "utf8"));
-  } catch (_) {
-    return { reason: "unknown", at: null }; // arquivo corrompido ainda bloqueia
-  }
-}
-
-function writeBlockFlag(reason, details) {
-  // v3.25.48: NO-OP. O kill-file local NUNCA mais é criado — proteção local não
-  // agrega (admin local contorna) e já parou fazenda por falso positivo. Toda
-  // trava de segurança agora é ONLINE (server-side revoga o token). Mantida a
-  // assinatura para não quebrar chamadores; o boot ainda APAGA qualquer flag
-  // remanescente de versões antigas (ver readBlockFlag/boot self-heal).
-  void reason; void details;
-}
-
-// Encerra a operação de forma DEFINITIVA: sem relaunch, sem watchdog, sem OTA.
-// Diferente de relaunchAgent() — aqui a intenção é justamente NÃO voltar.
-async function blockAgentPermanently(reason, humanMsg, details) {
-  if (agentBlocked) return;
-  agentBlocked = true;
-  writeBlockFlag(reason, details);
-  try { pushLog("error", "system", `[SECURITY] BLOQUEIO PERMANENTE (${reason}): ${humanMsg}`); } catch (_) {}
-  try { _bootLog(`[SECURITY] BLOQUEIO PERMANENTE (${reason})`); } catch (_) {}
-
-  // Nenhuma bomba pode ser comandada a partir daqui: derruba a fila e a bridge.
-  try { txQueue.length = 0; } catch (_) {}
-  try { pollingPaused = true; } catch (_) {}
-  try { void stopBridge(); } catch (_) {}
-
-  // Alerta WhatsApp (best-effort, 3s) — reusa o backend já existente.
-  try {
-    if (farmId && activeSupabaseUrl && activeSupabaseAnonKey) {
-      const baseUrl = String(activeSupabaseUrl).replace(/\/+$/, "");
-      await withCloudTimeout(fetch(`${baseUrl}/functions/v1/whatsapp-automation-notify`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: activeSupabaseAnonKey,
-          Authorization: `Bearer ${activeAccessToken || activeSupabaseAnonKey}`,
-        },
-        body: JSON.stringify({
-          type: "alert",
-          immediate: true,
-          source: "agent_security",
-          alert_type: "agent_security_block",
-          farm_id: farmId,
-          equipment_name: "Sistema",
-          message: `ALERTA SEGURANCA: ${humanMsg} A operacao foi BLOQUEADA nesta fazenda.`,
-          metadata: { reason, details: details || null, agent_version: AGENT_VERSION },
-        }),
-      }), "security-block-alert", 3_000);
-    }
-  } catch (_) {}
-
-  // Popup NÃO-bloqueante (showMessageBox é assíncrono; showErrorBox congelaria
-  // o processo até alguém clicar — inaceitável em PC desatendido).
-  try {
-    if (tray) setTrayStatus("BLOQUEADO");
-    trayNotify("RENOV Agent - BLOQUEADO",
-      "Arquivo do sistema foi modificado. Contate o suporte RENOV.", "error");
-    void dialog.showMessageBox({
-      type: "error",
-      title: "RENOV - Sistema bloqueado",
-      message: "Arquivo do sistema foi modificado. Contate o suporte RENOV.",
-      detail: `Motivo: ${reason}\nA operacao das bombas foi bloqueada por seguranca.`,
-      buttons: ["OK"],
-      noLink: true,
-    });
-  } catch (_) {}
-}
-
-// MODO DEGRADADO: polling HTTP mais lento quando o RTT da nuvem está alto (Starlink standby).
-function applyDegradedPolling() {
-  const target = degradedMode ? DEGRADED_POLL_MS : activePollingEnqueueIntervalMs;
-  if (pollingEnqueueTimer && pollingEnqueueTimer._renovIntervalMs === target) return;
-  if (pollingEnqueueTimer) { clearInterval(pollingEnqueueTimer); pollingEnqueueTimer = null; }
-  pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, target);
-  try { pollingEnqueueTimer._renovIntervalMs = target; } catch (_) {}
-  try { pushLog("info", "system", `[DEGRADED] polling HTTP → ${target}ms (RTT ${lastCloudRttMs}ms, degradado=${degradedMode})`); } catch (_) {}
-}
-function noteCloudRtt(ms) {
-  lastCloudRttMs = ms;
-  const was = degradedMode;
-  if (!degradedMode && ms > DEGRADED_RTT_MS) degradedMode = true;         // entra > 2000ms
-  else if (degradedMode && ms < DEGRADED_RTT_MS * 0.6) degradedMode = false; // sai < 1200ms (histerese)
-  if (degradedMode !== was) applyDegradedPolling();
-}
-
-// WATCHDOG INTERNO: relaunch do processo se a bridge ficar caída ~3min (deadlock/leak
-// que o recoverBridge não resolve). Complementa o watchdog de bridge (PING→recoverBridge)
-// e o externo (.bat/liveness). Um setInterval JS NÃO detecta freeze do event-loop (não
-// dispara) — por isso o liveness externo é o detector real de freeze; este cobre bridge travada.
-function stopInternalWatchdog() {
-  if (internalWatchdogTimer) { clearInterval(internalWatchdogTimer); internalWatchdogTimer = null; }
-  internalWatchdogStrikes = 0;
-}
-function startInternalWatchdog() {
-  stopInternalWatchdog();
-  internalWatchdogTimer = setInterval(() => {
-    if (appClosing || portManuallyClosed || bridgeStopping || bridgeRecovering) { internalWatchdogStrikes = 0; return; }
-    if (bridgeReady) { internalWatchdogStrikes = 0; return; }
-    if (!bridgeWasEverReady) return; // bridge nunca subiu → hardware/porta, não travamento
-    internalWatchdogStrikes++;
-    try { pushLog("warn", "system", `[WATCHDOG-INT] bridge não-pronta há ${internalWatchdogStrikes} ciclo(s) de 60s`); } catch (_) {}
-    if (internalWatchdogStrikes >= INTERNAL_WATCHDOG_MAX_STRIKES) {
-      try { pushLog("error", "system", "[WATCHDOG-INT] bridge travada ~3min — relaunch do processo"); } catch (_) {}
-      void relaunchAgent("watchdog_relaunch", 0);
-    }
-  }, INTERNAL_WATCHDOG_INTERVAL_MS);
-}
-
-// ─── v3.25.40 HARDENING #6/#7/#8/#12: auto-recuperação sem intervenção ──────
-// Cenário-alvo: Starlink 200kbps, sem AnyDesk, sem acesso remoto ao desktop.
-// TODA saída do processo (restart preventivo, memory guard, exceção não tratada,
-// watchdog interno, OTA, restart remoto) passa por relaunchAgent(): ele loga,
-// avisa a nuvem ("estou morrendo"), descarrega o log e SÓ ENTÃO faz
-// relaunch+exit. Nenhum caminho pode terminar em morte permanente.
-const DYING_ALERT_TIMEOUT_MS = 3_000;
-const PREVENTIVE_RESTART_HOUR = 3;                    // 03:00 horário LOCAL da máquina
-const PREVENTIVE_CHECK_INTERVAL_MS = 60_000;
-const PREVENTIVE_MAX_DEFER_MS = 2 * 60 * 60 * 1000;   // adia no máx. 2h (até ~05:00)
-const MEMORY_GUARD_INTERVAL_MS = 5 * 60 * 1000;
-const MEMORY_GUARD_HEAP_MB = 500;
-const MEMORY_GUARD_RSS_RATIO = 0.70;                  // ou 70% da RAM física
-const UNHANDLED_REJECTION_WINDOW_MS = 5 * 60 * 1000;
-const UNHANDLED_REJECTION_MAX = 3;
-
-let relaunchInProgress = false;
-let dyingAlertSent = false;
-let preventiveRestartTimer = null;
-let preventiveRestartDoneDay = null;    // "YYYY-MM-DD" da janela 03:00 já tratada
-let preventiveRestartPendingSince = 0;  // >0 = esperando atuação ativa terminar
-let memoryGuardTimer = null;
-const unhandledRejectionTimes = [];
-
-function fmtBrTimestamp(d) {
-  try { return new Date(d).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }); }
-  catch (_) { try { return new Date(d).toISOString(); } catch (__) { return String(d); } }
-}
-
-// #12 "ESTOU MORRENDO" — POST best-effort (3s) para o backend de WhatsApp que já
-// existe (whatsapp-automation-notify, verify_jwt=false; destinatários saem de
-// whatsapp_operators da fazenda). Sem internet o timeout dispara, loga e o
-// restart segue — NUNCA trava a saída do processo.
-async function notifyAgentDying(reason) {
-  if (dyingAlertSent) return;
-  dyingAlertSent = true;
-  const nowIso = new Date().toISOString();
-  try { pushLog("warn", "system", `[DYING] Motivo: ${reason} — avisando a nuvem (timeout 3s)`); } catch (_) {}
-  try { _bootLog(`[DYING] ${reason}`); } catch (_) {}
-  if (!farmId || !activeSupabaseUrl || !activeSupabaseAnonKey) return;
-  const baseUrl = String(activeSupabaseUrl).replace(/\/+$/, "");
-  try {
-    await withCloudTimeout(fetch(`${baseUrl}/functions/v1/whatsapp-automation-notify`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: activeSupabaseAnonKey,
-        Authorization: `Bearer ${activeAccessToken || activeSupabaseAnonKey}`,
-      },
-      body: JSON.stringify({
-        type: "alert",
-        immediate: true,
-        source: "agent_dying",
-        alert_type: "agent_dying",
-        farm_id: farmId,
-        equipment_name: "Sistema",
-        message: `⚠️ RENOV: Agente reiniciou. Motivo: ${reason}. Horário: ${fmtBrTimestamp(nowIso)} (v${AGENT_VERSION})`,
-        metadata: { reason, timestamp: nowIso, agent_version: AGENT_VERSION },
-      }),
-    }), "agent_dying", DYING_ALERT_TIMEOUT_MS);
-    try { pushLog("info", "system", "[DYING] Alerta enviado"); } catch (_) {}
-  } catch (e) {
-    try { pushLog("warn", "system", `[DYING] Alerta não enviado (${formatError(e)}) — reiniciando mesmo assim`); } catch (_) {}
-  }
-}
-
-// Saída ÚNICA do processo. `reason` é o que vai no alerta #12:
-// memory_guard | watchdog_relaunch | unhandled_exception | preventive_restart |
-// manual_restart | update_agent
-async function relaunchAgent(reason, exitCode) {
-  const code = Number.isFinite(exitCode) ? exitCode : 0;
-  // Guarda de reentrância. Em try/catch porque num crash MUITO precoce (antes da
-  // avaliação deste módulo) o acesso à variável lançaria TDZ — e um throw aqui
-  // viraria outro uncaughtException, criando loop infinito sem nunca sair.
-  try {
-    if (relaunchInProgress) return;
-    relaunchInProgress = true;
-  } catch (_) {}
-  try { pushLog("warn", "system", `[RESTART] Reiniciando agente — motivo: ${reason}`); } catch (_) {}
-  try { await notifyAgentDying(reason); } catch (_) {}
-  // flushLogs é best-effort e vai à nuvem: teto de 2s para não segurar a saída.
-  try { await withCloudTimeout(flushLogs(), "flush-logs-exit", 2_000); } catch (_) {}
-  try { writeLiveness(); } catch (_) {}
-  try { app.relaunch(); app.exit(code); }
-  catch (_) { try { process.exit(code); } catch (__) {} }
-}
-
-// #8 — exceção não tratada: log fatal + alerta + relaunch (NUNCA exit puro).
-function handleFatalError(reason, err) {
-  const msg = (err && (err.stack || err.message)) || String(err);
-  try { pushLog("error", "system", `[FATAL] Uncaught: ${msg}`); } catch (_) {}
-  // Crash muito cedo no boot = provável loop de inicialização. Espera 10s antes
-  // de relançar para não queimar CPU; o backoff do watchdog .bat cobre o resto.
-  const delay = (Date.now() - _PROCESS_START_MS) < 20_000 ? 10_000 : 0;
-  setTimeout(() => { void relaunchAgent(reason, 1); }, delay);
-}
-
-// unhandledRejection NÃO é um crash: o processo segue íntegro. Reiniciar a cada
-// `void promise()` rejeitada (fetch de nuvem em Starlink) derrubaria a operação
-// o tempo todo. Loga toda ocorrência como fatal e só escala para restart quando
-// vira padrão: 3 rejeições em 5 min.
-function noteUnhandledRejection(err) {
-  const msg = (err && (err.stack || err.message)) || String(err);
-  try { pushLog("error", "system", `[FATAL] Unhandled rejection: ${msg}`); } catch (_) {}
-  const now = Date.now();
-  unhandledRejectionTimes.push(now);
-  while (unhandledRejectionTimes.length && now - unhandledRejectionTimes[0] > UNHANDLED_REJECTION_WINDOW_MS) {
-    unhandledRejectionTimes.shift();
-  }
-  if (unhandledRejectionTimes.length >= UNHANDLED_REJECTION_MAX) {
-    try { pushLog("error", "system", `[FATAL] ${unhandledRejectionTimes.length} rejeições não tratadas em 5min — reiniciando`); } catch (_) {}
-    void relaunchAgent("unhandled_exception", 1);
-  }
-}
-
-// #6 — o restart preventivo NUNCA interrompe uma atuação em curso (bomba
-// ligando/desligando, reforço manual, safety armado, OTA). Espera terminar.
-function describeActiveActuation() {
-  try {
-    if (isInstallingUpdate) return "OTA em instalação";
-    if (forcedShutdownActive) return "desligamento forçado em curso";
-    if (manualReinforceByEquipment.size > 0) return `${manualReinforceByEquipment.size} reforço(s) manual(is) ativo(s)`;
-    if (safetyByEquipment.size > 0) return `${safetyByEquipment.size} safety timer(s) armado(s)`;
-    if (inflightManual) return "frame manual aguardando resposta";
-    if (inflightCmd && inflightCmd.type && inflightCmd.type !== "polling") return `comando ${inflightCmd.type} em voo`;
-    const naFila = txQueue.filter((i) => i && i.priority !== "polling").length;
-    if (naFila > 0) return `${naFila} TX não-polling na fila`;
-  } catch (_) {}
-  return null;
-}
-
-function startPreventiveRestart() {
-  if (preventiveRestartTimer) return;
-  preventiveRestartTimer = setInterval(() => {
-    try {
-      if (relaunchInProgress || appClosing) return;
-      const day = todayStr();
-      if (!preventiveRestartPendingSince) {
-        if (new Date().getHours() !== PREVENTIVE_RESTART_HOUR) return;
-        if (preventiveRestartDoneDay === day) return;
-        preventiveRestartDoneDay = day;
-        preventiveRestartPendingSince = Date.now();
-        try { pushLog("info", "system", "[PREVENTIVE] Restart diário agendado às 03:00"); } catch (_) {}
-      }
-      const busy = describeActiveActuation();
-      if (busy) {
-        const waited = Date.now() - preventiveRestartPendingSince;
-        if (waited > PREVENTIVE_MAX_DEFER_MS) {
-          preventiveRestartPendingSince = 0;
-          try { pushLog("warn", "system", `[PREVENTIVE] Adiado ${Math.round(waited / 60000)}min (${busy}) — cancelado até amanhã`); } catch (_) {}
-          return;
-        }
-        try { pushLog("info", "system", `[PREVENTIVE] Aguardando atuação terminar: ${busy}`); } catch (_) {}
-        return;
-      }
-      preventiveRestartPendingSince = 0;
-      void relaunchAgent("preventive_restart", 0);
-    } catch (_) {}
-  }, PREVENTIVE_CHECK_INTERVAL_MS);
-  try { preventiveRestartTimer.unref?.(); } catch (_) {}
-}
-
-// #7 MEMORY GUARD — a cada 5 min. Dois gatilhos: heap acima do teto absoluto
-// (500MB) OU RSS acima de 70% da RAM física. Previne o OOM que o Windows não
-// recupera. Complementa startAutoRebootWatchdog (que também cobre serial muda).
-function startMemoryGuard() {
-  if (memoryGuardTimer) return;
-  memoryGuardTimer = setInterval(() => {
-    try {
-      if (relaunchInProgress || appClosing) return;
-      const m = process.memoryUsage();
-      const heapMb = Math.round(m.heapUsed / 1024 / 1024);
-      const rssMb = Math.round(m.rss / 1024 / 1024);
-      const totalBytes = os.totalmem() || 0;
-      const ratio = totalBytes > 0 ? m.rss / totalBytes : 0;
-      if (heapMb > MEMORY_GUARD_HEAP_MB) {
-        try { pushLog("error", "system", `[MEMORY] Heap em ${heapMb}mb — excedeu limite. Reiniciando.`); } catch (_) {}
-        void relaunchAgent("memory_guard", 0);
-        return;
-      }
-      if (ratio > MEMORY_GUARD_RSS_RATIO) {
-        const totalMb = Math.round(totalBytes / 1024 / 1024);
-        try { pushLog("error", "system", `[MEMORY] RSS em ${rssMb}mb (${Math.round(ratio * 100)}% de ${totalMb}mb de RAM) — excedeu limite. Reiniciando.`); } catch (_) {}
-        void relaunchAgent("memory_guard", 0);
-      }
-    } catch (_) {}
-  }, MEMORY_GUARD_INTERVAL_MS);
-  try { memoryGuardTimer.unref?.(); } catch (_) {}
-}
-let activeTxGapMs = 100;               // gap mínimo entre TX serial (configurável remotamente)
-let liveAgentConfig = null;            // { serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at }
-let lastAgentConfigUpdatedAt = null;   // string ISO do último updated_at aplicado
-let agentConfigWatchTimer = null;
-const AGENT_CONFIG_POLL_MS = 60_000;
 // v3.8.24 — Modo Startup Sync: nos primeiros 15 min após autenticar, o agente
 // faz polling em rajada (2s) usando uma RPC que monta o frame TX a partir de
 // last_outputs_state (estado real conhecido), em vez de desired_running. Isso
@@ -1155,144 +296,8 @@ const STARTUP_SYNC_INTERVAL_MS = 3_000;
 let agentStartupAt = 0;
 let startupSyncTimer = null;
 let startupSyncEndTimer = null;
-// Duração em que o agente ficou OFFLINE antes deste boot (último heartbeat gravado
-// no site_health vs agora). Se > 15 min, a proteção do PLC (15 min sem comunicação)
-// já desligou as bombas — então QUALQUER bomba encontrada LIGADA no startup sync
-// foi religada na BOTOEIRA (acionamento LOCAL). Capturado 1x no startAgent, ANTES
-// de sobrescrever o site_health.
-let bootOfflineMs = 0;
-let wasOfflineLong = false;
-// v3.25.56 — Timeout de comunicação configurável por fazenda (farms.comm_timeout_minutes).
-// É o tempo SEM comunicação real antes de considerar um equipamento offline — e deve
-// bater com o parâmetro de proteção do PLC. Relido no boot e a cada watch de config
-// (60s), sem OTA. Default 15 min. NÃO é decidido por nº de falhas de polling: o
-// comm_failures/backoff serve APENAS ao reforço de retry, nunca para "offline".
-const COMM_TIMEOUT_DEFAULT_MS = 15 * 60_000;
-let commTimeoutMs = COMM_TIMEOUT_DEFAULT_MS;
-async function refreshCommTimeout() {
-  if (!supabase || !farmId) return;
-  try {
-    const { data, error } = await supabase
-      .from("farms")
-      .select("comm_timeout_minutes, security_phase")
-      .eq("id", farmId)
-      .maybeSingle();
-    if (error || !data) return;
-    const min = Number(data.comm_timeout_minutes);
-    if (Number.isFinite(min) && min > 0) {
-      const next = Math.round(min) * 60_000;
-      if (next !== commTimeoutMs) {
-        pushLog("info", "system", `[CONFIG] comm_timeout_minutes = ${Math.round(min)} min (offline por TEMPO, não por falhas)`);
-        commTimeoutMs = next;
-      }
-    }
-    // FASE 2 gate — coluna nova; se não existir (banco antigo), fica 0.
-    const phase = Number(data.security_phase);
-    const nextPhase = Number.isFinite(phase) ? phase : 0;
-    if (nextPhase !== farmSecurityPhase) {
-      farmSecurityPhase = nextPhase;
-      pushLog("info", "system", `[SECURITY] security_phase da fazenda = ${farmSecurityPhase}${farmSecurityPhase >= SECURITY_PHASE2_MIN ? " (FASE 2 ATIVA — enforcement OFF)" : " (FASE 2 inativa)"}`);
-    }
-    // FASE 3: o loader.cjs caiu no fallback (main.cjs ofuscado em vez do main.enc
-    // decifrado)? Registra 1x por sessão — aqui supabase/farmId/security_phase já
-    // estão prontos. logSecurityEvent só grava se security_phase >= 2 (Sykue).
-    if (!fase3FallbackLogged && process.env.RENOV_FASE3_FALLBACK_REASON) {
-      fase3FallbackLogged = true;
-      void logSecurityEvent("fase3_fallback", { reason: String(process.env.RENOV_FASE3_FALLBACK_REASON).slice(0, 300) });
-    }
-  } catch (_) { /* mantém o valor atual; coluna security_phase pode não existir ainda */ }
-}
-
-// Grava um evento na trilha agent_security_events. NÃO-FATAL e só quando a FASE 2
-// está ativa (security_phase >= 2). Dedup por tipo (no máx 1 a cada 60s) para não
-// floodar o banco. Enforcement OFF: isto NUNCA bloqueia nada — só registra.
-async function logSecurityEvent(eventType, details) {
-  try {
-    if (farmSecurityPhase < SECURITY_PHASE2_MIN) return;
-    if (!supabase || !farmId) return;
-    const now = Date.now();
-    if (lastSecurityEventAt[eventType] && now - lastSecurityEventAt[eventType] < 60_000) return;
-    lastSecurityEventAt[eventType] = now;
-    await supabase.from("agent_security_events").insert({
-      farm_id: farmId,
-      event_type: eventType,
-      details: details || {},
-      agent_version: AGENT_VERSION,
-    });
-    pushLog("warn", "system", `[SECURITY] evento registrado: ${eventType}`);
-  } catch (_) { /* trilha é best-effort — nunca afeta a operação */ }
-}
-
-// v3.25.63 — Desligamento PROGRAMADO não é acionamento LOCAL. Cache das regras
-// (scheduled_automations) da fazenda; se uma bomba desligar dentro da janela de
-// execução de uma regra ativa (do horário até fim das retentativas + folga), o
-// agente NÃO marca 'local' (badge some, relatório fica 'Automático'). Independe do
-// cache de forced_shutdown_enabled (que podia estar defasado — causa da regressão).
-let scheduledAutomationsCache = [];
-async function refreshScheduledAutomations() {
-  if (!supabase || !farmId) return;
-  try {
-    const { data } = await supabase
-      .from("scheduled_automations")
-      .select("time_brt, days_of_week, max_retries, retry_interval_min, is_active")
-      .eq("farm_id", farmId)
-      .eq("is_active", true);
-    scheduledAutomationsCache = (data || []).filter((a) => a && a.time_brt);
-  } catch (_) { /* mantém o cache atual */ }
-}
-const _DOW_CODES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-function isWithinScheduledShutdownWindow() {
-  if (!scheduledAutomationsCache.length) return false;
-  // America/Bahia = UTC-3 fixo (sem horário de verão).
-  const brt = new Date(Date.now() - 3 * 3600 * 1000);
-  const nowMin = brt.getUTCHours() * 60 + brt.getUTCMinutes();
-  const dow = _DOW_CODES[brt.getUTCDay()];
-  for (const a of scheduledAutomationsCache) {
-    const days = Array.isArray(a.days_of_week) ? a.days_of_week : [];
-    if (days.length && !days.includes(dow)) continue;
-    const m = String(a.time_brt).match(/^(\d{1,2}):(\d{2})/);
-    if (!m) continue;
-    const baseMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
-    const retries = Number(a.max_retries) || 3;
-    const interval = Number(a.retry_interval_min) || 5;
-    const endMin = baseMin + retries * interval + 5; // cobre a sequência de retentativas + folga
-    if (nowMin >= baseMin - 2 && nowMin <= endMin) return true;
-  }
-  return false;
-}
 function isInStartupSyncWindow() {
   return agentStartupAt > 0 && (Date.now() - agentStartupAt) < STARTUP_SYNC_DURATION_MS;
-}
-
-// v3.25.10: PLCs cujo estado já foi confirmado por um RX nesta sessão (TSNN em
-// upper-case). Depois do primeiro RX confirmado de uma PLC, o STARTUP SYNC NÃO
-// deve mais interceptar espontâneos dela — o estado já é conhecido, então
-// mudanças subsequentes vão para a classificação normal (local/remote via
-// applySpontaneousImmediately). Corrige o bug de o startup-sync sincronizar
-// desired_running=true a partir de um acionamento local (botoeira) já depois de
-// o agente ter confirmado o estado da PLC.
-const startupSyncDoneByTsnn = new Set();
-function markStartupSyncDone(tsnn) {
-  if (tsnn) startupSyncDoneByTsnn.add(String(tsnn).toUpperCase());
-}
-function isStartupSyncDone(tsnn) {
-  return !!tsnn && startupSyncDoneByTsnn.has(String(tsnn).toUpperCase());
-}
-
-// v3.25.39 HARDENING: notificação NÃO-bloqueante (balão no tray) + log em disco.
-// Substitui os dialog.showErrorBox SÍNCRONOS, que congelavam o processo até o
-// operador clicar — inaceitável em PC desatendido/Starlink. O único modal mantido
-// é o prompt de LOGIN da reconfiguração (ação voluntária do usuário).
-function trayNotify(title, content, level) {
-  const t = String(title || "RENOV Agent");
-  const c = String(content || "");
-  try { pushLog(level === "error" ? "error" : "warn", "system", `[NOTIFY] ${t}: ${c}`); } catch (_) {}
-  try { if (typeof _bootLog === "function") _bootLog(`[NOTIFY] ${t}: ${c}`); } catch (_) {}
-  try {
-    if (tray && typeof tray.displayBalloon === "function") {
-      tray.displayBalloon({ title: t.slice(0, 60), content: c.slice(0, 240) });
-    }
-  } catch (_) {}
 }
 
 function withCloudTimeout(promise, label, timeoutMs) {
@@ -1323,8 +328,6 @@ let tray = null;
 let setupWindow = null;
 let logWindow = null;
 let configWindow = null;
-// v3.25.46: rótulo de status exibido no menu do tray (o log NUNCA aparece em janela).
-let trayStatusLabel = "Iniciando...";
 let supabase = null;
 let comPort = null;
 let farmId = null;
@@ -1333,14 +336,6 @@ let activeSupabaseAnonKey = SUPABASE_ANON_DEFAULT;
 let activeAccessToken = null;
 let pollTimer = null;
 let heartbeatTimer = null;
-// v3.25.36: timer DEDICADO só do upsert de site_health, independente do
-// sendHeartbeat (que pode travar na validação de licença). + watchdog.
-let siteHealthTimer = null;
-let heartbeatWatchdogTimer = null;
-let lastSiteHealthOkAt = 0;
-// v3.25.37: compliance INEMA — chama inema_snapshot(farmId) periodicamente e alerta 95%.
-let inemaTimer = null;
-const INEMA_CHECK_INTERVAL_MS = 15 * 60_000;
 let logRotationTimer = null;
 let pollingEnqueueTimer = null;
 let pollingTimeoutTimer = null;
@@ -1357,29 +352,9 @@ let appClosing = false;
 // é decidido SOMENTE pelo backend (critical-alerts-tick) com limiar de 15 min.
 // v3.9.21: + registro em automation_log de eventos equipamento_offline /
 // equipamento_online (campo details.tipo_evento) para histórico no relatório.
-const pollingBackoffByTsnn = new Map(); // tsnn -> { failures, offlineSince, offlineLogged, lastSuccessAt, nextRetryAt }
-// v3.25.64: POLLING ADAPTATIVO por PLC sem resposta (pedido do cliente — Sykue).
-// Antes o backoff era por CICLOS e só começava com ≥3 falhas (uma PLC morta ainda
-// era polada todo ciclo até lá, consumindo ~5s de timeout cada e atrasando as PLCs
-// boas). Agora é em TEMPO REAL e adaptativo: após uma falha, re-tenta em 30s; nova
-// falha, 1min; depois 2min; teto 5min — NUNCA desiste. É mais agressivo no início
-// (detecta recuperação rápido) e limitado no tail (não congestiona a serial nem
-// monopoliza o rodízio). O timeout reduzido (5s) para PLC em falha continua valendo.
-// noteBackoffSuccess (qualquer RX) zera tudo e volta ao ciclo normal.
-const BACKOFF_RETRY_SCHEDULE_MS = [30_000, 60_000, 120_000, 300_000]; // 30s, 1min, 2min, 5min (teto)
-function backoffRetryDelayMs(failures) {
-  const i = Math.min(Math.max(0, (failures || 1) - 1), BACKOFF_RETRY_SCHEDULE_MS.length - 1);
-  return BACKOFF_RETRY_SCHEDULE_MS[i];
-}
-function shouldSkipPollingForBackoff(tsnn) {
-  if (!tsnn) return false;
-  const b = pollingBackoffByTsnn.get(String(tsnn));
-  // Sem falha registrada → poll normal (todo ciclo). Só entra em backoff após
-  // ao menos 1 timeout, e libera assim que nextRetryAt vence.
-  if (!b || (b.failures || 0) < 1 || !b.nextRetryAt) return false;
-  if (Date.now() >= b.nextRetryAt) return false; // venceu o intervalo → re-transmite agora
-  return true; // ainda dentro do intervalo de backoff → pula esta rodada
-}
+const pollingBackoffByTsnn = new Map(); // tsnn -> { failures, offlineSince, lastSuccessAt }
+function getBackoffSkipEvery(_failures) { return 1; }
+function shouldSkipPollingForBackoff(_tsnn) { return false; }
 
 // v3.9.30 — Métricas por ciclo de polling. Ciclo = uma rodada de enqueue
 // de pollings pela RPC enqueue_polling_for_due_equipments. Ao detectar uma
@@ -1413,11 +388,7 @@ async function seedBackoffFromCloud() {
       const tsnn = String(row.hw_id || "").substring(0, 4).toUpperCase();
       if (!/^[0-9A-F]{4}$/.test(tsnn) || seeded.has(tsnn)) continue;
       if (!pollingBackoffByTsnn.has(tsnn)) {
-        // failures=6 (>3) mantém o timeout reduzido de 5s; nextRetryAt=0 permite
-        // polar já no startup para detectar recuperação. offlineLogged=false: a
-        // queda é anterior a esta sessão (já offline no banco) → não re-loga offline
-        // nem gera "online" órfão se voltar; o 1º RX zera tudo via noteBackoffSuccess.
-        pollingBackoffByTsnn.set(tsnn, { failures: 6, offlineSince: null, offlineLogged: false, lastSuccessAt: null, nextRetryAt: 0 });
+        pollingBackoffByTsnn.set(tsnn, { failures: 6, offlineSince: Date.now(), lastSuccessAt: null });
         seeded.add(tsnn);
       }
     }
@@ -1494,50 +465,40 @@ function noteBackoffSuccess(tsnn) {
     pushLog("info", "system",
       `[POLLING] TSNN ${tsnn} voltou a comunicar apos ${b.failures} tentativas sem resposta`);
     if (b.failures >= 3) void updatePlcCommStatus(tsnn, "online");
-    // Só registra "equipamento_online" se um "equipamento_offline" foi logado
-    // (≥3 falhas). Recuperação com 1-2 falhas não gerou queda → não gera volta
-    // (evita evento órfão no relatório).
-    if (b.offlineLogged && b.offlineSince) {
+    if (b.offlineSince) {
       const tempoTotal = Math.floor((Date.now() - b.offlineSince) / 1000);
       void logCommEventToAutomationLog(tsnn, "equipamento_online", {
         tempo_total_offline_segundos: tempoTotal,
         tentativas_sem_resposta: b.failures,
       });
     }
+    pollingBackoffByTsnn.set(tsnn, { failures: 0, offlineSince: null, lastSuccessAt: Date.now() });
+  } else {
+    pollingBackoffByTsnn.set(tsnn, { failures: 0, offlineSince: null, lastSuccessAt: Date.now() });
   }
-  pollingBackoffByTsnn.set(tsnn, { failures: 0, offlineSince: null, offlineLogged: false, lastSuccessAt: Date.now(), nextRetryAt: 0 });
 }
 
 function noteBackoffFailure(tsnn) {
   if (!tsnn) return;
-  const prev = pollingBackoffByTsnn.get(tsnn) || { failures: 0, offlineSince: null, offlineLogged: false, lastSuccessAt: null };
-  const failures = (prev.failures || 0) + 1;
+  const prev = pollingBackoffByTsnn.get(tsnn) || { failures: 0, offlineSince: null, lastSuccessAt: null };
   const b = {
-    failures,
-    offlineSince: prev.offlineSince || null,
-    offlineLogged: prev.offlineLogged || false,
+    failures: prev.failures + 1,
+    offlineSince: prev.offlineSince || Date.now(),
     lastSuccessAt: prev.lastSuccessAt || null,
-    nextRetryAt: Date.now() + backoffRetryDelayMs(failures),
   };
-  // ALERTA INTELIGENTE: só registra "equipamento_offline" após 3 tentativas
-  // CONSECUTIVAS com retry (não na 1ª). Uma PLC que perde 1 ciclo de polling e
-  // volta (ciclo normal, ex.: Sykue) NÃO vira "queda" — elimina o flapping que
-  // poluía o Relatório de Comunicação. Aos 3 fracassos (~90s: 30s+60s) é offline real.
-  if (failures === 3 && !b.offlineLogged) {
-    b.offlineLogged = true;
-    b.offlineSince = Date.now();
+  pollingBackoffByTsnn.set(tsnn, b);
+  pushLog("warn", "system",
+    `[POLLING] TSNN ${tsnn} sem resposta (tentativa consecutiva ${b.failures})`);
+  if (b.failures === 1) {
     const lastTs = b.lastSuccessAt ? new Date(b.lastSuccessAt).toISOString() : null;
     const tempoOff = b.lastSuccessAt ? Math.floor((Date.now() - b.lastSuccessAt) / 1000) : null;
     void logCommEventToAutomationLog(tsnn, "equipamento_offline", {
-      tentativas_consecutivas: failures,
+      tentativas_consecutivas: 1,
       ultimo_contato: lastTs,
       tempo_offline_segundos: tempoOff,
     });
-    void updatePlcCommStatus(tsnn, "offline");
   }
-  pollingBackoffByTsnn.set(tsnn, b);
-  pushLog("warn", "system",
-    `[POLLING] TSNN ${tsnn} sem resposta (tentativa consecutiva ${failures}; próximo retry em ${Math.round(backoffRetryDelayMs(failures) / 1000)}s)`);
+  if (b.failures === 3) void updatePlcCommStatus(tsnn, "offline");
 }
 
 // ─── Throttle de sinais espontaneos por TSNN ────────────────────────────────
@@ -1563,15 +524,6 @@ const lastOnConfirmAtByEq = new Map();
 const MAX_PLC_SILENCE_WARN_MS = 12 * 60_000;
 const PLC_SILENCE_CHECK_INTERVAL_MS = 60_000;
 const lastPollAtByTsnn = new Map();
-// v3.25.16: timestamp do ÚLTIMO RX de cada PLC (qualquer RX — espontâneo OU resposta
-// a TX). Prova de vida: se a PLC mandou algo nos últimos HEARTBEAT_POLL_MS, está
-// online e o heartbeat NÃO precisa transmitir polling à toa. Atualizado em
-// processTelemFrame para todo RX válido.
-const lastRxAtByTsnn = new Map();
-// v3.25.40 (#10): ÚLTIMO ESTADO FÍSICO conhecido por PLC (payload do último RX
-// válido). Enquanto a nuvem está fora, este é o estado soberano; quando ela
-// volta, resyncKnownStateToCloud() reenvia isto para o Supabase imediatamente.
-const lastRxStateByTsnn = new Map(); // TSNN -> { payload, frame, at }
 let plcSilenceCheckTimer = null;
 function noteSuccessfulPoll(tsnn) {
   if (!tsnn) return;
@@ -1653,101 +605,6 @@ let inflightTimer = null;     // timer de timeout
 let inflightSpontaneousSeen = false;
 let inflightRetryCount = 0;
 
-// v3.25.7: estado da sequência de desligamento forçado ({1}->RX->10s->{0}).
-// forcedShutdownActive segura a fila (processNextCommand retorna cedo) durante
-// os ~23-36s da sequência, neutralizando o PROCESSING_STUCK_RESET_MS e o pollTimer.
-// forcedShutdownRxWaiter é um waiter one-shot resolvido pelo processTelemFrame
-// quando o RX confirma o bit alvo esperado.
-let forcedShutdownActive = false;
-let forcedShutdownTsnn = null;        // v3.25.32: TSNN em desligamento forçado — suprime o fluxo normal de RX dessa PLC
-let forcedShutdownRxWaiter = null;    // { tsnn, targetIndex, wantBit, resolve }
-
-// v3.25.43: TERMINAL SERIAL REMOTO (substitui o Hércules). Comando da web
-// (agent_commands kind='serial_terminal') tem PRIORIDADE ABSOLUTA: pausa o
-// polling automático, descarta os frames de polling pendentes, escreve o frame
-// direto na serial e captura TUDO que chegar por timeout_ms. Diagnóstico PURO:
-// NÃO toca desired_running / safety / reforço (igual ao Hércules).
-let serialTerminalActive = false;
-// v3.25.43: janela em que um RX de telemetria deve ser atribuído ao TERMINAL
-// (origem 'tech_terminal') em vez de 'local'. Cobre a janela de captura + 3s de
-// graça para o RX atrasado da bomba (a serial é assíncrona). Distinta de
-// serialTerminalActive (que é exata e controla a pausa do polling): a graça
-// evita que a telemetria de confirmação, chegando logo após a janela fechar,
-// seja classificada como acionamento local (botoeira) e gere alarme falso.
-let serialTerminalGraceUntil = 0;
-function isTechTerminalWindow() {
-  return serialTerminalActive || Date.now() < serialTerminalGraceUntil;
-}
-// Buffer de captura do terminal: quando != null, handleRxFrame empilha cada RX.
-// { frames: [{ frame, at }], startedAt }
-let serialCaptureBuf = null;
-// Buffer do sniff PASSIVO (kind='serial_sniff'): captura sem pausar o polling.
-// { frames: [{ frame, at }], startedAt }
-let serialSniffBuf = null;
-
-// v3.25.41: equipamentos cujo desligamento forçado JÁ foi CONFIRMADO (RX bit=0).
-// Enquanto a marca existe: (a) a sequência não é redisparada — a bomba já está
-// desligada; (b) um RX com bit=1 significa religamento LOCAL (botoeira), que
-// NÃO gera reenvio automático, só notificação por WhatsApp.
-// Em memória de propósito: após um restart do agente não há contexto de
-// desligamento forçado pendente, e o estado real volta pelo polling.
-const forcedShutdownDoneByEq = new Map(); // eqId -> { at, tsnn, saida, name }
-const FORCED_RELIT_GRACE_MS = 15_000;     // ignora eco atrasado do {1} da FASE 1
-
-// Notifica religamento local após desligamento forçado. Best-effort (3s):
-// reusa a edge function whatsapp-automation-notify (verify_jwt=false), a mesma
-// usada pelos alertas do agente. Nunca lança e nunca bloqueia o fluxo de RX.
-async function notifyForcedShutdownRelit(eqId, info) {
-  const nome = (info && info.name) || nameForHwId(`${info?.tsnn || ""}${String(info?.saida || 1).padStart(2, "0")}`) || "Bomba";
-  try {
-    pushLog("warn", "system",
-      `[FORCED OFF] ${nome} foi RELIGADO LOCALMENTE após desligamento forçado — sem reenvio automático, notificando`);
-  } catch (_) {}
-  if (!farmId || !activeSupabaseUrl || !activeSupabaseAnonKey) return;
-  const baseUrl = String(activeSupabaseUrl).replace(/\/+$/, "");
-  try {
-    await withCloudTimeout(fetch(`${baseUrl}/functions/v1/whatsapp-automation-notify`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: activeSupabaseAnonKey,
-        Authorization: `Bearer ${activeAccessToken || activeSupabaseAnonKey}`,
-      },
-      body: JSON.stringify({
-        type: "alert",
-        immediate: true,
-        source: "agent_forced_shutdown",
-        alert_type: "forced_shutdown_relit",
-        farm_id: farmId,
-        equipment_id: eqId || null,
-        equipment_name: nome,
-        message: `${nome} foi religado localmente após desligamento forçado.`,
-        metadata: { tsnn: info?.tsnn || null, saida: info?.saida || null, agent_version: AGENT_VERSION },
-      }),
-    }), "forced-shutdown-relit", 3_000);
-  } catch (e) {
-    try { pushLog("warn", "cloud", `[FORCED OFF] notificação de religamento não enviada: ${formatError(e)}`); } catch (_) {}
-  }
-}
-
-// Aguarda um RX confirmando `wantBit` na saída `targetIndex` do `tsnn`, ou expira.
-// Resolve com "rx" (confirmado) ou "timeout".
-function forcedShutdownWaitRx(tsnn, targetIndex, wantBit, timeoutMs) {
-  return new Promise((resolve) => {
-    let done = false;
-    let timer = null;
-    const finish = (how) => {
-      if (done) return;
-      done = true;
-      forcedShutdownRxWaiter = null;
-      if (timer) clearTimeout(timer);
-      resolve(how);
-    };
-    timer = setTimeout(() => finish("timeout"), timeoutMs);
-    forcedShutdownRxWaiter = { tsnn: String(tsnn), targetIndex, wantBit, resolve: () => finish("rx") };
-  });
-}
-
 // Comando recente por TSNN — usado para casar RX que chega APOS o timeout
 // do comando (frames atrasados continuam sendo telemetria do comando original,
 // nao "espontaneos"). Janela: 30s apos sentAt.
@@ -1772,7 +629,7 @@ const activeResetByTsnn = new Map();
 // Estrutura por equipment_id (UUID):
 //   { tsnn, saida, hwId, expectedBit ('1'|'0'), expectedPayload, armedAt, timer, cmdId }
 const safetyByEquipment = new Map();
-const SAFETY_WINDOW_MS = 120_000; // v3.25.19: 60s → 120s (bombas com proteção térmica/soft-starter demoram a partir; reforço segue em 0/15/30/45s)
+const SAFETY_WINDOW_MS = 60_000;
 const SAFETY_LOCAL_SUPPRESS_MS = 30_000;
 
 // --- Reforço de TX manual (3 envios em 0s/15s/30s) ---
@@ -1800,50 +657,6 @@ function clearManualReinforcements(equipmentId, reason) {
       `Reforco TX manual cancelado para eq ${String(equipmentId).substring(0, 8)} (${reason})`);
   }
   return true;
-}
-
-// v3.25.27 (Fix 2a): reforço de DESLIGAR esgotou e a bomba segue ligada → assume
-// controle LOCAL. Espelha o LOCAL OVERRIDE: desired_running=true + origin='local',
-// cancela o comando manual pendente e libera o polling (que passa a ser {0} passivo).
-// Evita a PLC ficar presa aguardando o safety (120s) e corrige o desired para bater
-// com a realidade (a bomba está ligada pela botoeira).
-async function resolveStuckOffAsLocal(equipmentId, tsnn) {
-  try {
-    pushLog("warn", "system",
-      `[REFORCO→LOCAL] OFF esgotado e bomba segue ligada (eq ${String(equipmentId).substring(0, 8)}, TSNN ${tsnn}) → tratando como acionamento local; cancelando comando e liberando polling`);
-    clearSafetyTimer(equipmentId, "reforço OFF esgotado — bomba em modo local");
-    clearManualReinforcements(equipmentId, "reforço OFF esgotado — bomba em modo local");
-    if (supabase && farmId) {
-      try {
-        await withCloudTimeout(
-          supabase.from("equipments")
-            .update({ desired_running: true, last_actuation_origin: "local" })
-            .eq("id", equipmentId),
-          "reforço→local desired", CLOUD_WRITE_TIMEOUT_MS);
-      } catch (e) { pushLog("warn", "cloud", `[REFORCO→LOCAL] update desired falhou: ${e.message}`); }
-      try {
-        // v3.25.30: marca como TIMEOUT (falha), NÃO 'cancelled'. O comando é um
-        // DESLIGAR REMOTO que a bomba não obedeceu — no relatório deve ficar
-        // origin='remote', result='falha', PRESERVANDO o created_by/usuário. 'cancelled'
-        // fazia o log perder a atribuição. (O relé segue seguro: origin='local' acima
-        // mantém o polling em {0}; a correção do RELATÓRIO é server-side.)
-        await withCloudTimeout(
-          supabase.from("commands")
-            .update({
-              status: "timeout",
-              responded_at: new Date().toISOString(),
-              error_message: "Desligamento remoto não confirmado (bomba seguiu ligada após reforço)",
-            })
-            .eq("farm_id", farmId)
-            .eq("equipment_id", equipmentId)
-            .in("status", ["pending", "sent"]),
-          "reforço→falha marca comando", CLOUD_WRITE_TIMEOUT_MS);
-      } catch (e) { pushLog("warn", "cloud", `[REFORCO→LOCAL] marcar comando falhou: ${e.message}`); }
-    }
-    void tickEnqueuePolling();
-  } catch (e) {
-    pushLog("warn", "system", `[REFORCO→LOCAL] falhou: ${e.message}`);
-  }
 }
 
 // Agenda os reenvios (15s, 30s) do mesmo frame para garantir entrega via RF.
@@ -1982,14 +795,17 @@ const RX_PING_RE  = /^_\[([0-9A-Fa-f]{4})_(?:CFG|PING)_\]\{(?:PING|OK:PING)/;
 // onde TAG pode ser: CFG, PING, STATUS, DUMP, SAVE, REBOOT, etc.
 // Capturamos TSNN, TAG e PAYLOAD para permitir casamento com inflightCmd.
 const RX_CFG_RESP_RE = /^_?\[([0-9A-Fa-f]{4})_([A-Z0-9_]+)_\]\{([^}]*)\}(?:\[[0-9A-Fa-f]{4}_ETX_\])?/;
+// Firmware novo pode responder CFG sem cabecalho, apenas payload + ETX:
+//   {OK:STATUS:UP=3516s,...}[1103_ETX_]
+// Nesse caso inferimos o TAG pelo payload e casamos pelo TSNN do ETX.
+const RX_CFG_BARE_RESP_RE = /^\{([^}]*)\}\[([0-9A-Fa-f]{4})_ETX_\]/;
 const TX_TSNN_RE  = /^\[([0-9A-Fa-f]{4})_(?:1|CFG)_\]/;
 const TX_CFG_RE   = /^\[([0-9A-Fa-f]{4})_CFG_\]/;
-// Aceita sufixo opcional "RV" no payload (comando de reset de vazao no firmware).
-// O grupo 1 continua sendo apenas o payload posicional 0/1.
-const TX_PAYLOAD_RE = /\{([01]{1,6})(?:RV)?\}/;
-// Sufixos de leitura analogica: _N1<valor>N1_ (nivel), _N2<valor>N2_ (vazao total m3),
-// _N3<valor>N3_ (vazao instantanea x10). Exemplo: _[1313_0_]{1}_N11015N1__N20N2_[1313_ETX_]
-const RX_LEVEL_RE = /_N([123])(\d{1,5})N\1_/g;
+const TX_PAYLOAD_RE = /\{([01]{1,6})\}/;
+// Sufixos de leitura analogica de nivel: _N1<valor>N1_, _N2<valor>N2_
+// Exemplo de frame: _[1313_0_]{1}_N11015N1__N20N2_[1313_ETX_]
+// O <valor> eh inteiro (0-9999).
+const RX_LEVEL_RE = /_N([12])(\d{1,5})N\1_/g;
 
 function extractCommandTsnn(frame) {
   const m = String(frame || "").replace(/[\r\n]/g, "").trim().match(TX_TSNN_RE);
@@ -2052,28 +868,12 @@ let telemetryFlushInFlight = false;
 let telemetryRetryAt = 0;
 let telemetryWarnAt = 0;
 
-// --- Live stream (broadcast Realtime, zero storage) ---
-// Buffer circular de 500 entradas em RAM. Quando alguém abre a página
-// "Logs ao Vivo" no interface web, envia start_log_stream → o agente flusha o
-// buffer e passa a emitir cada nova linha via broadcast. Auto-stop em 30 min
-// sem renovação (frontend manda renew_log_stream a cada 5 min).
-const LIVE_STREAM_BUFFER_MAX = 500;
-const LIVE_STREAM_INACTIVE_MS = 30 * 60 * 1000;
-const liveStreamBuffer = [];
-let liveStreamActive = false;
-let liveStreamChannel = null;
-let liveStreamInactiveTimer = null;
-
-
 // --- Equipment name cache (para mostrar nomes amigaveis no log local) ---
 // Mapa: hw_id (ex "210101") -> { name: "Poço Norte", saida: 1 }
 //       tsnn (ex "2101") -> [{ name, saida }, ...] (todas as saidas daquele PLC)
 const equipmentByHwId = new Map();
 const equipmentByTsnn = new Map();
 const equipmentById = new Map(); // UUID -> { name, hw_id, saida }
-// TSNN -> { id, hw_id, vazao_mode, flow_total_m3 } do primeiro equipamento com vazao_mode='real' daquele PLC.
-// Usado pelo parser N2/N3 e pelo agendador de reset (RV).
-const flowEquipByTsnn = new Map();
 let equipmentCacheLoadedAt = 0;
 let lastCleanupAt = 0;
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hora
@@ -2083,33 +883,21 @@ async function refreshEquipmentCache() {
   try {
     const { data, error } = await supabase
       .from("equipments")
-      .select("id, hw_id, name, saida, vazao_mode, flow_total_m3, forced_shutdown_enabled")
+      .select("id, hw_id, name, saida")
       .eq("farm_id", farmId);
     if (error || !data) return;
     equipmentByHwId.clear();
     equipmentByTsnn.clear();
     equipmentById.clear();
-    flowEquipByTsnn.clear();
     for (const eq of data) {
       const hw = String(eq.hw_id || "").trim().toUpperCase();
       if (!hw) continue;
       equipmentByHwId.set(hw, { name: eq.name, saida: eq.saida });
-      // forced_shutdown_enabled no cache: usado para NÃO atribuir um desligamento
-      // FORÇADO (comando remoto) como acionamento LOCAL (ver LOCAL OVERRIDE).
-      if (eq.id) equipmentById.set(String(eq.id), { name: eq.name, hw_id: hw, saida: eq.saida, forced_shutdown_enabled: eq.forced_shutdown_enabled === true });
+      if (eq.id) equipmentById.set(String(eq.id), { name: eq.name, hw_id: hw, saida: eq.saida });
       const tsnn = hw.length >= 4 ? hw.substring(0, 4) : hw;
       const arr = equipmentByTsnn.get(tsnn) || [];
       arr.push({ name: eq.name, saida: eq.saida, hw_id: hw });
       equipmentByTsnn.set(tsnn, arr);
-      // Registra o primeiro equipamento com vazao_mode='real' de cada TSNN.
-      if (eq.vazao_mode === "real" && !flowEquipByTsnn.has(tsnn)) {
-        flowEquipByTsnn.set(tsnn, {
-          id: eq.id,
-          hw_id: hw,
-          vazao_mode: eq.vazao_mode,
-          flow_total_m3: Number(eq.flow_total_m3 || 0),
-        });
-      }
     }
     equipmentCacheLoadedAt = Date.now();
   } catch (_) {}
@@ -2354,6 +1142,107 @@ function cfgResponseLabel(rxTag, rxPayload) {
   return tag || "CFG";
 }
 
+function inferCfgTagFromPayload(rxPayload) {
+  const payload = String(rxPayload || "").toUpperCase();
+  if (payload.startsWith("OK:PING") || payload === "PING") return "PING";
+  if (payload.startsWith("OK:STATUS") || payload.includes(":STATUS:")) return "STATUS";
+  if (payload.startsWith("OK:DUMP") || payload.startsWith("ID=") || payload.includes(":DUMP:")) return "DUMP";
+  if (payload.startsWith("OK:SAVE")) return "SAVE";
+  if (payload.startsWith("OK:REBOOT")) return "REBOOT";
+  if (payload.startsWith("ERR:")) return "CFG";
+  return "CFG";
+}
+
+function parseCfgResponseFrame(frame) {
+  const framed = String(frame || "").match(RX_CFG_RESP_RE);
+  if (framed) {
+    return {
+      rxTsnn: String(framed[1] || "").toUpperCase(),
+      rxTag: String(framed[2] || "").toUpperCase(),
+      rxPayload: framed[3] || "",
+      bare: false,
+    };
+  }
+  const bare = String(frame || "").match(RX_CFG_BARE_RESP_RE);
+  if (bare) {
+    const rxPayload = bare[1] || "";
+    return {
+      rxTsnn: String(bare[2] || "").toUpperCase(),
+      rxTag: inferCfgTagFromPayload(rxPayload),
+      rxPayload,
+      bare: true,
+    };
+  }
+  return null;
+}
+
+async function markCfgCommandExecuted(cmd, frame, cfgLabel, confirmedSetId) {
+  if (!supabase || !cmd?.id) {
+    pushLog("error", "cloud", `CFG ${cfgLabel}: sem cliente cloud ou command id para gravar resposta`);
+    return;
+  }
+  try {
+    const { data, error } = await withCloudTimeout(
+      supabase
+        .from("commands")
+        .update({
+          status: "executed",
+          response: frame,
+          responded_at: new Date().toISOString(),
+        })
+        .eq("id", cmd.id)
+        .select("id"),
+      "marcar cfg executed",
+      CLOUD_WRITE_TIMEOUT_MS,
+    );
+    if (error) throw error;
+    if (!Array.isArray(data) || data.length === 0) {
+      throw new Error(`UPDATE commands não alterou linhas para id=${cmd.id}`);
+    }
+    pushLog("info", "system", `cmd ${cmd.id.substring(0, 8)} -> executed (CFG ${cfgLabel})`, null, null);
+    if (confirmedSetId) await syncConfirmedSetId(cmd, confirmedSetId);
+  } catch (e) {
+    pushLog("error", "cloud", `Falha ao gravar resposta CFG no commands id=${String(cmd.id).substring(0, 8)}: ${e.message || e}`);
+  } finally {
+    consecutiveTimeouts = 0;
+    processing = false;
+    setTimeout(() => { void processNextCommand(); }, 10);
+  }
+}
+
+async function tryCompleteRecentCfgCommand(rxTsnn, rxTag, rxPayload, frame) {
+  if (!supabase || !farmId || !rxTsnn) return false;
+  try {
+    const since = new Date(Date.now() - 120_000).toISOString();
+    const { data, error } = await withCloudTimeout(
+      supabase
+        .from("commands")
+        .select("*")
+        .eq("farm_id", farmId)
+        .eq("type", "config")
+        .eq("plc_hw_id", rxTsnn)
+        .in("status", ["pending", "sent", "timeout"])
+        .gte("created_at", since)
+        .order("created_at", { ascending: false })
+        .limit(5),
+      "buscar cfg recente sem inflight",
+      CLOUD_READ_TIMEOUT_MS,
+    );
+    if (error) throw error;
+    const cmd = Array.isArray(data)
+      ? data.find((row) => TX_CFG_RE.test(String(row.frame || "")) && isCfgAckCompatible(row, rxTag, rxPayload))
+      : null;
+    if (!cmd) return false;
+    const cfgLabel = cfgResponseLabel(rxTag, rxPayload);
+    pushLog("warn", "cloud", `[CFG FALLBACK] RX ${cfgLabel} TSNN=${rxTsnn} sem inflight; casando com command ${String(cmd.id).substring(0, 8)}`);
+    await markCfgCommandExecuted(cmd, frame, cfgLabel, extractSetIdTarget(cmd));
+    return true;
+  } catch (e) {
+    pushLog("warn", "cloud", `CFG fallback lookup falhou TSNN=${rxTsnn}: ${e.message || e}`);
+    return false;
+  }
+}
+
 function payloadCommandsOnlyOff(payload) {
   return typeof payload === "string" && /^[0]+$/.test(payload);
 }
@@ -2399,12 +1288,6 @@ function currentLogFile() {
 }
 
 function appendLogFile(entry) {
-  // v3.25.47: NO-OP. O agent-*.log em disco (mesmo cifrado por DPAPI) era um
-  // arquivo local com informação do agente e um admin-como-SYSTEM podia decifrá-lo.
-  // Removido: nenhum log vai para disco. Diagnóstico deve ir só para a nuvem.
-  void entry;
-  return;
-  /* eslint-disable no-unreachable */
   try {
     ensureLogDir();
     const file = currentLogFile();
@@ -2417,20 +1300,7 @@ function appendLogFile(entry) {
         fs.renameSync(file, file.replace(/\.log$/, `.part-${ts}.log`));
       }
     } catch (_) { /* arquivo ainda não existe */ }
-    // v3.25.33: logs em disco criptografados (safeStorage/DPAPI — atrelado à máquina/
-    // usuário). Se alguém copiar o .log pra outro PC, não consegue ler (chave difere).
-    // Cada linha: "E:" + base64(cipher) + "\n". Fallback texto puro se indisponível.
-    let line;
-    try {
-      const json = JSON.stringify(entry);
-      let enc = false;
-      try { enc = !!(safeStorage && safeStorage.isEncryptionAvailable()); } catch (_) { enc = false; }
-      line = enc
-        ? "E:" + safeStorage.encryptString(json).toString("base64") + "\n"
-        : json + "\n";
-    } catch (_) {
-      line = JSON.stringify(entry) + "\n";
-    }
+    const line = JSON.stringify(entry) + "\n";
     fs.appendFile(file, line, () => {});
   } catch (_) {}
 }
@@ -2493,171 +1363,6 @@ function startMemoryCleanup() {
   try { memoryCleanupTimer.unref?.(); } catch (_) {}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// LIMPEZA DE DISCO — os PCs de fazenda enchem com temp/crash/cache do Electron.
-// ═══════════════════════════════════════════════════════════════════════════
-let lastDiskFreeMb = null;
-let lastAggressiveCleanupAt = 0;
-const DISK_CHECK_INTERVAL_MS = 30 * 60 * 1000;   // reavalia disco a cada 30 min
-const DISK_LOW_MB = 5000;                         // < 5 GB → limpeza agressiva
-const DISK_ALERT_MB = 2000;                       // < 2 GB → reporta disk_low
-const AGGRESSIVE_THROTTLE_MS = 6 * 60 * 60 * 1000; // no máx 1 limpeza agressiva/6h
-
-function getDiskFreeMb() {
-  try {
-    if (typeof fs.statfsSync === "function") {
-      const drive = process.platform === "win32" ? ((process.env.SystemDrive || "C:") + "\\") : "/";
-      const st = fs.statfsSync(drive);
-      return Math.round((Number(st.bavail) * Number(st.bsize)) / (1024 * 1024));
-    }
-  } catch (_) {}
-  try {
-    if (process.platform === "win32") {
-      const out = execSync('wmic logicaldisk where "DeviceID=\'C:\'" get FreeSpace /value', { timeout: 5000 }).toString();
-      const m = out.match(/FreeSpace=(\d+)/);
-      if (m) return Math.round(Number(m[1]) / (1024 * 1024));
-    }
-  } catch (_) {}
-  return null;
-}
-
-// Remove temp/resíduos. `aggressive` também limpa o cache do Electron (recriado no uso).
-function cleanupDiskTemp(aggressive) {
-  const removed = [];
-  const delFile = (p) => { try { if (fs.existsSync(p)) { fs.unlinkSync(p); removed.push(p); } } catch (_) {} };
-  const delDir = (p) => { try { if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true, force: true }); removed.push(p); } } catch (_) {} };
-  const olderThan = (p, days) => { try { return (Date.now() - fs.statSync(p).mtimeMs) > days * 86400_000; } catch (_) { return false; } };
-  let ofs; try { ofs = require("original-fs"); } catch (_) { ofs = fs; }
-  const userData = (() => { try { return app.getPath("userData"); } catch (_) { return null; } })();
-
-  // 1) backups do OTA em resources/ (.bak sobrescrito por versão; app_pre_ota.bak = pasta)
-  const rp = process.resourcesPath;
-  if (rp) {
-    try { const b = path.join(rp, "app.asar.bak"); if (ofs.existsSync(b)) { ofs.unlinkSync(b); removed.push(b); } } catch (_) {}
-    delDir(path.join(rp, "app_pre_ota.bak"));
-    // resíduos de build que não deveriam estar em resources/
-    for (const d of ["build", "dist", "__pycache__"]) delDir(path.join(rp, d));
-    try { for (const f of fs.readdirSync(rp)) if (f.endsWith(".spec")) delFile(path.join(rp, f)); } catch (_) {}
-  }
-  if (userData) {
-    // 2) downloads de OTA que sobraram (falha no meio)
-    try {
-      const upd = path.join(userData, "updates");
-      if (fs.existsSync(upd)) for (const f of fs.readdirSync(upd)) {
-        if (/\.(asar\.new|asar\.old|tmp|partial)$/i.test(f) || f.startsWith("app-")) delFile(path.join(upd, f));
-      }
-    } catch (_) {}
-    // 3) crash dumps do Electron (Crashpad) — só dumps prontos/pendentes
-    for (const sub of ["Crashpad/completed", "Crashpad/reports", "Crashpad/pending"]) {
-      try {
-        const d = path.join(userData, sub);
-        if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) delFile(path.join(d, f));
-      } catch (_) {}
-    }
-    // 5) logs antigos (>7 dias) se existirem
-    try {
-      if (fs.existsSync(LOG_DIR)) for (const f of fs.readdirSync(LOG_DIR)) {
-        const full = path.join(LOG_DIR, f);
-        if (olderThan(full, 7)) delFile(full);
-      }
-    } catch (_) {}
-    // 6) AGRESSIVO: cache do Electron (recriado automaticamente)
-    if (aggressive) {
-      for (const d of ["Cache", "GPUCache", "Code Cache", "DawnCache", "DawnGraphiteCache", "GrShaderCache", "blob_storage", "Crashpad"]) {
-        delDir(path.join(userData, d));
-      }
-    }
-  }
-  // 4) %TEMP%\electron* e *renov* — só entradas ANTIGAS (>1 dia), evita apagar o
-  //    temp da sessão viva ou de terceiros.
-  try {
-    const tmp = os.tmpdir();
-    for (const f of fs.readdirSync(tmp)) {
-      const low = f.toLowerCase();
-      if (!(low.startsWith("electron") || low.includes("renov") || low.startsWith("scoped_dir"))) continue;
-      const full = path.join(tmp, f);
-      if (!olderThan(full, 1)) continue;
-      try { (fs.statSync(full).isDirectory() ? delDir : delFile)(full); } catch (_) {}
-    }
-  } catch (_) {}
-
-  if (removed.length) {
-    try { pushLog("info", "system", `[DISK] limpeza${aggressive ? " AGRESSIVA" : ""}: ${removed.length} item(s) removido(s)`); } catch (_) {}
-  }
-  return removed.length;
-}
-
-function refreshDiskFree() {
-  const mb = getDiskFreeMb();
-  if (mb != null) lastDiskFreeMb = mb;
-  return lastDiskFreeMb;
-}
-
-// CAUSA-RAIZ do disco cheio: a bridge compilada (PyInstaller --onefile) extrai
-// ~8MB em %TEMP%\_MEIxxxxx a cada execução. Se morre por taskkill/crash, a pasta
-// NÃO é limpa e acumula GBs. Aqui apagamos as _MEI* ÓRFÃS.
-//
-// BUG corrigido (v3.25.59): o 'rd /s /q ... 2>nul' NÃO pula de forma confiável a
-// _MEI* EM USO — em alguns casos apagava a pasta que a serial_bridge.exe VIVA
-// precisa (a bridge mapeia libs de dentro da _MEI dela), derrubando a bridge.
-// Guarda absoluta: se serial_bridge.exe estiver RODANDO, NÃO apaga NENHUMA _MEI*.
-// Só limpamos quando a bridge está parada (aí toda _MEI* é resíduo órfão seguro).
-function isSerialBridgeRunning(cb) {
-  if (process.platform !== "win32") return cb(false);
-  try {
-    require("child_process").exec(
-      'tasklist /FI "IMAGENAME eq serial_bridge.exe" /NH',
-      { windowsHide: true, timeout: 15_000 },
-      (err, stdout) => {
-        if (err) { cb(true); return; } // na dúvida (erro ao consultar) → assume rodando e NÃO limpa
-        cb(/serial_bridge\.exe/i.test(String(stdout || "")));
-      },
-    );
-  } catch (_) { cb(true); } // exceção → conservador: assume rodando
-}
-
-function cleanupMeiFolders() {
-  if (process.platform !== "win32") return;
-  isSerialBridgeRunning((running) => {
-    if (running) {
-      try { pushLog("debug", "system", "[DISK] serial_bridge.exe rodando — pulando limpeza de _MEI* (proteção)"); } catch (_) {}
-      return;
-    }
-    try {
-      require("child_process").exec(
-        'for /d %i in ("%TEMP%\\_MEI*") do @rd /s /q "%i" 2>nul',
-        { windowsHide: true, timeout: 60_000 },
-        () => {},
-      );
-    } catch (_) {}
-  });
-}
-let meiCleanupTimer = null;
-
-// Boot: limpeza leve + _MEI órfãs + mede o disco. Depois, a cada 30 min: se < 5 GB,
-// agressiva. E a cada 6h: varredura de _MEI órfãs.
-function startDiskWatchdog() {
-  try { cleanupDiskTemp(false); } catch (_) {}
-  try { cleanupMeiFolders(); } catch (_) {}
-  if (!meiCleanupTimer) {
-    meiCleanupTimer = setInterval(() => { try { cleanupMeiFolders(); } catch (_) {} }, 6 * 60 * 60 * 1000);
-    try { meiCleanupTimer.unref?.(); } catch (_) {}
-  }
-  refreshDiskFree();
-  const t = setInterval(() => {
-    const free = refreshDiskFree();
-    try {
-      if (free != null && free < DISK_LOW_MB && (Date.now() - lastAggressiveCleanupAt) > AGGRESSIVE_THROTTLE_MS) {
-        lastAggressiveCleanupAt = Date.now();
-        pushLog("warn", "system", `[DISK] livre=${free}MB (< ${DISK_LOW_MB}MB) — limpeza agressiva`);
-        cleanupDiskTemp(true);
-        refreshDiskFree();
-      }
-    } catch (_) {}
-  }, DISK_CHECK_INTERVAL_MS);
-  try { t.unref?.(); } catch (_) {}
-}
-
 // Auto-reboot watchdog: a cada 5 min reinicia o agente sozinho quando
 //   • heap > 500MB (memory leak inevitável)  →  log "[AUTO-REBOOT] Memória excedeu 500MB"
 //   • porta serial não recebeu nenhum byte há > 10 min  →  log "[AUTO-REBOOT] Serial inativa por 10 minutos"
@@ -2666,12 +1371,11 @@ const AUTO_REBOOT_HEAP_LIMIT_MB = 500;
 const AUTO_REBOOT_SERIAL_SILENCE_MS = 10 * 60 * 1000;
 let autoRebootTimer = null;
 let autoRebootStartTs = Date.now();
-// v3.25.40: dyingReason alimenta o alerta #12 ("estou morrendo").
-function triggerAutoReboot(reason, dyingReason) {
+function triggerAutoReboot(reason) {
   try { pushLog("warn", "system", `[AUTO-REBOOT] ${reason}`); } catch (_) {}
   try { console.log(`[AUTO-REBOOT] ${reason}`); } catch (_) {}
   setTimeout(() => {
-    void relaunchAgent(dyingReason || "watchdog_relaunch", 0);
+    try { app.relaunch(); app.exit(0); } catch (_) { try { process.exit(0); } catch (_) {} }
   }, 1500);
 }
 function startAutoRebootWatchdog() {
@@ -2681,7 +1385,7 @@ function startAutoRebootWatchdog() {
     try {
       const heapMb = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
       if (heapMb > AUTO_REBOOT_HEAP_LIMIT_MB) {
-        triggerAutoReboot(`Memória excedeu ${AUTO_REBOOT_HEAP_LIMIT_MB}MB (heap=${heapMb}MB)`, "memory_guard");
+        triggerAutoReboot(`Memória excedeu ${AUTO_REBOOT_HEAP_LIMIT_MB}MB (heap=${heapMb}MB)`);
         return;
       }
     } catch (_) {}
@@ -2691,7 +1395,7 @@ function startAutoRebootWatchdog() {
       if (uptime > AUTO_REBOOT_SERIAL_SILENCE_MS && lastRx > 0) {
         const silentMs = Date.now() - lastRx;
         if (silentMs > AUTO_REBOOT_SERIAL_SILENCE_MS) {
-          triggerAutoReboot(`Serial inativa por ${Math.round(silentMs/60000)} minutos`, "watchdog_relaunch");
+          triggerAutoReboot(`Serial inativa por ${Math.round(silentMs/60000)} minutos`);
         }
       }
     } catch (_) {}
@@ -2726,13 +1430,10 @@ async function checkForceRebootInsideHeartbeat() {
       Accept: "application/json",
       "Content-Type": "application/json",
     };
-    // v3.25.48: além de agent_restart, cobre reboot_agent e unblock_agent — este
-    // caminho roda DENTRO do heartbeat (HTTP puro), então funciona mesmo se o
-    // Realtime/poll de agent_commands cair OU se o agente estiver bloqueado.
     const query = new URLSearchParams({
-      select: "id,created_at,kind",
+      select: "id,created_at",
       farm_id: `eq.${farmId}`,
-      kind: "in.(agent_restart,reboot_agent,unblock_agent)",
+      kind: "eq.agent_restart",
       status: "eq.pending",
       created_at: `gte.${new Date(Date.now() - 300_000).toISOString()}`,
       order: "created_at.desc",
@@ -2771,14 +1472,11 @@ async function checkForceRebootInsideHeartbeat() {
       "force-reboot heartbeat PATCH",
       4_000,
     ).catch(() => null);
-    try { pushLog("warn", "system", `[FORCE-REBOOT] Comando ${cmd.kind} detectado via HTTP polling no heartbeat`); } catch (_) {}
-    try { console.log(`[FORCE-REBOOT] Comando ${cmd.kind} detectado via HTTP polling no heartbeat`); } catch (_) {}
-    // v3.25.48: unblock_agent (ou qualquer restart remoto) limpa o kill-file e o
-    // estado de bloqueio antes do relaunch — garante que o agente volte operando
-    // mesmo que tivesse sido bloqueado por segurança.
-    try { fs.unlinkSync(BLOCK_FLAG_FILE); } catch (_) {}
-    try { agentBlocked = false; licenseKillSwitchTriggered = false; antiCloneTriggered = false; machineMismatchStrikes = 0; } catch (_) {}
-    setTimeout(() => { void relaunchAgent("manual_restart", 0); }, 250);
+    try { pushLog("warn", "system", "[FORCE-REBOOT] Comando detectado via HTTP polling no heartbeat"); } catch (_) {}
+    try { console.log("[FORCE-REBOOT] Comando detectado via HTTP polling no heartbeat"); } catch (_) {}
+    setTimeout(() => {
+      try { app.relaunch(); app.exit(0); } catch (_) { try { process.exit(0); } catch (_) {} }
+    }, 250);
   } catch (_) {}
 }
 
@@ -2880,86 +1578,8 @@ function pushLog(level, category, message, rawFrame, humanOverride) {
     }
   }
 
-  // --- Live stream buffer (RAM only, broadcast on demand) ---
-  // Versão amigável + categoria/level vão pro buffer circular de 500 linhas.
-  // Quando o streaming está ativo, cada linha vai direto pro broadcast.
-  const streamEntry = {
-    ts: entry.timestamp,
-    level,
-    category,
-    message: humanMessage ?? message,
-    raw_frame: rawFrame || null,
-  };
-  liveStreamBuffer.push(streamEntry);
-  if (liveStreamBuffer.length > LIVE_STREAM_BUFFER_MAX) liveStreamBuffer.shift();
-  if (liveStreamActive && liveStreamChannel) {
-    try {
-      liveStreamChannel.send({
-        type: "broadcast",
-        event: "log_line",
-        payload: streamEntry,
-      });
-    } catch (_) {}
-  }
-
   // v3.7.9 MODO CRU: flushLogs desativado — nunca há nada para mandar.
 }
-
-// --- Live stream control (start/stop/renew via agent_commands) ---
-function _scheduleLiveStreamStop() {
-  if (liveStreamInactiveTimer) clearTimeout(liveStreamInactiveTimer);
-  liveStreamInactiveTimer = setTimeout(() => {
-    stopLiveLogStream("inactive_timeout");
-  }, LIVE_STREAM_INACTIVE_MS);
-}
-
-function startLiveLogStream() {
-  if (!supabase || !farmId) return false;
-  try {
-    if (!liveStreamChannel) {
-      liveStreamChannel = supabase.channel(`agent-logs-${farmId}`, {
-        config: { broadcast: { self: false, ack: false } },
-      });
-      liveStreamChannel.subscribe();
-    }
-    liveStreamActive = true;
-    _scheduleLiveStreamStop();
-    // Flush do buffer atual (até 500 linhas) em um único broadcast.
-    try {
-      liveStreamChannel.send({
-        type: "broadcast",
-        event: "log_buffer",
-        payload: { lines: liveStreamBuffer.slice() },
-      });
-    } catch (_) {}
-    return true;
-  } catch (e) {
-    pushLog("warn", "system", `Falha ao iniciar log stream: ${e.message}`);
-    return false;
-  }
-}
-
-function renewLiveLogStream() {
-  if (!liveStreamActive) return false;
-  _scheduleLiveStreamStop();
-  return true;
-}
-
-function stopLiveLogStream(reason = "manual") {
-  liveStreamActive = false;
-  if (liveStreamInactiveTimer) {
-    clearTimeout(liveStreamInactiveTimer);
-    liveStreamInactiveTimer = null;
-  }
-  if (liveStreamChannel) {
-    try { void supabase.removeChannel(liveStreamChannel); } catch (_) {}
-    liveStreamChannel = null;
-  }
-  if (reason !== "manual") {
-    console.log(`[LIVE-STREAM] parado (${reason})`);
-  }
-}
-
 
 async function flushLogs() {
   // v3.7.9 MODO CRU: no-op. Logs ficam apenas no arquivo local + tray.
@@ -3053,151 +1673,6 @@ function saveConfig(cfg) {
     throw e;
   }
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// FASE 2 (v3.25.50) — credentials.enc machine-bound + token rotativo.
-// TODAS as funções abaixo são NÃO-FATAIS quando SECURITY_PHASE2_ENFORCEMENT=false.
-// ═══════════════════════════════════════════════════════════════════════════
-
-// Só as credenciais de conexão (não estado operacional) vão para credentials.enc.
-function _connectionCredsFromConfig(cfg) {
-  if (!cfg) return null;
-  return {
-    email: cfg.email, password: cfg.password,
-    farmId: cfg.farmId, farmName: cfg.farmName,
-    supabaseUrl: cfg.supabaseUrl || activeSupabaseUrl,
-    supabaseAnonKey: cfg.supabaseAnonKey || activeSupabaseAnonKey,
-    deviceId: cfg.deviceId, machineIdHash: cfg.machineIdHash,
-    savedAt: new Date().toISOString(),
-  };
-}
-
-// Lê %ProgramData%\Renov\credentials.enc (DPAPI). Retorna:
-//   objeto de credenciais | null (não existe) | { __dpapiFailed:true } (não decifra)
-function readCredentialsEnc() {
-  try {
-    if (!fs.existsSync(CREDENTIALS_ENC_FILE)) return null;
-    const raw = fs.readFileSync(CREDENTIALS_ENC_FILE);
-    if (!_safeAvailable()) {
-      // sem DPAPI: aceita texto puro (dev/Linux)
-      try { return JSON.parse(raw.toString("utf8")); } catch { return { __dpapiFailed: true }; }
-    }
-    const plain = safeStorage.decryptString(raw);
-    return JSON.parse(plain);
-  } catch (e) {
-    // Existe mas não decifra → provavelmente copiado de outra máquina (DPAPI machine-bound).
-    console.error("[CREDS] credentials.enc não decifrou (DPAPI):", e.message);
-    // Trilha de segurança (enforcement OFF — só registra; a leitura cai no fallback).
-    void logSecurityEvent("dpapi_failed", { file: "credentials.enc", error: String(e && e.message || e) });
-    return { __dpapiFailed: true };
-  }
-}
-
-// Escreve credentials.enc (DPAPI) em %ProgramData%\Renov\. Best-effort.
-function writeCredentialsEnc(creds) {
-  try {
-    if (!creds || !creds.farmId) return false;
-    try { fs.mkdirSync(path.dirname(CREDENTIALS_ENC_FILE), { recursive: true }); } catch (_) {}
-    const plain = JSON.stringify(creds);
-    if (_safeAvailable()) {
-      fs.writeFileSync(CREDENTIALS_ENC_FILE, safeStorage.encryptString(plain));
-    } else {
-      console.warn("[CREDS] safeStorage indisponível — credentials.enc em texto puro");
-      fs.writeFileSync(CREDENTIALS_ENC_FILE, plain, "utf8");
-    }
-    return true;
-  } catch (e) {
-    console.error("[CREDS] writeCredentialsEnc erro:", e.message);
-    return false;
-  }
-}
-
-// Após conectar com sucesso: garante credentials.enc e apaga provisioning.json
-// em texto puro (não deve sobrar credencial legível em disco após o 1º boot).
-function ensureCredentialsEnc(cfg) {
-  try {
-    const existing = readCredentialsEnc();
-    if (!existing || existing.__dpapiFailed) {
-      const creds = _connectionCredsFromConfig(cfg);
-      if (creds && creds.email && creds.farmId) {
-        if (writeCredentialsEnc(creds)) console.log("[CREDS] credentials.enc gravado (machine-bound)");
-      }
-    }
-    // apaga qualquer provisioning.json em texto puro remanescente
-    for (const p of PROVISIONING_LOOKUP_PATHS) {
-      try { if (fs.existsSync(p)) { fs.unlinkSync(p); console.log("[CREDS] provisioning.json removido:", p); } } catch (_) {}
-    }
-  } catch (e) { console.error("[CREDS] ensureCredentialsEnc erro:", e.message); }
-}
-
-// Base URL/anon ativos (usa config/globais com fallback aos defaults de build).
-function _activeBaseUrl(cfg) {
-  return (cfg && cfg.supabaseUrl) || activeSupabaseUrl || SUPABASE_URL_DEFAULT;
-}
-function _activeAnon(cfg) {
-  return (cfg && cfg.supabaseAnonKey) || activeSupabaseAnonKey || SUPABASE_ANON_DEFAULT;
-}
-
-// Obtém/rotaciona o token rotativo (agent-auth). NÃO-FATAL: qualquer erro só
-// loga e deixa o agente seguir com anon+config. Retorna o token (ou null).
-async function refreshAgentToken(cfg, opts = {}) {
-  try {
-    const force = !!opts.force;
-    const now = Date.now();
-    // FASE 2 gate: só rotaciona token quando a fazenda está em security_phase >= 2
-    // (Sykue). Nas demais, comporta-se como antes (não chama agent-auth).
-    if (farmSecurityPhase < SECURITY_PHASE2_MIN) return agentToken;
-    // Já temos token válido e longe de expirar? Não faz nada (rate-limit implícito).
-    if (!force && agentToken && agentTokenExpiresAt - now > AGENT_TOKEN_REFRESH_SKEW_MS) return agentToken;
-    if (!force && now - lastTokenRefreshAt < 20_000) return agentToken; // no máx a cada 20s
-    lastTokenRefreshAt = now;
-
-    let fp;
-    try { fp = getMachineFingerprint(); } catch (_) { return agentToken; }
-    const baseUrl = _activeBaseUrl(cfg);
-    const anon = _activeAnon(cfg);
-
-    const resp = await fetch(`${baseUrl}/functions/v1/agent-auth`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "apikey": anon, "Authorization": `Bearer ${anon}` },
-      body: JSON.stringify({
-        machine_id_hash: fp.machine_id_hash,
-        fingerprint: fp.fingerprint,
-        current_token: agentToken || null,
-        agent_version: AGENT_VERSION,
-      }),
-    });
-    const result = await resp.json().catch(() => ({}));
-    if (!resp.ok || !result || result.ok !== true || !result.token) {
-      // 403 = licença/clone; demais = rede. Ambos NÃO-FATAIS aqui (FASE 2 off).
-      const reason = (result && result.reason) || `http_${resp.status}`;
-      try { pushLog("warn", "system", `[AGENT-AUTH] sem token novo (${reason}) — segue com anon`); } catch (_) {}
-      // Trilha de segurança (enforcement OFF — só registra). O anti-clone da edge
-      // devolve reason = fingerprint_mismatch | clone_detected.
-      if (reason === "fingerprint_mismatch" || reason === "clone_detected") {
-        void logSecurityEvent(reason, { source: "agent-auth", divergence: result?.divergence ?? null });
-      }
-      // Token expirado E não renovou → registra token_expired (uma vez por janela).
-      if (agentToken && agentTokenExpiresAt > 0 && now >= agentTokenExpiresAt) {
-        void logSecurityEvent("token_expired", { reason, expired_for_ms: now - agentTokenExpiresAt });
-      }
-      if (SECURITY_PHASE2_ENFORCEMENT && resp.status === 403) {
-        // Em enforcement, um 403 explícito de licença é a ÚNICA condição de parada.
-        try { pushLog("error", "system", `[AGENT-AUTH] 403 em enforcement: ${reason}`); } catch (_) {}
-      }
-      return agentToken;
-    }
-    agentToken = result.token;
-    agentTokenExpiresAt = now + (Number(result.expires_in || 600) * 1000);
-    return agentToken;
-  } catch (e) {
-    try { pushLog("warn", "system", `[AGENT-AUTH] refresh falhou: ${e.message} — segue com anon`); } catch (_) {}
-    return agentToken;
-  }
-}
-
-// Wrapper fire-and-forget para uso no heartbeat (nunca lança).
-function refreshAgentTokenSafe(cfg) { void refreshAgentToken(cfg).catch(() => {}); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Safety timer (120s) — failsafe que desliga a bomba se nao confirmar comando
@@ -3309,7 +1784,7 @@ async function fireSafetyOff(equipmentId, entry) {
     pushLog(
       "warn",
       "system",
-      `[REFORCO] Timeout ${Math.round(SAFETY_WINDOW_MS/1000)}s TSNN ${entry.tsnn} — enviando comando inverso (safety): esperava bit=${expectedBit}, enviando bit=${inverseBit} (frame=${inverseFrame.replace(/\r/g, "")})`,
+      `[REFORCO] Timeout 60s TSNN ${entry.tsnn} — enviando comando inverso (safety): esperava bit=${expectedBit}, enviando bit=${inverseBit} (frame=${inverseFrame.replace(/\r/g, "")})`,
       null,
       `Bomba ${nameForTsnn(entry.tsnn)} nao confirmou comando em ${Math.round(SAFETY_WINDOW_MS/1000)}s — safety acionado (bit inverso)`,
     );
@@ -3336,10 +1811,6 @@ async function fireSafetyOff(equipmentId, entry) {
             .update({
               desired_running: inverseBit === "1",
               pending_command_id: null,
-              // v3.25.21: o safety é uma ação do SISTEMA (failsafe), NÃO botoeira.
-              // Origem 'remote-desired' (não 'local') — assim não mostra badge LOCAL
-              // indevido e a PLC segue no fluxo NORMAL de polling (não vira modo local).
-              last_actuation_origin: "remote-desired",
               safety_expired_at: new Date().toISOString(),
               // v3.11.5: NUNCA atualizar last_communication aqui — safety é TX
               // sem RX. last_communication só pode ser tocado por RX real
@@ -3350,30 +1821,6 @@ async function fireSafetyOff(equipmentId, entry) {
           "safety desired_running update",
           CLOUD_WRITE_TIMEOUT_MS,
         );
-        // v3.25.19: marca o comando que armou o safety como 'timeout' (bomba NÃO
-        // confirmou no tempo) — assim o frontend sai de "Ligando…/Desligando…"
-        // imediatamente. NOTA: o enum command_status não tem 'failed'; 'timeout' é o
-        // terminal semanticamente correto ("não confirmou em Xs") e o front já o
-        // trata como não-pendente (sai de "Ligando").
-        if (entry.cmdId) {
-          try {
-            await withCloudTimeout(
-              supabase
-                .from("commands")
-                .update({
-                  status: "timeout",
-                  error_message: `Safety timer: bomba não confirmou em ${Math.round(SAFETY_WINDOW_MS / 1000)}s`,
-                  responded_at: new Date().toISOString(),
-                })
-                .eq("id", entry.cmdId)
-                .in("status", ["pending", "sent"]),
-              "safety mark command timeout",
-              CLOUD_WRITE_TIMEOUT_MS,
-            );
-          } catch (e) {
-            pushLog("warn", "cloud", `Safety mark command timeout falhou: ${e.message}`);
-          }
-        }
         const { data: cancelledPollings, error: cancelPollingError } = await withCloudTimeout(
           supabase.rpc("cancel_pending_pollings_for_plc", {
             _farm_id: farmId,
@@ -3471,10 +1918,6 @@ function maybeCancelSafetyOnRx(equipmentId, rxPayload) {
 
   if (stateBit === entry.expectedBit) {
     clearSafetyTimer(equipmentId, `RX confirmou bit ${stateBit} da saida ${saida || "?"}`);
-    // v3.25.26: safety confirmado → libera o polling da PLC imediatamente (o bloqueio
-    // por-PLC já foi zerado por clearSafetyTimer→clearManualReinforcements). Reenfileira
-    // agora, sem esperar o próximo tick de 11s.
-    void tickEnqueuePolling();
   }
 }
 
@@ -3538,32 +1981,6 @@ function hasActiveSafetyForTsnn(tsnn) {
 // que o operador remoto veja o estado real em tempo real. Origem = 'local'.
 async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
   if (!supabase || !farmId) return false;
-  // v3.25.17: se há REFORÇO TX manual ativo para esta PLC e o RX DIVERGE do bit
-  // esperado pelo reforço, é leitura intermediária ("comando ainda não confirmado,
-  // aguardando" — ex.: Ligar {1}, motor não partiu, bomba responde {0}). O caminho
-  // do reforço (processTelemFrame) já tratou isso mantendo o reforço. NÃO classificar
-  // como acionamento LOCAL aqui — senão o LOCAL OVERRIDE cancelaria reforço+safety e
-  // marcaria desired=false prematuramente. Retorna false → o chamador grava a
-  // telemetria com origem PRESERVADA (queueTelemetry null), sem re-atribuir origem.
-  try {
-    const reinf = getActiveReinforcementForTsnn(tsnn);
-    const expBit = reinf && reinf.entry ? reinf.entry.expectedBit : null;
-    if (expBit === "0" || expBit === "1") {
-      const rx = String(rawPayload || "");
-      const reinfSaida = Number(reinf.entry.saida) || 0;
-      let rxBit = null;
-      if (/^[01]{1,6}$/.test(rx)) {
-        if (rx.length === 1) rxBit = rx[0];
-        else if (reinfSaida >= 1 && reinfSaida <= rx.length) rxBit = rx[reinfSaida - 1];
-        else rxBit = rx[rx.length - 1];
-      }
-      if (rxBit && rxBit !== expBit) {
-        pushLog("info", "system",
-          `[REFORCO] RX intermediário TSNN=${tsnn} (recebido=${rxBit} ≠ esperado=${expBit}) — reforço ativo já tratou; não classifica como local`);
-        return false;
-      }
-    }
-  } catch (_) { /* na dúvida, segue o fluxo normal */ }
   try {
     // ─────────────────────────────────────────────────────────────────
     // CLASSIFICACAO DE ORIGEM ANTES da RPC (v3.8.6)
@@ -3632,47 +2049,39 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       }
     }
 
-    // 1) v3.25.9: comando do operador NÃO confirmado — distinção por ESTADO DO
-    // COMANDO, não por tempo. Considera status não-terminais (pending/sent/delivered):
-    //   • QUALQUER comando 'pending' (na FILA, ainda não transmitido) → NÃO é local:
-    //     o operador mandou e o TX ainda não saiu (ex.: ligar 10 bombas em série —
-    //     as bombas 6-10 ficam pending enquanto a 5 transmite).
-    //   • comando 'sent'/'delivered' (em voo) cujo bit alvo == bit recebido → é o
-    //     ECO/confirmação do comando remoto.
-    // Só quando NÃO existe nenhum comando desses é que um espontâneo que muda o
-    // estado é atuação LOCAL. Divergência de um comando JÁ enviado continua tratada
-    // pelo LOCAL OVERRIDE abaixo (v3.25.5) — sem risco de loop, pois um 'pending'
-    // ainda não gerou TX/reforço. Espelha v_pending_command_active da RPC.
+    // 1) Comando manual recente (<= 180s)
     if (!matchedByCommand && resolvedEqId) {
       try {
-        const { data: cmds } = await withCloudTimeout(
+        const since = new Date(Date.now() - 180_000).toISOString();
+        const { data: recent } = await withCloudTimeout(
           supabase
             .from("commands")
-            .select("frame, source_device, status")
+            .select("id, frame, source_device, sent_at, created_at")
             .eq("farm_id", farmId)
             .eq("equipment_id", resolvedEqId)
             .eq("type", "manual")
-            .in("status", ["pending", "sent", "delivered"])
+            .or(`sent_at.gte.${since},created_at.gte.${since}`)
             .order("created_at", { ascending: false })
-            .limit(10),
-          "espontaneo cmd-in-flight lookup",
+            .limit(5),
+          "espontaneo recent-cmd lookup",
           CLOUD_WRITE_TIMEOUT_MS,
         );
-        if (Array.isArray(cmds)) {
-          const rxBit = extractStateBit(rawPayload);
-          for (const c of cmds) {
+        if (Array.isArray(recent)) {
+          for (const c of recent) {
             if (String(c.source_device || "").startsWith("backend-reset:")) continue;
-            // comando na FILA (pending, ainda não TX): operador mandou → não é local
-            if (c.status === "pending") { matchedByCommand = true; break; }
-            // comando EM VOO (sent/delivered) com bit igual ao recebido → eco
             const m = String(c.frame || "").match(/\{([01]{1,6})\}/);
             if (!m) continue;
-            const expectedBit = m[1][m[1].length - 1];
-            if (rxBit && expectedBit === rxBit) { matchedByCommand = true; break; }
+            const expected = m[1];
+            const expectedBit = expected[expected.length - 1];
+            const rxBit = extractStateBit(rawPayload);
+            if (rxBit && expectedBit === rxBit) {
+              matchedByCommand = true;
+              break;
+            }
           }
         }
       } catch (e) {
-        pushLog("warn", "cloud", `Espontaneo cmd-in-flight lookup falhou: ${e.message}`);
+        pushLog("warn", "cloud", `Espontaneo recent-cmd lookup falhou: ${e.message}`);
       }
     }
 
@@ -3687,7 +2096,7 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
             .select("id")
             .eq("farm_id", farmId)
             .eq("equipment_id", resolvedEqId)
-            .in("status", ["pending", "sent", "delivered"])
+            .in("status", ["pending", "sent"])
             .limit(1),
           "espontaneo pending-cmd lookup",
           CLOUD_WRITE_TIMEOUT_MS,
@@ -3739,211 +2148,40 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       const _bitNow = extractStateBit(rawPayload);
       if (resolvedEqId && _bitNow === "1") {
         lastOnConfirmAtByEq.set(String(resolvedEqId), Date.now());
-        // v3.25.41: a bomba voltou a LIGAR depois de um desligamento forçado já
-        // confirmado → religamento pela chave local. NÃO reenvia a sequência
-        // (nada aqui atua); apenas notifica uma vez e limpa a marca.
-        // A janela de graça evita alarme falso: um eco atrasado do {1} da FASE 1
-        // pode chegar depois da sequência terminar (o RX é assíncrono e a
-        // supressão por TSNN já foi liberada). Só é religamento real se vier
-        // depois da graça — o {0} já havia sido confirmado por RX.
-        const _fsDone = forcedShutdownDoneByEq.get(String(resolvedEqId));
-        if (_fsDone && (Date.now() - _fsDone.at) > FORCED_RELIT_GRACE_MS) {
-          forcedShutdownDoneByEq.delete(String(resolvedEqId));
-          // v3.25.43 (item 4): se fui EU religando pelo terminal serial, NÃO é
-          // religamento local pela botoeira — limpa a marca sem alarme WhatsApp.
-          if (isTechTerminalWindow()) {
-            pushLog("info", "system",
-              `[TECH TERMINAL] religamento via terminal (suporte) para eq ${String(resolvedEqId).substring(0, 8)} — sem alerta de religamento local`);
-          } else {
-            void notifyForcedShutdownRelit(String(resolvedEqId), _fsDone);
-          }
-        }
       }
     }
 
     if (matchedByCommand) originForRpc = "remote-cmd";
     else if (matchedByDesired) originForRpc = "remote-desired";
-    else if (divergedFromDesired && inStartupSync && !isStartupSyncDone(tsnnUpper) && !pendingCommandActive && !safetyArmedForFrame && !recentSafetyExpiry) {
-      // v3.25.10: só entra no startup-sync se a PLC ainda NÃO teve um RX confirmado
-      // nesta sessão. Após o primeiro RX confirmado (isStartupSyncDone), um espontâneo
-      // divergente é atuação local/remoto normal, não "estado inicial a sincronizar".
-      // v3.9.4 — Startup Sync só sobrescreve desired_running quando NÃO há
-      // comando ativo / safety armado / safety recém-expirado para a PLC.
-      // Caso contrário, divergência RX↔desired = atuação local (PLC em modo
-      // botoeira ignorando o comando) e devemos preservar o desired do
-      // operador, evitando loop "comando OFF → RX=1 → sync ON → comando OFF".
+    else if (divergedFromDesired && inStartupSync && !pendingCommandActive && !safetyArmedForFrame && !recentSafetyExpiry) {
+      // v3.14.3 (fix 2026-07-13) — STARTUP SYNC NÃO altera mais desired_running.
+      // desired_running representa a INTENÇÃO do operador/automação e só pode
+      // ser alterada por comando manual (web) ou automação por horário.
+      // Divergência entre RX e desired = acionamento local: preservamos o
+      // desired do operador e apenas refletimos o estado físico em
+      // last_outputs_state via apply_pump_telemetry (origem 'local').
+      // Isso evita o bug em que o polling volta a mandar {1} depois de um
+      // comando Desligar não obedecido, fazendo o badge LOCAL sumir.
       const _stateBit = extractStateBit(rawPayload);
-      const realRunning = _stateBit === "1";
       const _eqKey = resolvedEqId ? String(resolvedEqId) : "";
-      const _lastOn = _eqKey ? (lastOnConfirmAtByEq.get(_eqKey) || 0) : 0;
-      const _ageMs = _lastOn ? (Date.now() - _lastOn) : Infinity;
-      if (!realRunning && _lastOn > 0 && _ageMs < STARTUP_SYNC_ON_GRACE_MS) {
-        // v3.11.2 — Houve confirmacao de ON ha < 30s; o bit=0 atual e provavelmente
-        // espontaneo transitorio (latencia de radio / leitura intermediaria).
-        // NAO mexer em desired_running — preserva intencao do operador.
-        pushLog(
-          "warn",
-          "system",
-          `[STARTUP SYNC] Sinal espontaneo 0 ignorado para eq ${_eqKey.substring(0,8)} — comando Ligar confirmado ha ${Math.round(_ageMs/1000)}s`,
-        );
-      } else {
-        // Se o agente ficou offline > 15 min E a bomba está LIGADA (realRunning) divergindo
-        // do desired (estava desligada), a proteção do PLC já a havia desligado durante o
-        // offline → ela só pode ter sido RELIGADA na BOTOEIRA (local). Marca origin='local'
-        // (badge LOCAL no card), sincroniza desired_running=true e NÃO desliga (respeita a
-        // atuação local). Fora desse caso: comportamento normal (remote-desired = sistema).
-        const _localByOffline = wasOfflineLong && realRunning;
-        originForRpc = _localByOffline ? "local" : "remote-desired";
-        if (_localByOffline) {
-          pushLog(
-            "warn",
-            "system",
-            `[STARTUP SYNC] eq ${String(resolvedEqId || "").substring(0,8)} LIGADA após ${Math.round(bootOfflineMs / 60000)}min offline → acionamento LOCAL (botoeira): desired_running=true, sem desligar`,
-          );
-        }
-        try {
-          if (resolvedEqId) {
-            await withCloudTimeout(
-              supabase
-                .from("equipments")
-                .update({ desired_running: realRunning })
-                .eq("id", resolvedEqId),
-              "startup-sync update desired",
-              CLOUD_WRITE_TIMEOUT_MS,
-            );
-            pushLog(
-              "info",
-              "system",
-              `[STARTUP SYNC] eq ${String(resolvedEqId).substring(0,8)} sincronizado: desired_running=${realRunning}${_localByOffline ? " (LOCAL — botoeira)" : " (estado real do PLC)"}`,
-            );
-          }
-        } catch (e) {
-          pushLog("warn", "cloud", `[STARTUP SYNC] update desired falhou: ${e.message}`);
-        }
-      }
-    }
-    else if (divergedFromDesired) {
-      // v3.25.11: Acionamento local SEMPRE PREVALECE e vira o novo desired_running.
-      // Unifica o antigo ramo "local puro" (que só setava origin='local', sem tocar
-      // no desired) com o LOCAL OVERRIDE (v3.25.5). O local puro deixava
-      // desired_running STALE no banco → a RPC de polling (que espelha desired_running
-      // direto da tabela equipments) regerava o frame antigo → TX de reforço → loop
-      // infinito. Agora, QUALQUER atuação local divergente atualiza
-      // desired_running=estado real no banco e cancela comandos/pollings stale,
-      // parando o loop. (Cobre também o caso antigo com safety/comando/expiry.)
-      // v3.25.43: se a mudança de estado veio de um comando do TERMINAL SERIAL
-      // (eu testando pelo suporte), a origem é 'tech_terminal', NÃO 'local'. Evita
-      // que o card mostre "acionamento local" (botoeira) e o alarme falso. Todo o
-      // resto do LOCAL OVERRIDE (atualizar desired, cancelar stale) continua igual:
-      // é uma atuação deliberada, só que atribuída ao técnico.
-      const _isTech = isTechTerminalWindow();
-      const _stateBit = extractStateBit(rawPayload);
-      const realRunning = _stateBit === "1";
-      // BUG 1: desligamento FORÇADO (comando remoto da web) NÃO é acionamento local.
-      // Se a bomba tem forced_shutdown_enabled=true e acabou de DESLIGAR (bit 0), o
-      // {0} veio do forçado — atribui 'remote-desired', não 'local'. Assim o
-      // relatório não mostra "Local" e o badge LOCAL não aparece. Um religamento
-      // (bit 1) segue como local/tech (botoeira). Ver runForcedShutdownSequence.
-      const _fsEnabled = resolvedEqId
-        ? (equipmentById.get(String(resolvedEqId))?.forced_shutdown_enabled === true)
-        : false;
-      const _isForcedOff = _fsEnabled && !realRunning;
-      // v3.25.63: desligamento dentro da janela de uma automação programada NÃO é
-      // local (veio da plataforma). Independe do cache forced_shutdown_enabled.
-      const _isScheduledOff = !realRunning && isWithinScheduledShutdownWindow();
-      originForRpc = _isTech
-        ? "tech_terminal"
-        : ((_isForcedOff || _isScheduledOff) ? "remote-desired" : "local");
-      // v3.25.63: desligamento REMOTO deliberado (forçado/programado) — o comando
-      // pendente que o dirige NÃO deve ser cancelado (senão o card pula LIGADO→
-      // DESLIGADO sem passar por "Desligando"). Deixa o comando concluir normalmente.
-      const _deliberateRemoteOff = _isForcedOff || _isScheduledOff;
-      const reason = safetyArmedForFrame
-        ? "safety cancelado"
-        : pendingCommandActive
-          ? "comando pendente cancelado"
-          : recentSafetyExpiry
-            ? "safety-expiry ignorado"
-            : _isTech
-              ? "terminal serial (suporte técnico)"
-              : "acionamento local";
       pushLog(
-        "warn",
+        "info",
         "system",
-        `[${_isTech ? "TECH TERMINAL" : "LOCAL OVERRIDE"}] RX ${rawPayload} aceito (${reason}) para eq ${String(resolvedEqId || "").substring(0, 8)} — desired_running → ${realRunning}`,
+        `[STARTUP SYNC] Divergência RX↔desired em eq ${_eqKey.substring(0,8)} (real=${_stateBit}) — preservando desired_running (intenção do operador).`,
       );
-
-      // 1) Cancelar safety timer + reforço TX (clearSafetyTimer já chama clearManualReinforcements)
-      if (resolvedEqId) {
-        if (safetyArmedForFrame) {
-          clearSafetyTimer(String(resolvedEqId), `Acionamento local detectado (RX=${rawPayload})`);
-        } else {
-          clearManualReinforcements(String(resolvedEqId), "Acionamento local detectado");
-        }
-      }
-
-      // 2) Atualizar desired_running para refletir o estado real do PLC
-      if (resolvedEqId) {
-        try {
-          await withCloudTimeout(
-            supabase
-              .from("equipments")
-              .update({ desired_running: realRunning })
-              .eq("id", resolvedEqId),
-            "local-override update desired",
-            CLOUD_WRITE_TIMEOUT_MS,
-          );
-        } catch (e) {
-          pushLog("warn", "cloud", `[LOCAL OVERRIDE] update desired falhou: ${e.message}`);
-        }
-
-        // 3) Cancelar comandos pendentes/enviados — MAS não num desligamento remoto
-        // deliberado (forçado/programado): esse comando pendente é justamente o que
-        // dirige o desligamento e precisa CONCLUIR (o card mostra "Desligando" até lá).
-        if (!_deliberateRemoteOff) {
-          try {
-            await withCloudTimeout(
-              supabase
-                .from("commands")
-                .update({
-                  status: "cancelled",
-                  error_message: "Cancelado por acionamento local",
-                  responded_at: new Date().toISOString(),
-                })
-                .eq("farm_id", farmId)
-                .eq("equipment_id", resolvedEqId)
-                .in("status", ["pending", "sent"]),
-              "local-override cancel commands",
-              CLOUD_WRITE_TIMEOUT_MS,
-            );
-          } catch (e) {
-            pushLog("warn", "cloud", `[LOCAL OVERRIDE] cancel commands falhou: ${e.message}`);
-          }
-
-          // 4) Cancelar pollings stale para este TSNN (frame com payload antigo)
-          try {
-            await withCloudTimeout(
-              supabase
-                .from("commands")
-                .update({
-                  status: "cancelled",
-                  error_message: "Polling cancelado: acionamento local alterou desired_running",
-                  responded_at: new Date().toISOString(),
-                })
-                .eq("farm_id", farmId)
-                .eq("type", "polling")
-                .ilike("frame", `%${tsnn}%`)
-                .in("status", ["pending", "sent"]),
-              "local-override cancel stale polling",
-              CLOUD_WRITE_TIMEOUT_MS,
-            );
-          } catch (e) {
-            pushLog("warn", "cloud", `[LOCAL OVERRIDE] cancel polling falhou: ${e.message}`);
-          }
-        }
-      }
+      // Deixa que apply_pump_telemetry classifique como 'local'.
+      originForRpc = "local";
     }
-
+    else if (divergedFromDesired && !safetyArmedForFrame && !pendingCommandActive && !recentSafetyExpiry) originForRpc = "local";
+    else if (divergedFromDesired && safetyArmedForFrame) {
+      pushLog("warn", "system", `RX ${rawPayload} ignorado como acionamento local: safety timer ainda armado para ${tsnn}`);
+    }
+    else if (divergedFromDesired && pendingCommandActive) {
+      pushLog("warn", "system", `RX ${rawPayload} ignorado como acionamento local: comando pendente para eq ${String(resolvedEqId || "").substring(0, 8)}`);
+    }
+    else if (divergedFromDesired && recentSafetyExpiry) {
+      pushLog("warn", "system", `RX ${rawPayload} ignorado como acionamento local: safety expirou há menos de ${Math.round(SAFETY_LOCAL_SUPPRESS_MS / 1000)}s`);
+    }
 
     const { data: updatedId, error } = await withCloudTimeout(
       supabase.rpc("apply_pump_telemetry", {
@@ -3959,11 +2197,6 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
       CLOUD_TELEMETRY_TIMEOUT_MS,
     );
     if (error || !updatedId) throw (error || new Error("espontaneo sem equipamento correspondente"));
-
-    // v3.25.10: espontâneo processado com sucesso → estado da PLC conhecido. Marca
-    // para que o startup-sync não intercepte espontâneos seguintes desta PLC (o
-    // primeiro espontâneo ainda usou o startup-sync acima, se aplicável).
-    markStartupSyncDone(tsnn);
 
     const originLocal = originForRpc === "local";
 
@@ -4055,7 +2288,6 @@ async function applySpontaneousImmediately(tsnn, rawPayload, rxFrame) {
     return true;
   } catch (e) {
     pushLog("warn", "cloud", `Espontaneo IMEDIATO falhou (${e.message}); caindo para fila normal`);
-    noteCloudError(e, "handleSpontaneousImmediate");
     return false;
   }
 }
@@ -4095,28 +2327,6 @@ function broadcastEquipmentState(equipmentId, tsnn, rawPayload) {
 // --- Telemetria: gravacao IMEDIATA (PRIORIDADE MAXIMA) ---
 // Estado de bomba (last_outputs_state) NAO PODE esperar fila. Tenta IMEDIATO,
 // 1 retry rapido em 2s se falhar, e so entao cai na fila como ultimo recurso.
-// v3.25.40 (#10) — Quando a nuvem volta, o estado LOCAL é a fonte da verdade:
-// reenvia o último payload RX conhecido de cada PLC. Só grava o que a serial
-// realmente observou (nunca "desliga por falta de confirmação"); _origin fica
-// null, então a RPC preserva a origem anterior do acionamento.
-let resyncInFlight = false;
-async function resyncKnownStateToCloud(motivo) {
-  if (resyncInFlight) return;
-  if (!supabase || !farmId || lastRxStateByTsnn.size === 0) return;
-  resyncInFlight = true;
-  try {
-    const total = lastRxStateByTsnn.size;
-    try { pushLog("info", "cloud", `[RESYNC] Nuvem voltou (${motivo}) — reenviando estado real de ${total} PLC(s)`); } catch (_) {}
-    for (const [tsnn, st] of lastRxStateByTsnn.entries()) {
-      if (!st || !/^[01]{1,6}$/.test(String(st.payload || ""))) continue;
-      try { await queueTelemetry(tsnn, st.payload, st.frame, null); } catch (_) {}
-    }
-  } catch (_) {
-  } finally {
-    resyncInFlight = false;
-  }
-}
-
 async function queueTelemetry(tsnn, rawPayload, rxFrame, commandId) {
   if (!supabase || !farmId) return;
   // v3.8.6: passa _origin explicito.
@@ -4146,7 +2356,6 @@ async function queueTelemetry(tsnn, rawPayload, rxFrame, commandId) {
     }
   } catch (e) {
     pushLog("warn", "cloud", `Telemetria IMEDIATA falhou (${e.message}); tentando retry em 2s`);
-    noteCloudError(e, "queueTelemetry-immediate");
   }
   // Tentativa 2: retry agendado (2s)
   setTimeout(async () => {
@@ -4178,7 +2387,6 @@ async function queueTelemetry(tsnn, rawPayload, rxFrame, commandId) {
         telemetryQueue.splice(0, telemetryQueue.length - TELEMETRY_QUEUE_MAX);
       }
       pushLog("warn", "cloud", `Telemetria em fila apos 2 tentativas (${telemetryQueue.length}): ${e.message}`, null, `Telemetria em fila local (${telemetryQueue.length}). Comunicação via rádio continua normal.`);
-      noteCloudError(e, "queueTelemetry-retry");
       void flushTelemetryQueue();
     }
   }, 2000);
@@ -4215,7 +2423,6 @@ async function flushTelemetryQueue() {
       telemetryWarnAt = Date.now() + 60_000;
       pushLog("warn", "cloud", `Telemetria em fila (${telemetryQueue.length}); nuvem indisponível/lenta: ${e.message}`, null, `Telemetria em fila local (${telemetryQueue.length}). Comunicação via rádio continua normal.`);
     }
-    noteCloudError(e, "flushTelemetryQueue");
   } finally {
     telemetryFlushInFlight = false;
   }
@@ -4226,8 +2433,6 @@ async function flushTelemetryQueue() {
 // nao tem sufixo de nivel ou se nao ha equipamento de nivel cadastrado.
 async function processLevelReadings(rawFrame, plcHwId) {
   if (!supabase || !farmId || !rawFrame || !plcHwId) return;
-  const tsnn = String(plcHwId || "").trim().toUpperCase().substring(0, 4);
-  const hasFlow = flowEquipByTsnn.has(tsnn);
   RX_LEVEL_RE.lastIndex = 0;
   let m;
   const seen = new Set();
@@ -4237,11 +2442,6 @@ async function processLevelReadings(rawFrame, plcHwId) {
     if (!Number.isFinite(sensorIndex) || !Number.isFinite(rawValue)) continue;
     if (seen.has(sensorIndex)) continue; // dedup por frame
     seen.add(sensorIndex);
-    // Se este TSNN tem equipamento com vazao_mode='real', N2 = totalizador e N3 = vazao instantanea:
-    // ambos sao tratados por processFlowReadings, NAO devem ir para apply_level_telemetry.
-    if (hasFlow && (sensorIndex === 2 || sensorIndex === 3)) continue;
-    // N3 sem contexto de vazao nao existe no protocolo antigo — ignora.
-    if (sensorIndex === 3) continue;
     try {
       await withCloudTimeout(
         supabase.rpc("apply_level_telemetry", {
@@ -4259,557 +2459,6 @@ async function processLevelReadings(rawFrame, plcHwId) {
       pushLog("warn", "cloud", `Nivel N${sensorIndex} PLC ${plcHwId} falhou: ${e.message}`);
     }
   }
-}
-
-// ============================================================================
-// INFRA DE VAZAO (N2 = totalizador m3, N3 = vazao instantanea x10)
-// ----------------------------------------------------------------------------
-// Fluxo: frame RX -> processFlowReadings -> grava flow_total_m3 / flow_rate_m3h
-// no equipments (do equipamento com vazao_mode='real' daquele TSNN).
-//
-// Reset (RV): frontend seta equipments.vazao_reset_pending=true OU o scheduler
-// de meia-noite marca todos os TSNN 'real'. checkRemoteResetPending() (chamado
-// no inicio de cada polling) copia isso para pendingVazaoResetByTsnn. Antes de
-// enviar o frame de polling, maybeInjectVazaoReset() reescreve `{PAYLOAD}` como
-// `{PAYLOADRV}` e remove do Map — o firmware zera o contador ao ler RV.
-// ============================================================================
-const pendingVazaoResetByTsnn = new Map(); // TSNN -> true (aguardando envio RV)
-const lastN2ByTsnn = new Map();            // TSNN -> { value: number, at: number }
-// Acumulador do dia por TSNN: soma de TODOS os segmentos já encerrados (resets)
-// do dia corrente. O consumo do dia em qualquer instante =
-//   dayAccum.accum + lastRawN2 (leitura atual do firmware pós último reset).
-// O sistema é a memória — a placa pode ser zerada N vezes no mesmo dia.
-const flowDayAccumByTsnn = new Map();      // TSNN -> { date: "YYYY-MM-DD", accum: number }
-let midnightResetTimer = null;
-
-// Handlers RX temporários usados pela sequência de meia-noite (v3.25.4).
-// Quando presente para um TSNN, processFlowReadings encaminha a leitura ao
-// handler e NÃO aplica o fluxo normal de acumulação/DB writes (a sequência
-// cuida da persistência sozinha, para evitar corrida com virada de dia).
-const midnightRxHandlers = new Map(); // TSNN -> (rxData) => void
-let midnightSequenceActive = false;
-
-function todayStr() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function yesterdayStr() {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function processFlowReadings(rawFrame, plcHwId) {
-  if (!supabase || !farmId || !rawFrame || !plcHwId) return;
-  const tsnn = String(plcHwId || "").trim().toUpperCase().substring(0, 4);
-  const eq = flowEquipByTsnn.get(tsnn);
-  if (!eq) return; // nenhum equipamento com vazao_mode='real' para este PLC
-
-  // Extrai N2 e N3 do frame.
-  RX_LEVEL_RE.lastIndex = 0;
-  let m;
-  let rawN2 = null;
-  let rawN3 = null;
-  const seen = new Set();
-  while ((m = RX_LEVEL_RE.exec(rawFrame)) !== null) {
-    const idx = parseInt(m[1], 10);
-    const val = parseInt(m[2], 10);
-    if (!Number.isFinite(idx) || !Number.isFinite(val)) continue;
-    if (seen.has(idx)) continue;
-    seen.add(idx);
-    if (idx === 2) rawN2 = val;
-    else if (idx === 3) rawN3 = val;
-  }
-
-  // Detecta confirmação de reset (RV) na resposta do firmware.
-  // Frame padrão: ..._[TSNN_0_]{0}_N1..._N2..._N3..._[TSNN_ETX_]
-  // Frame com confirmação: ..._[TSNN_0_]{0RV}_N1..._N2..._N3..._[TSNN_ETX_]
-  const RX_RESET_CONFIRM_RE = /\{[01]*RV\}/;
-  const resetConfirmed = RX_RESET_CONFIRM_RE.test(rawFrame);
-
-  // Interceptor da sequência de meia-noite (v3.25.4). Se há um handler
-  // registrado para este TSNN, entrega os dados extraídos e curto-circuita
-  // o fluxo normal (a sequência persistirá em daily_consumption/equipments).
-  {
-    const handler = midnightRxHandlers.get(tsnn);
-    if (handler) {
-      try { handler({ tsnn, n2: rawN2, n3: rawN3, rvConfirmed: resetConfirmed }); }
-      catch (e) { pushLog("warn", "system", `[VAZAO-MIDNIGHT] handler TSNN ${tsnn} erro: ${e.message}`); }
-      return;
-    }
-  }
-
-  // --- Reset confirmado pelo firmware (RV na resposta) ---
-  // NÃO fecha o dia. Apenas soma o segmento (lastRawN2) ao acumulador do dia
-  // e zera a última leitura. O dia continua acumulando normalmente.
-  if (resetConfirmed) {
-    try {
-      const today = todayStr();
-      const lastEntry = lastN2ByTsnn.get(tsnn);
-      const lastRawN2 = lastEntry ? lastEntry.value : 0;
-      let dayAccum = flowDayAccumByTsnn.get(tsnn);
-      if (!dayAccum || dayAccum.date !== today) {
-        dayAccum = { date: today, accum: 0 };
-        flowDayAccumByTsnn.set(tsnn, dayAccum);
-      }
-      dayAccum.accum += Math.max(0, lastRawN2);
-      lastN2ByTsnn.set(tsnn, { value: 0, at: Date.now() });
-
-      // flow_total_m3 = consumo do dia (parcial pós-reset = 0, então = accum).
-      try {
-        await withCloudTimeout(
-          supabase.from("equipments").update({ flow_total_m3: dayAccum.accum }).eq("id", eq.id),
-          "flow RV reset update",
-          CLOUD_TELEMETRY_TIMEOUT_MS,
-        );
-        eq.flow_total_m3 = dayAccum.accum;
-      } catch (e) {
-        pushLog("warn", "cloud", `[VAZAO] flow_total_m3 update pós-RV falhou: ${e.message}`);
-      }
-      pushLog("info", "system",
-        `[VAZAO] Reset CONFIRMADO pelo firmware TSNN ${tsnn}: +${lastRawN2} m3 ao dia (accum_dia=${dayAccum.accum})`);
-    } catch (e) {
-      pushLog("warn", "system", `[VAZAO] tratamento RV TSNN ${tsnn} falhou: ${e.message}`);
-    }
-  }
-
-  // --- N2: totalizador com acumulador diário e detecção de reset (fallback) ---
-  // Só processa N2 como leitura normal quando NÃO houve confirmação RV neste frame
-  // (na resposta com RV o firmware envia N2=0, que já foi tratado acima).
-  if (rawN2 !== null && !resetConfirmed) {
-    try {
-      const today = todayStr();
-      const lastEntry = lastN2ByTsnn.get(tsnn);
-      const lastRawN2 = lastEntry ? lastEntry.value : 0;
-
-      let dayAccum = flowDayAccumByTsnn.get(tsnn);
-
-      // Virada de dia: fecha o dia anterior em daily_consumption
-      // com o total real (accum + lastRawN2, que era o último segmento aberto).
-      if (dayAccum && dayAccum.date !== today) {
-        const consumoDiaAnterior = dayAccum.accum + Math.max(0, lastRawN2);
-        if (consumoDiaAnterior > 0) {
-          try {
-            await supabase.from("daily_consumption").upsert(
-              {
-                farm_id: farmId,
-                equipment_id: eq.id,
-                date: dayAccum.date,
-                total_m3: consumoDiaAnterior,
-                mode: "real",
-              },
-              { onConflict: "equipment_id,date" },
-            );
-            pushLog("info", "system",
-              `[VAZAO] Dia ${dayAccum.date} fechado (rollover): ${consumoDiaAnterior} m3 (TSNN ${tsnn})`);
-          } catch (e) {
-            pushLog("warn", "system", `[VAZAO] upsert daily_consumption (rollover) falhou: ${e.message}`);
-          }
-        }
-        dayAccum = null;
-      }
-
-      if (!dayAccum) {
-        dayAccum = { date: today, accum: 0 };
-        flowDayAccumByTsnn.set(tsnn, dayAccum);
-      }
-
-      // Fallback (firmware antigo sem confirmação RV): rawN2 caiu -> soma o
-      // segmento anterior ao acumulador do dia. Firmware novo já tratou via RV.
-      if (rawN2 < lastRawN2 && lastRawN2 > 0) {
-        dayAccum.accum += lastRawN2;
-        pushLog("info", "system",
-          `[VAZAO] Reset detectado por queda TSNN ${tsnn}: +${lastRawN2} m3 ao dia (accum_dia=${dayAccum.accum})`);
-      }
-
-      lastN2ByTsnn.set(tsnn, { value: rawN2, at: Date.now() });
-      const consumoDia = dayAccum.accum + rawN2;
-
-      await withCloudTimeout(
-        supabase.from("equipments").update({ flow_total_m3: consumoDia }).eq("id", eq.id),
-        "flow N2 update",
-        CLOUD_TELEMETRY_TIMEOUT_MS,
-      );
-      eq.flow_total_m3 = consumoDia;
-      pushLog("info", "cloud",
-        `[VAZAO] PLC ${plcHwId}: raw=${rawN2}, accum_dia=${dayAccum.accum}, total_dia=${consumoDia} m3`, null, null);
-    } catch (e) {
-      pushLog("warn", "cloud", `[VAZAO] N2 update PLC ${plcHwId} falhou: ${e.message}`);
-    }
-  }
-
-  // --- N3: vazao instantanea (rawValue / 10) ---
-  // Não processa quando o frame é confirmação de RV (dados de N2/N3 desse frame
-  // são descartados; próximas leituras retomam normalmente).
-  if (rawN3 !== null && !resetConfirmed) {
-    try {
-      const flowRate = rawN3 / 10.0;
-      await withCloudTimeout(
-        supabase.from("equipments").update({ flow_rate_m3h: flowRate }).eq("id", eq.id),
-        "flow N3 update",
-        CLOUD_TELEMETRY_TIMEOUT_MS,
-      );
-      pushLog("info", "cloud",
-        `[VAZAO] PLC ${plcHwId}: vazao_instantanea=${flowRate.toFixed(1)} m3/h`, null, null);
-    } catch (e) {
-      pushLog("warn", "cloud", `[VAZAO] N3 update PLC ${plcHwId} falhou: ${e.message}`);
-    }
-  }
-}
-
-// Marca todos os TSNN com vazao_mode='real' como pendentes de RV (reset físico
-// no firmware). Executado por scheduleMidnightReset() e pode ser chamado
-// manualmente a partir de fluxos administrativos.
-function markAllFlowRealForReset(reason) {
-  let count = 0;
-  for (const tsnn of flowEquipByTsnn.keys()) {
-    pendingVazaoResetByTsnn.set(tsnn, true);
-    count++;
-  }
-  if (count > 0) {
-    pushLog("info", "system",
-      `[VAZAO] ${count} TSNN marcados para RV (${reason || "midnight"})`);
-  }
-  return count;
-}
-
-// Agenda um disparo para 00:00:05 local do próximo dia, marcando todos os
-// equipamentos com vazao_mode='real' para receber RV no próximo polling.
-// Reagenda automaticamente após o disparo.
-function scheduleMidnightReset() {
-  if (midnightResetTimer) {
-    clearTimeout(midnightResetTimer);
-    midnightResetTimer = null;
-  }
-  const now = new Date();
-  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5, 0);
-  const delayMs = Math.max(1_000, next.getTime() - now.getTime());
-  midnightResetTimer = setTimeout(async () => {
-    try {
-      try { await refreshEquipmentCache(); } catch (_) {}
-      // v3.25.4: janela de meia-noite (00:00–01:00) — cada TSNN 'real' tem até
-      // 3 tentativas (00:00:05, 00:20, 00:40) de fechar+resetar. Falhando as
-      // 3, força fechamento com o último valor conhecido e delega o RV ao
-      // próximo polling normal (fallback por queda cobre firmwares antigos).
-      startMidnightWindow();
-    } catch (e) {
-      pushLog("warn", "system", `[VAZAO] scheduleMidnightReset disparo falhou: ${e.message}`);
-    } finally {
-      scheduleMidnightReset(); // reagenda para a próxima meia-noite
-    }
-  }, delayMs);
-  pushLog("info", "system",
-    `[VAZAO] Reset de meia-noite agendado em ${Math.round(delayMs / 1000)}s (${next.toISOString()})`);
-}
-
-// Fecha o dia corrente para todos os TSNN com vazao_mode='real':
-// grava daily_consumption = dayAccum.accum + lastRawN2 (todos os segmentos)
-// e reinicia o acumulador para o novo dia.
-async function closeAllFlowDays(reason) {
-  for (const [tsnn, dayAccum] of flowDayAccumByTsnn.entries()) {
-    const eq = flowEquipByTsnn.get(tsnn);
-    if (!eq) continue;
-    const lastEntry = lastN2ByTsnn.get(tsnn);
-    const lastRawN2 = lastEntry ? lastEntry.value : 0;
-    const consumoDia = dayAccum.accum + Math.max(0, lastRawN2);
-    if (consumoDia > 0) {
-      try {
-        await supabase.from("daily_consumption").upsert(
-          {
-            farm_id: farmId,
-            equipment_id: eq.id,
-            date: dayAccum.date,
-            total_m3: consumoDia,
-            mode: "real",
-          },
-          { onConflict: "equipment_id,date" },
-        );
-        pushLog("info", "system",
-          `[VAZAO] Dia ${dayAccum.date} fechado (${reason}): ${consumoDia} m3 (TSNN ${tsnn})`);
-      } catch (e) {
-        pushLog("warn", "system",
-          `[VAZAO] fechamento diário TSNN ${tsnn} falhou: ${e.message}`);
-      }
-    }
-    // Novo dia começa zerado; lastRawN2 também reseta pois o firmware receberá RV.
-    flowDayAccumByTsnn.set(tsnn, { date: todayStr(), accum: 0 });
-    lastN2ByTsnn.set(tsnn, { value: 0, at: Date.now() });
-    try {
-      await supabase.from("equipments").update({ flow_total_m3: 0 }).eq("id", eq.id);
-      eq.flow_total_m3 = 0;
-    } catch (_) {}
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Sequência de meia-noite (v3.25.4)
-// ---------------------------------------------------------------------------
-// Substitui closeAllFlowDays()+markAllFlowRealForReset() por um fluxo síncrono
-// por equipamento que elimina a janela entre "última leitura" e "RV":
-//   1) sendAndWaitResponse com polling normal (sem RV) — captura N2 final;
-//      grava daily_consumption com data de ONTEM (dayAccum.date).
-//   2) sendAndWaitResponse com RV (retry 0/6/12/18s, timeout 5s cada) — se
-//      confirmado, o handler já contabilizou; se não, marca pendingVazaoReset
-//      para o próximo polling do dia seguinte.
-//   3) Reinicia flowDayAccumByTsnn/lastN2ByTsnn para hoje.
-// Polling normal é pausado (midnightSequenceActive) enquanto executa.
-function buildMidnightPollingFrame(tsnn, withRV) {
-  // Frame padrão de polling: [TSNN_1_]{0}[TSNN_ETX_]\r
-  // No polling real o payload reflete o estado das saídas do PLC; aqui a
-  // sequência não altera relés — pede apenas leitura de contadores. `{0}` é
-  // aceito pelo firmware como "consulta sem transição" (assim como no polling
-  // normal, cujo payload é substituído pelo firmware conforme estado atual).
-  const payload = withRV ? "0RV" : "0";
-  return `[${tsnn}_1_]{${payload}}[${tsnn}_ETX_]\r`;
-}
-
-async function sendAndWaitFlowResponse(tsnn, frame, timeoutMs) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (val) => {
-      if (done) return;
-      done = true;
-      midnightRxHandlers.delete(tsnn);
-      clearTimeout(t);
-      resolve(val);
-    };
-    midnightRxHandlers.set(tsnn, (rx) => finish(rx));
-    const t = setTimeout(() => finish(null), timeoutMs);
-    try {
-      sendTxFrame(frame, { priority: "reset" });
-    } catch (e) {
-      pushLog("warn", "serial", `[VAZAO-MIDNIGHT] sendTxFrame TSNN ${tsnn}: ${e.message}`);
-      finish(null);
-    }
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Janela de meia-noite (00:00 → 01:00) com até 3 tentativas por TSNN.
-// ---------------------------------------------------------------------------
-// A cada disparo (00:00:05, 00:20:00, 00:40:00 após meia-noite) o agente tenta:
-//   1) polling normal (`{0}`) — capturar N2 final;
-//   2) polling com RV + 4 sub-retries (0/6/12/18s) — confirmar reset físico.
-// Sucesso = RV CONFIRMADO. Isso grava daily_consumption com data de ontem,
-// zera flow_total_m3 e reinicia flowDayAccumByTsnn para o dia novo.
-// Se as 3 tentativas falharem, o agente força o fechamento com o último N2
-// conhecido e marca pendingVazaoResetByTsnn para tentar RV no próximo polling.
-//
-// Durante a janela, o polling normal dos DEMAIS equipamentos segue funcionando
-// (a sequência não é global — cada TSNN 'real' tem seu próprio mutex).
-const MIDNIGHT_ATTEMPT_OFFSETS_MS = [0, 20 * 60 * 1000, 40 * 60 * 1000];
-const midnightBusyByTsnn = new Set(); // mutex por TSNN (evita reentrada)
-
-function startMidnightWindow() {
-  if (!supabase || !farmId) return;
-  const entries = Array.from(flowEquipByTsnn.entries());
-  if (entries.length === 0) {
-    pushLog("info", "system", "[VAZAO-MIDNIGHT] Nenhum TSNN com vazao_mode=real; nada a fazer.");
-    return;
-  }
-  pushLog("info", "system",
-    `[VAZAO-MIDNIGHT] Janela aberta para ${entries.length} TSNN(s) — 3 tentativas até 01:00.`);
-  for (const [tsnn] of entries) {
-    // date de fechamento: a data do accum atual (deve ser "ontem" às 00:00:05)
-    // é congelada aqui para não sofrer mutação por RX intercalado.
-    const dayAccum = flowDayAccumByTsnn.get(tsnn);
-    const closeDate = dayAccum && dayAccum.date !== todayStr() ? dayAccum.date : yesterdayStr();
-    scheduleMidnightAttempts(tsnn, closeDate);
-  }
-}
-
-function scheduleMidnightAttempts(tsnn, closeDate) {
-  const startedAt = Date.now();
-  const runAttempt = async (attemptIdx) => {
-    if (midnightBusyByTsnn.has(tsnn)) {
-      pushLog("warn", "system",
-        `[VAZAO-MIDNIGHT] TSNN ${tsnn}: tentativa ${attemptIdx + 1} pulada (mutex ocupado).`);
-      return scheduleNext(attemptIdx, false);
-    }
-    midnightBusyByTsnn.add(tsnn);
-    let closed = false;
-    try {
-      closed = await runMidnightAttempt(tsnn, closeDate, attemptIdx);
-    } catch (e) {
-      pushLog("warn", "system",
-        `[VAZAO-MIDNIGHT] TSNN ${tsnn}: erro na tentativa ${attemptIdx + 1}: ${e.message}`);
-    } finally {
-      midnightBusyByTsnn.delete(tsnn);
-    }
-    scheduleNext(attemptIdx, closed);
-  };
-  const scheduleNext = (attemptIdx, closed) => {
-    if (closed) return; // sucesso — não agenda mais
-    const nextIdx = attemptIdx + 1;
-    if (nextIdx >= MIDNIGHT_ATTEMPT_OFFSETS_MS.length) {
-      // Última falhou — força fechamento com último valor conhecido.
-      void forceCloseMidnight(tsnn, closeDate);
-      return;
-    }
-    const targetAt = startedAt + MIDNIGHT_ATTEMPT_OFFSETS_MS[nextIdx];
-    const delay = Math.max(1_000, targetAt - Date.now());
-    setTimeout(() => { void runAttempt(nextIdx); }, delay);
-    pushLog("info", "system",
-      `[VAZAO-MIDNIGHT] TSNN ${tsnn}: próxima tentativa em ${Math.round(delay / 1000)}s`);
-  };
-  // Primeira tentativa imediata (o próprio scheduleMidnightReset já disparou às 00:00:05).
-  void runAttempt(0);
-}
-
-// Executa UMA tentativa: polling normal → RV com 4 sub-retries.
-// Retorna true se RV foi confirmado (dia fechado com valor real).
-async function runMidnightAttempt(tsnn, closeDate, attemptIdx) {
-  const eq = flowEquipByTsnn.get(tsnn);
-  if (!eq) return false;
-  pushLog("info", "system",
-    `[VAZAO-MIDNIGHT] TSNN ${tsnn}: tentativa ${attemptIdx + 1}/3 iniciando.`);
-
-  // PASSO 1 — polling normal
-  const rxNormal = await sendAndWaitFlowResponse(
-    tsnn, buildMidnightPollingFrame(tsnn, false), 5000,
-  );
-  let n2Captured = null;
-  if (rxNormal && Number.isFinite(rxNormal.n2)) {
-    n2Captured = Math.max(0, rxNormal.n2);
-    // Atualiza cache local — o handler intercepta e não deixa o processFlow
-    // normal atualizar lastN2ByTsnn, então fazemos aqui.
-    lastN2ByTsnn.set(tsnn, { value: n2Captured, at: Date.now() });
-  } else {
-    pushLog("warn", "system",
-      `[VAZAO-MIDNIGHT] TSNN ${tsnn}: sem resposta ao polling normal (tent ${attemptIdx + 1}).`);
-    return false; // sem N2 real e sem RV — não fecha; próxima tentativa
-  }
-
-  // PASSO 2 — RV com sub-retries 0/6/12/18s
-  const subDelays = [0, 6000, 6000, 6000];
-  let resetConfirmed = false;
-  for (let sub = 0; sub < subDelays.length; sub++) {
-    if (subDelays[sub] > 0) await sleep(subDelays[sub]);
-    const rxRV = await sendAndWaitFlowResponse(
-      tsnn, buildMidnightPollingFrame(tsnn, true), 5000,
-    );
-    if (rxRV && rxRV.rvConfirmed) {
-      resetConfirmed = true;
-      pushLog("info", "system",
-        `[VAZAO-MIDNIGHT] TSNN ${tsnn}: RV CONFIRMADO (tent ${attemptIdx + 1}, sub ${sub + 1}/4).`);
-      break;
-    }
-    pushLog("warn", "system",
-      `[VAZAO-MIDNIGHT] TSNN ${tsnn}: RV sem confirmação (tent ${attemptIdx + 1}, sub ${sub + 1}/4).`);
-  }
-
-  if (!resetConfirmed) return false;
-
-  // Sucesso — fecha o dia com n2Captured + accum e reinicia.
-  const dayAccum = flowDayAccumByTsnn.get(tsnn) || { date: closeDate, accum: 0 };
-  const consumoDia = Math.max(0, dayAccum.accum) + n2Captured;
-  await persistDailyConsumption(eq.id, closeDate, consumoDia,
-    `dia fechado (tent ${attemptIdx + 1}) accum=${dayAccum.accum} n2=${n2Captured}`);
-  await resetFlowDayForTsnn(tsnn, eq);
-  return true;
-}
-
-// Fechamento forçado após 3 tentativas falhas: usa último N2 conhecido +
-// accum e delega o RV ao próximo polling normal (pendingVazaoResetByTsnn).
-async function forceCloseMidnight(tsnn, closeDate) {
-  const eq = flowEquipByTsnn.get(tsnn);
-  if (!eq) return;
-  const dayAccum = flowDayAccumByTsnn.get(tsnn) || { date: closeDate, accum: 0 };
-  const lastEntry = lastN2ByTsnn.get(tsnn);
-  const lastN2 = lastEntry ? Math.max(0, lastEntry.value) : 0;
-  const consumoDia = Math.max(0, dayAccum.accum) + lastN2;
-  pushLog("error", "system",
-    `[VAZAO-MIDNIGHT] TSNN ${tsnn}: 3 tentativas falharam — fechamento forçado com último valor (${consumoDia} m3). RV delegado ao próximo polling.`);
-  await persistDailyConsumption(eq.id, closeDate, consumoDia, "fechamento forçado (3 falhas)");
-  pendingVazaoResetByTsnn.set(tsnn, true);
-  await resetFlowDayForTsnn(tsnn, eq);
-}
-
-async function persistDailyConsumption(equipmentId, date, totalM3, reason) {
-  if (totalM3 <= 0) return;
-  try {
-    await supabase.from("daily_consumption").upsert(
-      { farm_id: farmId, equipment_id: equipmentId, date, total_m3: totalM3, mode: "real" },
-      { onConflict: "equipment_id,date" },
-    );
-    pushLog("info", "system",
-      `[VAZAO-MIDNIGHT] daily_consumption ${date} = ${totalM3} m3 (${reason})`);
-  } catch (e) {
-    pushLog("warn", "system",
-      `[VAZAO-MIDNIGHT] upsert daily_consumption falhou: ${e.message}`);
-  }
-}
-
-async function resetFlowDayForTsnn(tsnn, eq) {
-  flowDayAccumByTsnn.set(tsnn, { date: todayStr(), accum: 0 });
-  lastN2ByTsnn.set(tsnn, { value: 0, at: Date.now() });
-  try {
-    await supabase.from("equipments").update({ flow_total_m3: 0 }).eq("id", eq.id);
-    eq.flow_total_m3 = 0;
-  } catch (_) {}
-}
-
-
-
-
-
-// Consulta equipments.vazao_reset_pending=true e transfere para o Map local,
-// limpando a flag no banco em seguida. Chamado no início de cada ciclo de polling.
-async function checkRemoteResetPending() {
-  if (!supabase || !farmId) return;
-  try {
-    const { data: eqs, error } = await supabase
-      .from("equipments")
-      .select("id, hw_id")
-      .eq("farm_id", farmId)
-      .eq("vazao_mode", "real")
-      .eq("vazao_reset_pending", true);
-    if (error) {
-      pushLog("debug", "system", `[VAZAO] checkRemoteResetPending query erro: ${error.message}`);
-      return;
-    }
-    if (!eqs || eqs.length === 0) return;
-    for (const eq of eqs) {
-      const hw = String(eq.hw_id || "").trim().toUpperCase();
-      const tsnn = hw.length >= 4 ? hw.substring(0, 4) : hw;
-      if (tsnn) {
-        pendingVazaoResetByTsnn.set(tsnn, true);
-        pushLog("info", "system", `[VAZAO] Reset remoto pendente detectado para TSNN ${tsnn}`);
-      }
-      try {
-        await supabase.from("equipments").update({ vazao_reset_pending: false }).eq("id", eq.id);
-      } catch (e) {
-        pushLog("warn", "system", `[VAZAO] limpeza da flag vazao_reset_pending falhou: ${e.message}`);
-      }
-    }
-  } catch (e) {
-    pushLog("warn", "system", `[VAZAO] checkRemoteResetPending falhou: ${e.message}`);
-  }
-}
-
-// Se houver reset pendente para o TSNN deste frame, reescreve `{PAYLOAD}` como
-// `{PAYLOADRV}` para que o firmware zere o contador físico ao processar.
-// Retorna o frame (possivelmente modificado). Remove o TSNN do Map após injeção.
-function maybeInjectVazaoReset(frame, tsnn) {
-  if (!frame || !tsnn) return frame;
-  const key = String(tsnn).toUpperCase();
-  if (!pendingVazaoResetByTsnn.has(key)) return frame;
-  // Só injeta em frame de polling/comando comum `[TSNN_1_]{PAYLOAD}...`.
-  const m = String(frame).match(/\{([01]{1,6})(RV)?\}/);
-  if (!m || m[2]) {
-    // Sem payload posicional ou já tem RV — não mexe, mas mantém a marca para
-    // a próxima oportunidade de envio.
-    return frame;
-  }
-  const newFrame = frame.replace(/\{([01]{1,6})\}/, `{$1RV}`);
-  pendingVazaoResetByTsnn.delete(key);
-  pushLog("info", "system", `[VAZAO] RV injetado no polling de TSNN ${key}`);
-  return newFrame;
 }
 
 function markBridgeAlive() {
@@ -4893,84 +2542,12 @@ async function recoverBridge(reason, options = {}) {
   }
 }
 
-// v3.25.49 — AUTO-RECOVERY da bridge com BACKOFF. Chamado quando o processo da
-// bridge MORRE/crasha (exit/error) ou some silenciosamente (pid check). Espera
-// o backoff (3→5→10→15→30s), relança até BRIDGE_MAX_RELAUNCH vezes. Se todas
-// falharem: marca bridgeDead e o agente SEGUE rodando (só a serial morre; o
-// polling HTTP continua). NUNCA mostra popup — headless total.
-function scheduleBridgeRelaunch(reason) {
-  if (appClosing || portManuallyClosed || bridgeStopping || bridgeRecovering) return;
-  if (bridgeRelaunchTimer || bridgeReady) return; // já agendado ou já subiu
-  if (bridgeRelaunchAttempts >= BRIDGE_MAX_RELAUNCH) {
-    if (!bridgeDead) {
-      bridgeDead = true;
-      lastBridgeError = "bridge_dead";
-      pushLog("error", "system", `[BRIDGE] ${BRIDGE_MAX_RELAUNCH} tentativas falharam (${reason}) — serial MORTA; polling HTTP continua. Sem popup.`);
-      try { void sendHeartbeat(); } catch (_) {}
-    }
-    return;
-  }
-  const delay = BRIDGE_BACKOFF_MS[Math.min(bridgeRelaunchAttempts, BRIDGE_BACKOFF_MS.length - 1)];
-  bridgeRelaunchAttempts++;
-  lastBridgeError = `bridge_relaunch_${bridgeRelaunchAttempts}`;
-  pushLog("warn", "system", `[BRIDGE] relançando em ${Math.round(delay / 1000)}s (tentativa ${bridgeRelaunchAttempts}/${BRIDGE_MAX_RELAUNCH}) — ${reason}`);
-  bridgeRelaunchTimer = setTimeout(async () => {
-    bridgeRelaunchTimer = null;
-    if (appClosing || portManuallyClosed || !comPort || bridgeReady) return;
-    try {
-      await stopBridge();
-      await startBridge(comPort); // o handler READY reseta os contadores
-    } catch (e) {
-      pushLog("warn", "system", `[BRIDGE] relançamento falhou: ${e.message}`);
-      scheduleBridgeRelaunch(`falha no relançamento: ${e.message}`);
-    }
-  }, delay);
-}
-
-function nextComPort(cur) {
-  const i = COM_CYCLE.indexOf(String(cur || "").toUpperCase());
-  return i === -1 ? COM_CYCLE[0] : COM_CYCLE[(i + 1) % COM_CYCLE.length];
-}
-
-// v3.25.49 — COM TRAVADA: bridge aberta mas sem NENHUM RX por 60s. Mata+reabre;
-// após COM_STUCK_MAX travamentos na mesma porta, tenta a próxima COM.
-function handleComStuck() {
-  if (bridgeRecovering || bridgeRelaunchTimer) return;
-  comStuckCount++;
-  lastBridgeError = "com_stuck";
-  pushLog("warn", "serial", `[COM-STUCK] sem RX há >${COM_STUCK_MS / 1000}s em ${comPort} — reset (${comStuckCount}/${COM_STUCK_MAX})`);
-  try { void sendHeartbeat(); } catch (_) {}
-  if (comStuckCount >= COM_STUCK_MAX) {
-    const next = nextComPort(comPort);
-    pushLog("warn", "serial", `[COM-STUCK] ${COM_STUCK_MAX} travamentos — próxima COM: ${comPort} → ${next}`);
-    comPort = next;
-    comStuckCount = 0;
-  }
-  lastRxTimestamp = 0; // baseline zerado: só re-dispara após RX na nova tentativa
-  void recoverBridge(`COM travada (sem RX ${COM_STUCK_MS / 1000}s)`);
-}
-
 function startBridgeWatchdog() {
   stopBridgeWatchdog();
 
   bridgeWatchdogTimer = setInterval(() => {
-    if (appClosing || bridgeStopping || bridgeRecovering || portManuallyClosed || bridgeRelaunchTimer) return;
-
-    // v3.25.49 (pid check) — morte SILENCIOSA: a bridge já subiu nesta sessão mas
-    // o processo sumiu/morreu sem disparar 'exit'. Relança com backoff.
-    if (bridgeWasEverReady && !bridgeDead && !bridgeReady &&
-        (!bridgeProcess || bridgeProcess.exitCode !== null || bridgeProcess.killed)) {
-      scheduleBridgeRelaunch("processo da bridge ausente (pid check)");
-      return;
-    }
-
+    if (appClosing || bridgeStopping || bridgeRecovering || portManuallyClosed) return;
     if (!bridgeReady || !bridgeProcess) return;
-
-    // v3.25.49 (COM travada) — bridge aberta mas SEM RX há > 60s (já teve RX antes).
-    if (lastRxTimestamp > 0 && Date.now() - lastRxTimestamp > COM_STUCK_MS) {
-      handleComStuck();
-      return;
-    }
 
     if (bridgePingSentAt && Date.now() - bridgePingSentAt > BRIDGE_PING_TIMEOUT_MS) {
       bridgePingSentAt = 0;
@@ -4997,14 +2574,6 @@ function handleRxFrame(frame) {
   // aparece aqui, ha perda no pipe stdout (improvavel).
   pushLog("debug", "raw_rx", `RX raw: ${frame}`, frame);
 
-  // v3.25.43: tap ÚNICO de captura. Terminal serial e sniff empilham TODO frame
-  // que passa aqui, sem interferir no fluxo normal abaixo (telemetria/CFG seguem).
-  try {
-    const now = Date.now();
-    if (serialCaptureBuf) serialCaptureBuf.frames.push({ frame, at: now });
-    if (serialSniffBuf) serialSniffBuf.frames.push({ frame, at: now });
-  } catch (_) {}
-
   // 1) Telemetria — processa IMEDIATAMENTE, sem debounce/filtro
   //    (vem antes de tudo: precisamos enxergar TODA mudanca de estado da bomba)
   const telemMatch = extractTelemetryParts(frame);
@@ -5020,11 +2589,11 @@ function handleRxFrame(frame) {
   //    Formato: _[TSNN_<TAG>_]{PAYLOAD}
   //    Se ha um inflightCmd do tipo 'config' aguardando resposta deste TSNN,
   //    confirmamos AQUI e marcamos o comando como 'executed' na nuvem.
-  const cfgMatch = frame.match(RX_CFG_RESP_RE);
+  const cfgMatch = parseCfgResponseFrame(frame);
   if (cfgMatch) {
-    const rxTsnn = String(cfgMatch[1] || "").toUpperCase();
-    const rxTag  = cfgMatch[2];
-    const rxPayload = cfgMatch[3];
+    const rxTsnn = cfgMatch.rxTsnn;
+    const rxTag  = cfgMatch.rxTag;
+    const rxPayload = cfgMatch.rxPayload;
 
     const expectedCfgTsnn = inflightCmd ? (inflightTsnn || extractCommandTsnn(inflightCmd.frame)) : null;
     const matchesExpectedTsnn = expectedCfgTsnn === rxTsnn || isSetIdAckForNewTsnn(inflightCmd, rxTsnn, rxTag, rxPayload);
@@ -5051,27 +2620,13 @@ function handleRxFrame(frame) {
       pushLog("info", "rx", `[CFG] ${cfgLabel} recebido de ${nameForTsnn(rxTsnn)} em ${latencyMs}ms: ${frame}`, frame);
       const confirmedSetId = extractSetIdTarget(cmd);
 
-      supabase
-        .from("commands")
-        .update({
-          status: "executed",
-          response: frame,
-          responded_at: new Date().toISOString(),
-        })
-        .eq("id", cmd.id)
-        .then(async () => {
-          pushLog("info", "system", `cmd ${cmd.id.substring(0, 8)} -> executed (CFG ${cfgLabel})`, null, null);
-          if (confirmedSetId) await syncConfirmedSetId(cmd, confirmedSetId);
-          consecutiveTimeouts = 0;
-          processing = false;
-          // pega o proximo da fila imediatamente
-          setTimeout(() => { void processNextCommand(); }, 10);
-        });
+      void markCfgCommandExecuted(cmd, frame, cfgLabel, confirmedSetId);
       return;
     }
 
     // PING/STATUS/DUMP espontaneos (sem inflight casando) — apenas registra
     const cfgLabel = cfgResponseLabel(rxTag, rxPayload);
+    void tryCompleteRecentCfgCommand(rxTsnn, rxTag, rxPayload, frame);
     if (cfgLabel === "PING") {
       pushLog("info", "rx", `PING recebido de ${nameForTsnn(rxTsnn)} (sem comando aguardando)`, frame);
       return;
@@ -5116,29 +2671,6 @@ function processTelemFrame(frame) {
 
   // Backoff: qualquer RX desta PLC zera o contador de falhas consecutivas
   noteBackoffSuccess(rxTsnn);
-  // v3.25.16: prova de vida — registra o instante deste RX (espontâneo ou resposta).
-  // Usado pelo heartbeat do polling para não transmitir se a PLC já se manifestou.
-  lastRxAtByTsnn.set(String(rxTsnn), Date.now());
-  // v3.25.40 (#10): guarda o estado físico real desta PLC para o resync pós-nuvem.
-  try { lastRxStateByTsnn.set(String(rxTsnn), { payload: rxPayload, frame, at: Date.now() }); } catch (_) {}
-
-  // v3.25.7: sequência de desligamento forçado — resolve o waiter se este RX
-  // confirma o bit alvo esperado.
-  if (forcedShutdownRxWaiter && forcedShutdownRxWaiter.tsnn === rxTsnn) {
-    const w = forcedShutdownRxWaiter;
-    const rx = String(rxPayload || "");
-    if (/^[01]{1,6}$/.test(rx)) {
-      const bit = rx.length === 1 ? rx[0] : (w.targetIndex < rx.length ? rx[w.targetIndex] : null);
-      if (bit === w.wantBit) w.resolve();
-    }
-  }
-  // v3.25.32: durante o forced shutdown, TODO RX da PLC em desligamento é tratado SÓ
-  // pela sequência (o waiter acima). Suprime o fluxo normal (LOCAL OVERRIDE / telemetria /
-  // desired) para essa PLC — senão o LOCAL OVERRIDE interceptava o RX do {1} e gravava
-  // desired_running=true no meio da sequência.
-  if (forcedShutdownActive && forcedShutdownTsnn && String(rxTsnn) === forcedShutdownTsnn) {
-    return;
-  }
 
   // Camada 1: se ha um inflightCmd aguardando OUTRO TSNN, este RX eh
   // espontaneo de outro equipamento. Processa normalmente (codigo abaixo),
@@ -5154,7 +2686,6 @@ function processTelemFrame(frame) {
 
   // Niveis (N1/N2): roda em paralelo, nao bloqueia o fluxo da bomba.
   void processLevelReadings(frame, rxTsnn);
-  void processFlowReadings(frame, rxTsnn);
 
   // CANCELAMENTO PROATIVO DO SAFETY TIMER (multi-saidas):
   // Toda resposta `_[TSNN_0_]{PAYLOAD}` carrega o estado de TODAS as saidas
@@ -5173,7 +2704,6 @@ function processTelemFrame(frame) {
   try {
     const rx = String(rxPayload || "");
     const rxValid = /^[01]{1,6}$/.test(rx);
-    let anyReinforceCleared = false;
     for (const [eqId, entry] of manualReinforceByEquipment.entries()) {
       if (!entry || entry.tsnn !== rxTsnn) continue;
       if (!rxValid || !entry.expectedBit) continue;
@@ -5186,32 +2716,10 @@ function processTelemFrame(frame) {
         pushLog("info", "system",
           `[REFORCO] Confirmado TSNN ${rxTsnn} (RX bit=${stateBit} correto, saida=${saida})`);
         clearManualReinforcements(eqId, `RX confirmou bit ${stateBit} da saida ${saida}`);
-        anyReinforceCleared = true;
       } else {
         pushLog("info", "system",
           `[REFORCO] RX intermediario TSNN ${rxTsnn} (recebido=${stateBit}, esperado=${entry.expectedBit}) — reforco mantido`);
-        // v3.25.27 (Fix 2a): reforço de DESLIGAR esgotou as 4 tentativas e a bomba
-        // SEGUE ligada (RX bit=1 vs esperado 0) → o {0} não desliga, a bomba está sob
-        // controle LOCAL (botoeira). Trata como acionamento local: desired=true,
-        // origin=local, cancela o comando e libera o polling — sem esperar o safety
-        // (120s). blockUntil = início + 45s + 5s; passado (blockUntil - 5s) as 4
-        // tentativas já foram enviadas.
-        if (entry.expectedBit === "0" && stateBit === "1"
-            && !entry.resolvingLocal
-            && Date.now() >= (entry.blockUntil || 0) - 5_000) {
-          entry.resolvingLocal = true; // idempotência: dispara uma única vez
-          void resolveStuckOffAsLocal(eqId, rxTsnn);
-        }
       }
-    }
-    // v3.25.26: reforço confirmado → o bloqueio por-PLC já foi ZERADO acima
-    // (clearManualReinforcements deleta a entrada → getActiveReinforcementForTsnn
-    // retorna null). Aqui forçamos um enqueue IMEDIATO para a PLC voltar ao polling
-    // sem esperar o próximo tick de 11s — "zero tempo morto". tickEnqueuePolling tem
-    // guardas próprias (throttle/manuais pendentes), então é seguro chamar aqui.
-    if (anyReinforceCleared) {
-      pushLog("info", "system", `[REFORCO] polling liberado para TSNN ${rxTsnn} — reenfileirando imediatamente`);
-      void tickEnqueuePolling();
     }
   } catch (e) { pushLog("warn", "system", `clearReinforce on RX erro: ${e.message}`); }
 
@@ -5295,9 +2803,6 @@ function processTelemFrame(frame) {
     inflightCmd = null;
     inflightTsnn = null;
     recentCmdByTsnn.delete(rxTsnn);
-    // v3.25.10: RX confirmado (polling ou manual) → estado da PLC conhecido; a partir
-    // daqui o startup-sync não intercepta mais espontâneos desta PLC.
-    markStartupSyncDone(rxTsnn);
 
     // Cancela safety timer IMEDIATAMENTE se o RX confirma o estado esperado.
     // (Evita que o failsafe dispare TX OFF apos a bomba ja ter confirmado.)
@@ -5444,7 +2949,6 @@ function stopBridge() {
     stopBridgeWatchdog();
     bridgePingSentAt = 0;
     lastBridgePongAt = 0;
-    global.__lastWorkingComSaved = false;
     if (!bridgeProcess) {
       bridgeReady = false;
       resolve();
@@ -5459,14 +2963,8 @@ function stopBridge() {
     const finish = () => { if (!done) { done = true; resolve(); } };
 
     proc.once("exit", finish);
-    // GRACEFUL: QUIT no stdin → a bridge sai limpo e o PyInstaller apaga o PRÓPRIO
-    // _MEI (atexit). Damos 2.5s antes do kill à força (antes eram 1.2s). Se sair pelo
-    // QUIT, nenhuma _MEI órfã é criada.
     try { proc.stdin.write(Buffer.from("QUIT\n", "utf8")); } catch (e) {}
-    setTimeout(() => { try { proc.kill(); } catch (e) {} finish(); }, 2500);
-    // Pós-parada: 2s depois do kill, varre _MEI órfãs (o kill não limpa). A bridge
-    // nova (se já subiu) tem sua _MEI travada → o rd a pula. Best-effort.
-    setTimeout(() => { try { cleanupMeiFolders(); } catch (_) {} }, 4500);
+    setTimeout(() => { try { proc.kill(); } catch (e) {} finish(); }, 1200);
   });
 }
 
@@ -5474,9 +2972,6 @@ function stopBridge() {
 function startBridge(portPath) {
   return new Promise((resolve, reject) => {
     const pythonCandidates = getPythonCandidates();
-    // v3.25.42: bridge compilada tem PRIORIDADE — entra como primeiro candidato.
-    // Se falhar por qualquer motivo, o loop segue para os interpretadores Python.
-    if (COMPILED_BRIDGE) pythonCandidates.unshift(COMPILED_BRIDGE);
     const pythonEnv = buildPythonEnv();
     const failures = [];
     let candidateIndex = 0;
@@ -5491,15 +2986,11 @@ function startBridge(portPath) {
       const pythonCmd = pythonCandidates[candidateIndex];
       candidateIndex++;
 
-      // v3.25.42: o binário compilado recebe só a porta; o Python recebe o .py + porta.
-      const isCompiled = !!COMPILED_BRIDGE && pythonCmd === COMPILED_BRIDGE;
-      pushLog("info", "system", isCompiled
-        ? `Tentando bridge COMPILADA: ${pythonCmd}`
-        : `Tentando bridge com: ${pythonCmd}`);
+      pushLog("info", "system", `Tentando bridge com: ${pythonCmd}`);
 
       let proc;
       try {
-        proc = spawn(pythonCmd, isCompiled ? [portPath] : [PYTHON_BRIDGE, portPath], {
+        proc = spawn(pythonCmd, [PYTHON_BRIDGE, portPath], {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
           env: pythonEnv,
@@ -5528,17 +3019,10 @@ function startBridge(portPath) {
             started = true;
             bridgeProcess = proc;
             bridgeReady = true;
-            bridgeWasEverReady = true; // habilita o watchdog interno a escalar p/ relaunch
-            // v3.25.49: subiu → zera os contadores de auto-recovery.
-            bridgeRelaunchAttempts = 0;
-            bridgeDead = false;
-            comStuckCount = 0;
-            if (bridgeRelaunchTimer) { clearTimeout(bridgeRelaunchTimer); bridgeRelaunchTimer = null; }
-            lastBridgeError = null;
             markBridgeAlive();
             startBridgeWatchdog();
             pushLog("info", "serial", `Bridge conectada em ${portPath}`);
-            if (tray) setTrayStatus(`Online (${portPath})`);
+            if (tray) tray.setToolTip(`RENOV Agent - Online (${portPath})`);
             resolve();
             continue;
           }
@@ -5552,32 +3036,8 @@ function startBridge(portPath) {
           if (trimmed.startsWith("RX:")) {
             markBridgeAlive();
             lastRxTimestamp = Date.now(); // anti-colisao TX
-            comStuckCount = 0;            // v3.25.49: RX real → COM não está travada
-            // v3.22.0: salva última COM funcional após primeiro RX válido
-            try {
-              if (!global.__lastWorkingComSaved) {
-                const fs2 = require("fs");
-                const lastComFile = path.join(app.getPath("userData"), "last_working_com.txt");
-                fs2.writeFileSync(lastComFile, String(portPath || comPort || ""));
-                global.__lastWorkingComSaved = true;
-              }
-            } catch (_) {}
             // Frame recebido da Serial -> processar
             handleRxFrame(trimmed.substring(3));
-          } else if (trimmed.startsWith("RXRAW:")) {
-            // v3.25.47: resposta NÃO-frame do ESP (PING/STATUS: "OK:...", "PONG",
-            // "ESP..." — não terminam em _ETX_]). Entregue SÓ ao Terminal Serial /
-            // sniff; NÃO entra no pipeline de telemetria (evita casar falso com
-            // inflightManual ou virar "frame desconhecido").
-            markBridgeAlive();
-            lastRxTimestamp = Date.now();
-            const _rawResp = trimmed.substring(6);
-            try {
-              const _now = Date.now();
-              if (serialCaptureBuf) serialCaptureBuf.frames.push({ frame: _rawResp, at: _now });
-              if (serialSniffBuf) serialSniffBuf.frames.push({ frame: _rawResp, at: _now });
-            } catch (_) {}
-            pushLog("info", "rx", `[RXRAW] ${_rawResp}`, _rawResp);
           } else if (trimmed === "TX_OK") {
             markBridgeAlive();
             pushLog("debug", "serial", "TX_OK");
@@ -5624,8 +3084,6 @@ function startBridge(portPath) {
           lastBridgeError = err.message;
           pushLog("error", "serial", `Bridge morreu: ${err.message}`);
           bridgeReady = false;
-          bridgeProcess = null;
-          scheduleBridgeRelaunch(`erro da bridge: ${err.message}`); // v3.25.49
         }
       });
 
@@ -5635,9 +3093,7 @@ function startBridge(portPath) {
           const stderrInfo = stderrTail ? ` stderr=[${stderrTail}]` : "";
           failures.push(`${pythonCmd}: saiu antes de READY (code ${code}, bridge=${PYTHON_BRIDGE})${stderrInfo}`);
           // Auto-install pyserial se faltar
-          // v3.25.42: a bridge compilada embute o pyserial — nunca tentar pip nela.
-          const needsPyserial = !isCompiled
-            && /No module named ['"]?serial['"]?|ModuleNotFoundError.*serial|ImportError.*serial/i.test(stderrBuffer);
+          const needsPyserial = /No module named ['"]?serial['"]?|ModuleNotFoundError.*serial|ImportError.*serial/i.test(stderrBuffer);
           if (needsPyserial && !pythonCmd.startsWith("__retry_after_install__")) {
             pushLog("warn", "system", `pyserial faltando em ${pythonCmd} — tentando instalar...`);
             try {
@@ -5668,8 +3124,11 @@ function startBridge(portPath) {
           pushLog("error", "serial", `Bridge encerrou (code ${code})`);
           bridgeReady = false;
           bridgeProcess = null;
-          // v3.25.49: auto-recovery com backoff (3→5→10→15→30s, até 5x) — sem popup.
-          scheduleBridgeRelaunch(`bridge encerrou (code ${code})`);
+          setTimeout(() => {
+            if (comPort && !appClosing && !portManuallyClosed) {
+              void recoverBridge(`bridge encerrou (code ${code})`);
+            }
+          }, 5000);
         }
       });
 
@@ -5943,308 +3402,7 @@ async function fastPathReset(cmd) {
 }
 
 // --- Command processing ---
-// v3.25.7: constrói o frame ON a partir do frame OFF, setando apenas o bit da
-// saída alvo (targetIndex) para '1' e preservando as demais saídas. Reusa
-// TX_PAYLOAD_RE para localizar o grupo {payload} no frame. Não injeta sufixo RV.
-function buildForcedOnFrame(offFrame, targetIndex) {
-  return String(offFrame).replace(TX_PAYLOAD_RE, (match, payload) => {
-    if (targetIndex < 0 || targetIndex >= payload.length) return match;
-    const onPayload = payload.substring(0, targetIndex) + "1" + payload.substring(targetIndex + 1);
-    return match.replace(payload, onPayload);
-  });
-}
-
-// v3.25.29: desligamento forçado de bomba ligada localmente.
-// FASE 1: manda {1} e espera RX (bomba respondeu). Se não vier RX, retransmite {1}
-//   no próximo ciclo — até FORCED_MAX_ON_ATTEMPTS (5) tentativas. Sem tempo fixo: o
-//   ritmo é o próprio RX/timeout (ciclo natural).
-// FASE 2: assim que o RX confirma o {1}, manda {0} UMA vez → a bomba desliga.
-// FALLBACK: se as 5 tentativas de {1} não trouxeram RX, manda {0} mesmo assim.
-// Depois do {0}: se o RX confirmar off, sucesso; senão mantém {0} no polling normal.
-// Regras: nunca manda {0} antes do RX do {1} (exceto fallback); nunca manda {1}
-// depois do {0} (não religa). Sem inflightCmd/safety (campo pode religar pela botoeira).
-async function runForcedShutdownSequence(cmd, offFrame, expectedTsnn, targetIndex) {
-  forcedShutdownActive = true;
-  forcedShutdownTsnn = String(expectedTsnn);
-  processing = true;
-  processingSince = Date.now();
-  try {
-    const onFrame = buildForcedOnFrame(offFrame, targetIndex);
-    pushLog("warn", "system",
-      `[FORCED OFF] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} saida=${targetIndex + 1}: bomba local -> até ${FORCED_MAX_CYCLES} ciclos [Fase 1: {1} até RX (máx ${FORCED_MAX_ON_ATTEMPTS}x) -> {0} -> espera RX bit=0]; para no 1º ciclo que confirmar off`);
-
-    let success = false;
-    // ── LOOP EXTERNO: repete o ciclo inteiro ({1}->{0}) até confirmar off, máx 3x. ──
-    for (let cycle = 1; cycle <= FORCED_MAX_CYCLES && !success; cycle++) {
-      // ── FASE 1: manda {1} até o RX confirmar que a bomba respondeu (bit 1). Máx 5x. ──
-      let onConfirmed = false;
-      for (let attempt = 1; attempt <= FORCED_MAX_ON_ATTEMPTS && !onConfirmed; attempt++) {
-        pushLog("info", "tx", formatTxWithOrigin(cmd, onFrame, ` [FORCED OFF ciclo ${cycle}/${FORCED_MAX_CYCLES}: {1} ${attempt}/${FORCED_MAX_ON_ATTEMPTS}]`), onFrame);
-        sendTxFrame(onFrame, { priority: "manual" });
-        rememberTxForTsnn(expectedTsnn, "forced-on", cmd.id, onFrame);
-        const rxOn = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "1", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
-        if (rxOn === "rx") {
-          onConfirmed = true;
-          pushLog("info", "system", `[FORCED OFF] ciclo ${cycle}: {1} confirmado pelo RX (tentativa ${attempt}) — mandando {0}`);
-        } else {
-          pushLog("warn", "system",
-            `[FORCED OFF] ciclo ${cycle}: {1} sem RX (tentativa ${attempt}/${FORCED_MAX_ON_ATTEMPTS})${attempt < FORCED_MAX_ON_ATTEMPTS ? " — retransmitindo" : " — FALLBACK: manda {0} mesmo assim"}`);
-        }
-      }
-
-      // ── FASE 2: manda {0} UMA vez e espera o RX confirmar o desligamento (bit 0). ──
-      pushLog("info", "tx", formatTxWithOrigin(cmd, offFrame, ` [FORCED OFF ciclo ${cycle}/${FORCED_MAX_CYCLES}: {0}${onConfirmed ? "" : " FALLBACK"}]`), offFrame);
-      sendTxFrame(offFrame, { priority: "manual" });
-      rememberTxForTsnn(expectedTsnn, "forced-off", cmd.id, offFrame);
-      const r0 = await forcedShutdownWaitRx(expectedTsnn, targetIndex, "0", FORCED_SHUTDOWN_ON_RX_TIMEOUT_MS);
-      if (r0 === "rx") {
-        success = true;
-        pushLog("info", "system", `[FORCED OFF] ciclo ${cycle}/${FORCED_MAX_CYCLES}: RX confirmou desligamento (bit 0) — SUCESSO, parando`);
-      } else {
-        pushLog("warn", "system",
-          `[FORCED OFF] ciclo ${cycle}/${FORCED_MAX_CYCLES}: {0} sem confirmação de off${cycle < FORCED_MAX_CYCLES ? " — REPETINDO o ciclo inteiro" : " — desiste (polling mantém {0})"}`);
-      }
-    }
-
-    // v3.25.41 CAUSA-RAIZ DO LOOP: a sequência desligava a bomba mas NUNCA gravava o
-    // resultado em `equipments`. Como todo RX da PLC é suprimido durante a sequência
-    // (processTelemFrame retorna cedo para o TSNN em desligamento forçado), o LOCAL
-    // OVERRIDE também não rodava — então `desired_running` continuava TRUE no banco.
-    // No polling seguinte, normalizePollingFrame lê (origin != 'local' && desired ===
-    // true) e emite bit=1: o POLLING RELIGA O RELÉ. Aí o próximo OFF forçava de novo →
-    // "liga relé → desliga relé" a cada ciclo. Persistir o estado aqui fecha o laço:
-    // desired_running=false → o polling passa a emitir bit=0 (keep-alive) e para.
-    // origin 'remote-desired' (não 'local') = ação do SISTEMA, mesmo critério do safety
-    // (v3.25.21): não pinta badge LOCAL indevido e mantém a PLC no fluxo normal.
-    if (success && cmd.equipment_id) {
-      try {
-        await withCloudTimeout(
-          supabase
-            .from("equipments")
-            .update({
-              desired_running: false,
-              pending_command_id: null,
-              last_actuation_origin: "remote-desired",
-            })
-            .eq("id", cmd.equipment_id),
-          "forced-shutdown persist state",
-          CLOUD_WRITE_TIMEOUT_MS,
-        );
-        pushLog("info", "system",
-          `[FORCED OFF] estado persistido: eq ${String(cmd.equipment_id).substring(0, 8)} desired_running=false — polling não religa mais`);
-      } catch (e) {
-        pushLog("warn", "cloud", `[FORCED OFF] persistência do estado falhou: ${e.message}`);
-      }
-      // CONCLUÍDO: marca o equipamento para não redisparar a sequência. Um RX
-      // com bit=1 daqui pra frente = religamento local → só notifica (ver
-      // processTelemFrame), nunca reenvia.
-      const fsMeta = equipmentById.get(String(cmd.equipment_id));
-      forcedShutdownDoneByEq.set(String(cmd.equipment_id), {
-        at: Date.now(),
-        tsnn: String(expectedTsnn),
-        saida: (fsMeta && fsMeta.saida) || (targetIndex + 1),
-        name: fsMeta && fsMeta.name,
-      });
-      // BUG 1 (#3): registra o desligamento FORÇADO no relatório como REMOTO com
-      // autor "Desligamento Forçado" (não "Local"/"Sistema"). O row do comando
-      // backend-reset fica como origin=system (filtrado no relatório); ESTE é o que
-      // aparece. Uma única linha, atribuída corretamente. Best-effort.
-      try {
-        await withCloudTimeout(
-          supabase.from("automation_log").insert({
-            farm_id: farmId,
-            equipment_id: cmd.equipment_id,
-            equipment_name: (fsMeta && fsMeta.name) || null,
-            action: "pump_off",
-            origin: "remote",
-            actor_label: "Desligamento Forçado",
-            result: "success",
-            new_state: "off",
-            source_device: "forced-shutdown",
-            occurred_at: new Date().toISOString(),
-            details: { forced_shutdown: true },
-          }),
-          "forced-shutdown automation_log",
-          CLOUD_WRITE_TIMEOUT_MS,
-        );
-      } catch (e) {
-        pushLog("warn", "cloud", `[FORCED OFF] registro no relatório falhou: ${e.message}`);
-      }
-    }
-
-    // Grava o resultado no banco. Falha após 3 ciclos → 'timeout' (o relatório atribui
-    // ao usuário via log_manual_command). Sem safety/reforço extra.
-    try {
-      await withCloudTimeout(
-        supabase
-          .from("commands")
-          .update({
-            status: success ? "executed" : "timeout",
-            response: success
-              ? "(desligamento forçado confirmado)"
-              : `(desligamento forçado: ${FORCED_MAX_CYCLES} ciclos sem confirmação de off; polling mantém {0})`,
-            error_message: success ? null : `Desligamento forçado não confirmado após ${FORCED_MAX_CYCLES} ciclos`,
-            responded_at: new Date().toISOString(),
-          })
-          .eq("id", cmd.id),
-        "forced-shutdown result",
-        CLOUD_WRITE_TIMEOUT_MS,
-      );
-    } catch (e) {
-      pushLog("warn", "cloud", `[FORCED OFF] gravação do resultado falhou: ${e.message}`);
-    }
-  } catch (e) {
-    pushLog("error", "system", `[FORCED OFF] sequência falhou: ${e.message}`);
-  } finally {
-    forcedShutdownActive = false;
-    forcedShutdownTsnn = null;
-    processing = false;
-    // Libera a fila e pega o próximo comando imediatamente
-    setImmediate(() => { void processNextCommand(); });
-  }
-}
-
-// v3.25.12: verifica se um frame de polling ficou STALE — se o payload não bate
-// mais com o desired_running atual dos equipamentos daquela PLC no banco (ex.: uma
-// atuação local mudou o desired_running DEPOIS deste polling ter sido enfileirado
-// pela RPC). Guard no momento do TX: fecha a corrida em que pollings antigos com
-// payload {1} continuam sendo transmitidos por ~90s mesmo após o desired virar {0}.
-// Em erro/dúvida retorna false (NÃO descarta) — segurança: nunca sumir com polling
-// por falha de query.
-// v3.25.15: mesmo quando o estado real == desired (poll "desnecessário"), ainda faz
-// UM poll de heartbeat a cada HEARTBEAT_POLL_MS para detectar PLC offline caso ela
-// não emita espontâneo. Espontâneos já atualizam last_communication; isto é o piso.
-const HEARTBEAT_POLL_MS = 3 * 60_000;
-// v3.25.24: até este nº de PLCs na fazenda, o agente pola TODO ciclo (detecção de
-// acionamento local em ~11s via RX, sem esperar o espontâneo do INO ~20s). Acima
-// disso, mantém o heartbeat de HEARTBEAT_POLL_MS por PLC para não estourar a serial
-// (TX_MIN_GAP 3s comporta ~3 polls/ciclo de 11s).
-const FAST_DETECT_MAX_PLCS = 3;
-
-// v3.25.20: decide se um polling deve ser DESCARTADO antes do TX. Retorna:
-//   "stale"       → payload não bate mais com o desired_running atual (atuação local
-//                   mudou o desired depois do enqueue) → descarta; o próximo enqueue
-//                   traz o payload correto (que bate com o estado real).
-//   "unnecessary" → estado REAL já == desired em todas as saídas E a PLC deu prova de
-//                   vida (RX) nos últimos HEARTBEAT_POLL_MS. SÓ para bombas NÃO-local.
-//   null          → transmitir.
-// v3.25.20 MUDANÇA CRÍTICA: bomba em modo LOCAL NÃO descarta polling. O INO (PLC) tem
-// watchdog de 15min — se parar de receber TX, desliga a bomba. Então em modo local o
-// agente CONTINUA polando (keep-alive) com o payload que CONFIRMA o estado (não muda
-// nada; polling não atua no relé). A migration 20260723160000 preserva
-// last_actuation_origin='local' quando o polling confirma o estado, então o badge não
-// some. Em erro/dúvida retorna null (NÃO descarta) — nunca sumir com polling.
-// v3.25.27: normaliza o payload do polling por SAÍDA, conforme a origem e o desired:
-//   • last_actuation_origin === 'local'  → bit 0  (relé passivo; a botoeira controla,
-//                                          o polling não participa — keep-alive)
-//   • desired_running === true (não-local) → bit 1  (mantém o relé acionado; a bomba
-//                                          foi LIGADA por comando remoto e deve seguir)
-//   • desired_running === false (não-local) → bit 0  (relé solto)
-// CORRIGE a v3.25.24 (forcePollingKeepAliveZero): forçar {0} incondicional DESLIGAVA
-// bombas ligadas remotamente (o polling {0} solta o relé). O pulso {1}→{0} de
-// desligamento forçado é a runForcedShutdownSequence (separada, não passa por aqui).
-async function normalizePollingFrame(frame, tsnn) {
-  try {
-    if (!supabase || !farmId || !tsnn) return frame;
-    const payload = extractTxPayload(frame);
-    if (!payload || !/^[01]{1,6}$/.test(payload)) return frame;
-    const { data, error } = await withCloudTimeout(
-      supabase
-        .from("equipments")
-        .select("saida, desired_running, last_actuation_origin")
-        .eq("farm_id", farmId)
-        .ilike("hw_id", `${String(tsnn)}%`),
-      "polling payload normalize",
-      CLOUD_READ_TIMEOUT_MS,
-    );
-    if (error || !Array.isArray(data) || data.length === 0) return frame;
-    const bits = payload.split("");
-    let changed = false;
-    for (const eq of data) {
-      const saida = Number(eq.saida) || 0;
-      if (saida < 1 || saida > bits.length) continue;
-      let bit;
-      if (eq.last_actuation_origin === "local") bit = "0";      // LOCAL: relé passivo
-      else if (eq.desired_running === true) bit = "1";          // REMOTO ligada: mantém relé
-      else bit = "0";                                           // REMOTO desligada: relé solto
-      if (bits[saida - 1] !== bit) { bits[saida - 1] = bit; changed = true; }
-    }
-    if (!changed) return frame;
-    const np = bits.join("");
-    return String(frame).replace(TX_PAYLOAD_RE, (m, p) =>
-      p.length === np.length ? m.replace(p, np) : m);
-  } catch (_) {
-    return frame;
-  }
-}
-
-async function pollingSkipReason(frame, tsnn) {
-  try {
-    if (!supabase || !farmId || !tsnn) return null;
-    const payload = extractTxPayload(frame);
-    if (!payload || !/^[01]{1,6}$/.test(payload)) return null;
-    const { data, error } = await withCloudTimeout(
-      supabase
-        .from("equipments")
-        .select("saida, desired_running, last_outputs_state, last_actuation_origin")
-        .eq("farm_id", farmId)
-        .ilike("hw_id", `${String(tsnn)}%`),
-      "polling skip check",
-      CLOUD_READ_TIMEOUT_MS,
-    );
-    if (error) {
-      pushLog("warn", "system", `[POLLING] skip check erro: ${error.message} — transmite`);
-      return null;
-    }
-    if (!Array.isArray(data) || data.length === 0) return null;
-    const anyLocal = data.some((e) => e.last_actuation_origin === "local");
-    // v3.25.27: o payload do polling é normalizado por saída em normalizePollingFrame
-    // (LOCAL→0, REMOTO liga→1, REMOTO desliga→0), então ele SEMPRE espelha origin/
-    // desired atuais — não fica "stale". Bomba em modo LOCAL → SEMPRE transmite o
-    // keep-alive {0} (relé passivo), nunca descartado.
-    if (anyLocal) return null;
-    // Sem "stale": o payload já reflete o desired atual (normalizado no TX). Mantemos
-    // só o "unnecessary" (heartbeat) para não congestionar a serial em fazenda grande.
-    let allRealMatchDesired = true; // todos os eqs (com estado real conhecido) já batem
-    let haveRealForAll = true;      // temos last_outputs_state de todos
-    for (const eq of data) {
-      const saida = Number(eq.saida) || 0;
-      if (saida < 1 || saida > payload.length) continue;
-      const desiredBit = eq.desired_running ? "1" : "0";
-      const los = typeof eq.last_outputs_state === "string" ? eq.last_outputs_state : "";
-      const realBit = (/^[01]+$/.test(los) && saida <= los.length) ? los[saida - 1] : null;
-      if (realBit === null) haveRealForAll = false;
-      else if (realBit !== desiredBit) allRealMatchDesired = false;
-    }
-    if (haveRealForAll && allRealMatchDesired) {
-      // v3.25.24: DETECÇÃO RÁPIDA de acionamento local. O INO só emite o espontâneo
-      // ~20s após a botoeira; polando ativamente detectamos pela RX em ~1 ciclo (11s).
-      // MAS a serial (TX_MIN_GAP 3s) só comporta ~3 polls por ciclo — então só polamos
-      // todo ciclo em fazendas PEQUENAS (<= FAST_DETECT_MAX_PLCS PLCs). Em fazendas
-      // grandes mantemos o heartbeat de HEARTBEAT_POLL_MS por PLC para não congestionar
-      // (aí a detecção rápida depende do espontâneo do INO).
-      const plcCount = equipmentByTsnn.size || 0;
-      if (plcCount > FAST_DETECT_MAX_PLCS) {
-        const lastRx = lastRxAtByTsnn.get(String(tsnn)) || 0;
-        if (Date.now() - lastRx < HEARTBEAT_POLL_MS) return "unnecessary";
-        // sem NENHUM RX há >HEARTBEAT_POLL_MS → transmite como heartbeat (detecta offline)
-      }
-      // fazenda pequena → cai fora e transmite todo ciclo (detecção rápida)
-    }
-    return null;
-  } catch (_) {
-    return null;
-  }
-}
-
 async function processNextCommand() {
-  // v3.25.7: sequência de desligamento forçado em curso segura a fila. Evita que
-  // o PROCESSING_STUCK_RESET_MS (15s) ou o pollTimer reentrem durante os ~23-36s
-  // da sequência (que roda com processing=true e inflightCmd=null).
-  if (forcedShutdownActive) return;
-  // v3.25.43: terminal serial tem prioridade absoluta — segura a fila enquanto
-  // o comando do operador roda (até 30s). Retomado no finally do handler.
-  if (serialTerminalActive) return;
   if (processing) {
     if (processingSince && Date.now() - processingSince > PROCESSING_STUCK_RESET_MS && !inflightCmd && !inflightManual) {
       pushLog("warn", "system", `Processamento preso ha ${Math.round((Date.now() - processingSince) / 1000)}s sem comando inflight; liberando fila`);
@@ -6326,38 +3484,22 @@ async function processNextCommand() {
 
       if (candidate.type === "polling") {
         const activeReinforcement = getActiveReinforcementForTsnn(candTsnn);
-        // v3.25.25: NÃO suspende o keep-alive durante um reforço de DESLIGAR. O
-        // polling agora é sempre {0} (v3.25.24, passivo — não atua o relé), idêntico
-        // ao {0} do reforço de OFF; deixá-lo passar mantém a PLC viva (sem os ~90s
-        // cegos) e não interfere. Só suspende se o reforço espera bit != '0' (ex.:
-        // uma sequência que precisa de outro estado), onde um {0} de polling poderia
-        // contrariar o reforço.
-        if (activeReinforcement && activeReinforcement.entry.expectedBit !== "0") {
+        if (activeReinforcement) {
           pushLog("info", "system",
-            `CHECK reforco TX: polling ${candidate.id.substring(0,8)} TSNN=${candTsnn} BLOQUEADO (reforço bit=${activeReinforcement.entry.expectedBit}); eq=${String(activeReinforcement.equipmentId).substring(0,8)} cmd=${String(activeReinforcement.entry.cmdId || "?").substring(0,8)} restante=${Math.ceil(activeReinforcement.remainingMs / 1000)}s -> pulando para proxima PLC`);
+            `CHECK reforco TX: polling ${candidate.id.substring(0,8)} TSNN=${candTsnn} BLOQUEADO; eq=${String(activeReinforcement.equipmentId).substring(0,8)} cmd=${String(activeReinforcement.entry.cmdId || "?").substring(0,8)} restante=${Math.ceil(activeReinforcement.remainingMs / 1000)}s -> pulando para proxima PLC`);
           await supabase
             .from("commands")
             .update({
               status: "cancelled",
               responded_at: new Date().toISOString(),
-              error_message: "Polling suspenso: reforco TX manual (bit!=0) ativo nesta PLC",
+              error_message: "Polling suspenso: reforco TX manual ativo nesta PLC",
             })
             .eq("id", candidate.id)
             .eq("status", "pending");
           continue; // tenta o proximo da fila (outra PLC)
         }
-        // BUG FIX: o botão "Atualizar Status" enfileira uma leitura POLLING
-        // reforçada (reinforcement=true, marcador manual-status-read). O objetivo
-        // dela é JUSTAMENTE forçar um frame de consulta numa bomba OFFLINE — então
-        // NÃO pode ser pulada pelo backoff (antes: era cancelada aqui sem TX, e o
-        // card nunca atualizava; o Terminal Serial funcionava por usar outro caminho).
-        const _manualStatusRead = candidate.reinforcement === true
-          && String(candidate.error_message || "").startsWith("manual-status-read");
-        if (_manualStatusRead && shouldSkipPollingForBackoff(candTsnn)) {
-          pushLog("info", "system", `[POLLING] leitura manual FORÇADA TSNN=${candTsnn} — ignora backoff (Atualizar Status)`);
-        }
-        // Backoff por PLC sem resposta: pula esta rodada de polling (exceto leitura manual)
-        if (!_manualStatusRead && shouldSkipPollingForBackoff(candTsnn)) {
+        // Backoff por PLC sem resposta: pula esta rodada de polling
+        if (shouldSkipPollingForBackoff(candTsnn)) {
           const b = pollingBackoffByTsnn.get(candTsnn);
           await supabase
             .from("commands")
@@ -6387,45 +3529,6 @@ async function processNextCommand() {
     }
 
     if (cmd.type === "polling") {
-      // v3.25.27: normaliza o payload por saída (LOCAL→0, REMOTO ligada→1, REMOTO
-      // desligada→0) ANTES do skip check e do TX. Corrige o {0} incondicional da
-      // v3.25.24 que desligava bombas ligadas remotamente. O pulso {1}→{0} de
-      // desligamento forçado é a runForcedShutdownSequence (separada, não passa aqui).
-      const normalized = await normalizePollingFrame(frame, expectedTsnn);
-      if (normalized !== frame) {
-        pushLog("info", "system",
-          `[POLLING] payload normalizado (TSNN=${expectedTsnn}; local→0, remoto liga→1, remoto desliga→0)`);
-        frame = normalized;
-      }
-      // Descarta polling antes do TX só como UNNECESSARY (heartbeat, fazenda grande).
-      // Bomba LOCAL e fazenda pequena sempre transmitem (pollingSkipReason → null).
-      const skipReason = await pollingSkipReason(frame, expectedTsnn);
-      if (skipReason) {
-        const skipMsg = skipReason === "stale"
-          ? "Polling stale: payload não bate com desired_running atual"
-          : "Polling desnecessário: estado real já bate com desired_running";
-        const skipTag = skipReason === "stale" ? "STALE" : "DESNEC";
-        try {
-          await supabase
-            .from("commands")
-            .update({
-              status: "cancelled",
-              responded_at: new Date().toISOString(),
-              error_message: skipMsg,
-            })
-            .eq("id", cmd.id)
-            .eq("status", "pending");
-        } catch (_) {}
-        pushLog("info", "system",
-          `[POLLING ${skipTag}] cmd ${cmd.id.substring(0, 8)} TSNN=${expectedTsnn} descartado (payload ${extractTxPayload(frame)})`);
-        // v3.25.16: descarte é ATIVIDADE da fila — reseta o relógio do watchdog
-        // (não é stall). watchdogRestartCount zera porque o ciclo está saudável.
-        lastTxOrSkipAt = Date.now();
-        watchdogRestartCount = 0;
-        processing = false;
-        setTimeout(() => { void processNextCommand(); }, 50);
-        return;
-      }
       const requiredGap = lastPollingEndedWithTimeout
         ? POLLING_GAP_AFTER_TIMEOUT_MS
         : POLLING_GAP_AFTER_RX_MS;
@@ -6538,64 +3641,6 @@ async function processNextCommand() {
       return;
     }
 
-    // v3.25.7: DESLIGAMENTO FORÇADO. Se este é um manual de DESLIGAR (bit alvo=0)
-    // para uma bomba que está ligada localmente (last_actuation_origin='local') e
-    // com forced_shutdown_enabled=true, executa a sequência {1}->RX->10s->{0} uma
-    // única vez (sem reforços/safety) em vez de mandar {0} direto. last_actuation_origin
-    // muda em runtime, por isso consultamos o estado fresco no banco (não o cache).
-    if (cmd.type === "manual" && (cmd.priority ?? 5) > 0 && !isBackendResetCommand(cmd, frame)) {
-      const fsPayload = extractTxPayload(frame);
-      if (fsPayload && /^[01]{1,6}$/.test(fsPayload) && expectedTsnn && cmd.equipment_id) {
-        const fsEqMeta = equipmentById.get(String(cmd.equipment_id));
-        const fsTargetIndex = Math.max(0, Math.min(fsPayload.length - 1, (fsEqMeta?.saida || fsPayload.length) - 1));
-        if (fsPayload[fsTargetIndex] === "0") {
-          pushLog("info", "system",
-            `[FORCED OFF] manual OFF detectado (eq ${String(cmd.equipment_id).substring(0, 8)} TSNN ${expectedTsnn}) — consultando banco...`);
-          let fsEqRow = null;
-          try {
-            const { data } = await withCloudTimeout(
-              supabase
-                .from("equipments")
-                .select("last_actuation_origin,forced_shutdown_enabled,last_outputs_state,saida")
-                .eq("id", cmd.equipment_id)
-                .maybeSingle(),
-              "forced-shutdown check",
-              CLOUD_READ_TIMEOUT_MS,
-            );
-            fsEqRow = data;
-          } catch (e) {
-            pushLog("warn", "system", `[FORCED OFF] consulta de estado falhou: ${e.message}; seguindo com {0} direto`);
-          }
-          // v3.25.31: dispara por FLAG + bomba LIGADA (estado real), NÃO pela origem.
-          // last_actuation_origin OSCILA (o polling grava 'remote-desired' ao confirmar o
-          // estado — ver linha ~2537), então o critério origin==='local' fazia o forced-
-          // shutdown quase nunca disparar. O estado real (last_outputs_state) é estável e
-          // captura a intenção: forçar o desligamento de uma bomba LIGADA com a flag ativa.
-          const fsLos = fsEqRow && typeof fsEqRow.last_outputs_state === "string" ? fsEqRow.last_outputs_state : "";
-          const fsSaida = Number(fsEqRow?.saida) || (fsTargetIndex + 1);
-          const fsRealIdx = fsSaida - 1;
-          const fsRealBit = (/^[01]+$/.test(fsLos) && fsRealIdx >= 0 && fsRealIdx < fsLos.length) ? fsLos[fsRealIdx] : null;
-          const fsShouldFire = !!fsEqRow && fsEqRow.forced_shutdown_enabled === true && fsRealBit === "1";
-          pushLog("info", "system",
-            `[FORCED OFF] banco: forced_shutdown_enabled=${fsEqRow ? fsEqRow.forced_shutdown_enabled : "?"} origin=${fsEqRow ? fsEqRow.last_actuation_origin : "?"} estado_real=${fsLos || "?"} bit_saida${fsSaida}=${fsRealBit ?? "?"} → ${fsShouldFire ? "DISPARA sequência" : "NÃO dispara (segue reforço normal)"}`);
-          // v3.25.41: se o desligamento forçado deste equipamento JÁ foi confirmado e a
-          // bomba não foi vista ligada de novo, não repete a sequência — o pulso {1}→{0}
-          // religaria o relé à toa. Segue o caminho normal ({0} direto), que é inócuo
-          // numa bomba já desligada. A marca só é limpa por um RX com bit=1 (religamento
-          // local), que notifica por WhatsApp em vez de reenviar.
-          const fsDone = forcedShutdownDoneByEq.get(String(cmd.equipment_id));
-          if (fsShouldFire && fsDone) {
-            pushLog("warn", "system",
-              `[FORCED OFF] já CONCLUÍDO para eq ${String(cmd.equipment_id).substring(0, 8)} há ${Math.round((Date.now() - fsDone.at) / 1000)}s (bomba não foi vista ligada desde então) — NÃO redispara; segue {0} normal`);
-          }
-          if (fsShouldFire && !fsDone) {
-            await runForcedShutdownSequence(cmd, frame, expectedTsnn, fsTargetIndex);
-            return; // a sequência assume o controle; NÃO segue para o TX {0} direto nem agenda reforços
-          }
-        }
-      }
-    }
-
     // Manual aguarda a janela física completa: RX divergente nao fecha o comando,
     // e a confirmacao real pode chegar muitos segundos depois da primeira leitura.
     // v3.9.30: polling com timeout serial curto (5s) para nao travar o rodizio
@@ -6613,22 +3658,6 @@ async function processNextCommand() {
         serialTimeoutMs = 5_000;
         pushLog("warn", "system",
           `[TIMEOUT] Reduzido para TSNN ${expectedTsnn} (offline há ${backoffOff.failures} tentativas) -> 5000ms`);
-      }
-    }
-
-    // v3.25.7 FIX lentidão manual: se há OUTROS manuais pendentes na fila (já
-    // buscados em `data`), não segura a serial os 13s completos esperando o RX
-    // deste manual — libera após MANUAL_QUEUED_HOLD_MS (3s) para o próximo manual
-    // sair em ~3s. Não afeta manual isolado, polling nem reset. A confirmação
-    // física deste comando segue garantida pelos reforços TX e pela janela de 120s.
-    if (cmd.type === "manual" && (cmd.priority ?? 5) > 0) {
-      const otherPendingManuals = data.filter(
-        (d) => d.type === "manual" && d.id !== cmd.id,
-      ).length;
-      if (otherPendingManuals > 0 && serialTimeoutMs > MANUAL_QUEUED_HOLD_MS) {
-        serialTimeoutMs = MANUAL_QUEUED_HOLD_MS;
-        pushLog("info", "system",
-          `[FILA MANUAL] ${otherPendingManuals} manual(is) pendente(s) — hold serial reduzido para ${MANUAL_QUEUED_HOLD_MS}ms (TSNN=${expectedTsnn})`);
       }
     }
 
@@ -6654,28 +3683,25 @@ async function processNextCommand() {
       inflightTimer = null;
       const c = inflightCmd;
 
-      // RETRY REFORÇADO (polling): até 2 reenvios antes de contar falha —
-      // reduz falsos "offline" por interferência momentânea de rádio.
-      //  • colisão com espontâneo → reenvia IMEDIATO (como antes);
-      //  • sem resposta           → reenvia após 3s (novo: bombas problemáticas).
-      // Se o RX chegar durante a espera, o handler limpa o inflightTimer e resolve.
-      if (c && c.type === "polling" && inflightRetryCount < 2) {
+      // Camada 3: ate 2 retries imediatos se polling colidiu com espontaneo
+      if (
+        c &&
+        c.type === "polling" &&
+        inflightSpontaneousSeen &&
+        inflightRetryCount < 2
+      ) {
         inflightRetryCount++;
-        const collided = inflightSpontaneousSeen;
         inflightSpontaneousSeen = false;
-        const gap = collided ? 0 : 3000; // 3s entre tentativas para sem-resposta
         pushLog("warn", "system",
-          `[POLLING] Retry ${inflightRetryCount}/2 TSNN ${expectedTsnn} — ${collided ? "colisão com espontâneo (imediato)" : "sem resposta (reenvia em 3s)"}`);
-        const doRetry = () => {
-          try {
-            sendTxFrame(frame, { priority: "polling" });
-            rememberTxForTsnn(expectedTsnn, cmd.type, cmd.id, frame);
-          } catch (e) {
-            pushLog("error", "serial", `retry polling stdin write falhou: ${e.message}`);
-          }
-          inflightTimer = setTimeout(onInflightTimeout, serialTimeoutMs);
-        };
-        if (gap > 0) inflightTimer = setTimeout(doRetry, gap); else doRetry();
+          `[POLLING] Retry ${inflightRetryCount}/2 TSNN ${expectedTsnn} apos colisao com espontaneo — reenviando frame`);
+
+        try {
+          sendTxFrame(frame, { priority: "polling" });
+          rememberTxForTsnn(expectedTsnn, cmd.type, cmd.id, frame);
+        } catch (e) {
+          pushLog("error", "serial", `retry polling stdin write falhou: ${e.message}`);
+        }
+        inflightTimer = setTimeout(onInflightTimeout, serialTimeoutMs);
         return;
       }
 
@@ -6740,8 +3766,6 @@ async function processNextCommand() {
 
     // Enviar para o Python bridge (protocolo simples: SEND:<frame>)
     try {
-      // Injeta sufixo RV no payload se houver reset de vazao pendente para este TSNN.
-      frame = maybeInjectVazaoReset(frame, expectedTsnn);
       sendTxFrame(frame, { priority: cmd.type === "polling" ? "polling" : ((cmd.priority ?? 5) === 0 ? "reset" : "manual") });
       rememberTxForTsnn(expectedTsnn, cmd.type, cmd.id, frame);
       // (gap de polling agora medido pelo FIM da última comunicação, não pelo TX)
@@ -6782,7 +3806,6 @@ async function processNextCommand() {
     if (String(e.message || "").includes("buscar proximo comando: timeout local")) {
       cloudReadBackoffUntil = Date.now() + CLOUD_READ_BACKOFF_MS;
     }
-    noteCloudError(e, "processNextCommand");
     inflightCmd = null;
     inflightTsnn = null;
     if (inflightTimer) { clearTimeout(inflightTimer); inflightTimer = null; }
@@ -6791,113 +3814,34 @@ async function processNextCommand() {
 }
 
 // --- Heartbeat ---
-// v3.25.36: upsert de site_health DEDICADO e blindado. Roda no seu PRÓPRIO timer
-// (siteHealthTimer), independente da validação de licença / force-reboot / cleanup —
-// que antes podiam TRAVAR o sendHeartbeat (fetch de license-validate sem timeout) e
-// congelar o heartbeat pra sempre. Erro NÃO é engolido: loga. Nunca lança pra fora.
-async function upsertSiteHealth() {
-  if (!supabase || !farmId) return;
-  const _t0 = Date.now();
-  try {
-    const { error } = await withCloudTimeout(
-      supabase.from("site_health").upsert(
-        {
-          farm_id: farmId,
-          agent_status: "online",
-          last_heartbeat: new Date().toISOString(),
-          com_port: comPort,
-          com_connected: bridgeReady,
-          agent_version: AGENT_VERSION,
-          // disco livre p/ monitoramento; < 2 GB vira alerta em last_error.
-          disk_free_mb: lastDiskFreeMb,
-          // last_error prioriza disco baixo (crise atual), senão dpapi/bridge.
-          last_error: (lastDiskFreeMb != null && lastDiskFreeMb < DISK_ALERT_MB)
-            ? "disk_low"
-            : (credentialsDpapiFailed ? (lastBridgeError || "dpapi_failed") : lastBridgeError),
-        },
-        { onConflict: "farm_id" }
-      ),
-      "site_health upsert",
-      CLOUD_WRITE_TIMEOUT_MS,
-    );
-    if (error) {
-      try { pushLog("warn", "system", `[HEARTBEAT] upsert site_health FALHOU: ${error.message || error} — retenta no próximo ciclo`); } catch (_) {}
-    } else {
-      lastSiteHealthOkAt = Date.now();
-      noteCloudRtt(Date.now() - _t0); // RTT baixo → modo normal
-    }
-  } catch (e) {
-    noteCloudRtt(Date.now() - _t0); // timeout/erro → RTT alto → modo degradado
-    try { pushLog("warn", "system", `[HEARTBEAT] upsert site_health ERRO: ${formatError(e)} — retenta no próximo ciclo`); } catch (_) {}
-  }
-}
-
-// v3.25.37 — Compliance INEMA: chama a RPC farm-scoped inema_snapshot (atualiza o
-// histórico do dia e retorna poços ≥95% ainda não alertados), envia WhatsApp aos
-// operadores com receive_alerts e marca como alertado. Best-effort; nunca lança.
-async function checkInemaCompliance() {
-  if (!supabase || !farmId) return;
-  try {
-    const { data: wells, error } = await withCloudTimeout(
-      supabase.rpc("inema_snapshot", { _farm_id: farmId }),
-      "inema_snapshot", CLOUD_READ_TIMEOUT_MS);
-    if (error) { pushLog("warn", "system", `[INEMA] inema_snapshot falhou: ${error.message || error}`); return; }
-    if (!Array.isArray(wells) || wells.length === 0) return;
-
-    // token + destinatários (best-effort — depende do RLS do agente nessas tabelas)
-    let token = null, phoneId = "1122648170939922", recipients = [];
-    try {
-      const { data: cfg } = await supabase.from("whatsapp_config").select("api_token, phone_number_id").limit(1).maybeSingle();
-      token = cfg && cfg.api_token ? cfg.api_token : null;
-      if (cfg && cfg.phone_number_id) phoneId = cfg.phone_number_id;
-      const { data: ops } = await supabase.from("whatsapp_operators")
-        .select("phone").eq("farm_id", farmId).eq("is_active", true).eq("receive_alerts", true);
-      recipients = (ops || []).map((o) => String(o.phone || "").replace(/\D/g, "")).filter(Boolean);
-    } catch (_) {}
-
-    for (const w of wells) {
-      const msg = `⚠️ INEMA — ${w.equipment_name} atingiu ${w.hours}h de uso hoje (limite ${w.hours_limit}h`
-        + (w.volume_limit ? `; volume ${w.volume_m3}/${w.volume_limit} m³` : "")
-        + `). Risco de infração — reduza o uso.`;
-      if (token && recipients.length) {
-        for (const to of recipients) {
-          try {
-            await fetch(`https://graph.facebook.com/v21.0/${phoneId}/messages`, {
-              method: "POST",
-              headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ messaging_product: "whatsapp", to, type: "text", text: { body: msg } }),
-            });
-          } catch (e) { pushLog("warn", "system", `[INEMA] envio WhatsApp falhou (${to}): ${e && e.message || e}`); }
-        }
-        pushLog("warn", "system", `[INEMA] ${w.equipment_name} em ${w.peak_pct}% do limite — alerta enviado a ${recipients.length} operador(es)`);
-      } else {
-        pushLog("warn", "system", `[INEMA] ${w.equipment_name} em ${w.peak_pct}% do limite — sem token/destinatário p/ WhatsApp (registrado em system_alerts)`);
-      }
-      // marca alertado mesmo se o WhatsApp falhou, p/ não repetir a cada 15 min
-      try { await supabase.rpc("inema_mark_alerted", { _equipment_id: w.equipment_id }); } catch (_) {}
-    }
-  } catch (e) {
-    pushLog("warn", "system", `[INEMA] check falhou: ${formatError(e)}`);
-  }
-}
-
 async function sendHeartbeat() {
   if (!supabase || !farmId) return;
-  // O heartbeat de verdade (site_health) NÃO fica mais preso a nada abaixo:
-  // roda no siteHealthTimer dedicado. Aqui só ficam as tarefas "pesadas".
   // v3.10.7 SECURITY: valida licença na nuvem a cada heartbeat (30s).
   // Se revogada/suspensa → desliga bombas e encerra. Grace offline = 72h.
   try {
     const cfgNow = loadConfig();
     if (cfgNow) await validateLicenseHeartbeat(cfgNow);
-    // FASE 2: rotaciona o token rotativo no ritmo do heartbeat (não-fatal).
-    if (cfgNow) refreshAgentTokenSafe(cfgNow);
   } catch (_) {}
   if (licenseKillSwitchTriggered) return;
   // Refresca cache de nomes de equipamentos a cada 5 min
   if (Date.now() - equipmentCacheLoadedAt > 5 * 60 * 1000) {
     void refreshEquipmentCache();
   }
+
+  try {
+    await supabase.from("site_health").upsert(
+      {
+        farm_id: farmId,
+        agent_status: "online",
+        last_heartbeat: new Date().toISOString(),
+        com_port: comPort,
+        com_connected: bridgeReady,
+        agent_version: AGENT_VERSION,
+        last_error: lastBridgeError,
+      },
+      { onConflict: "farm_id" }
+    );
+  } catch (e) {}
 
   await checkForceRebootInsideHeartbeat();
 
@@ -6948,182 +3892,6 @@ async function reportUpdateStatus(patch) {
 // ─────────────────────────────────────────────────────────────────────────────
 // v3.10.6 — OTA via app.asar + bucket privado.
 // ─────────────────────────────────────────────────────────────────────────────
-// v3.25.48: ZERO NTFS. O OTA é simplesmente baixar → substituir → reiniciar.
-// Removido o self-heal de icacls (o INSTALAR.bat não tranca mais nada, então a
-// pasta é gravável e o copy funciona direto). Sem permissões locais, sem icacls.
-
-// v3.25.58 — signed URL via ANON KEY + AGENT TOKEN (device_license), NÃO o JWT
-// do operador. O 401 "invalid_or_expired_token" da Sykue vinha do gateway barrando
-// o access_token do getSession() vencido em Starlink lenta. A edge function
-// agent-release-signed-url exige apenas a apikey anon e valida o token de agente
-// (device_license) como fallback — então o OTA passa a independer TOTALMENTE da
-// sessão do operador. O agent token é o JWT rotativo do agent-auth (amarrado ao
-// hardware/licença); se estiver momentaneamente indisponível, cai na própria anon
-// key no Bearer (a função tolera o Bearer e só obriga a apikey).
-async function getFreshAgentBearer(cfg, force) {
-  try {
-    const t = await withCloudTimeout(refreshAgentToken(cfg, { force: !!force }), "refreshAgentToken", 20_000);
-    if (t) return { token: t, isAgentToken: true };
-  } catch (_) { /* rede/licença — usa o que houver em memória, senão anon */ }
-  if (agentToken) return { token: agentToken, isAgentToken: true };
-  return { token: null, isAgentToken: false };
-}
-
-// Retorna { ok, status, text, signed }. Usa agent token no Bearer; em 401/403
-// força novo agent token e retenta 1×.
-async function requestAgentReleaseSignedUrl(version, tag, customPath) {
-  const cfg = (typeof loadConfig === "function") ? loadConfig() : null;
-  const baseUrl = _activeBaseUrl(cfg) || (typeof activeSupabaseUrl !== "undefined" && activeSupabaseUrl) || SUPABASE_URL_DEFAULT;
-  const baseAnon = _activeAnon(cfg) || (typeof activeSupabaseAnonKey !== "undefined" && activeSupabaseAnonKey) || SUPABASE_ANON_DEFAULT;
-
-  const attempt = async (force) => {
-    const { token, isAgentToken } = await getFreshAgentBearer(cfg, force);
-    // Bearer = agent token (device_license); sem ele, cai na anon (a função exige
-    // só a apikey). Nunca usa o JWT do operador → independe da sessão do usuário.
-    const bearer = token || baseAnon;
-    const fnRes = await withCloudTimeout(
-      fetch(`${baseUrl}/functions/v1/agent-release-signed-url`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${bearer}`,
-          "apikey": baseAnon,
-        },
-        // path customizado (ex.: bridge/serial_bridge.zip) OU version. agent_token
-        // também no corpo p/ a validação de device_license da função.
-        body: JSON.stringify(
-          customPath
-            ? (token ? { path: customPath, agent_token: token } : { path: customPath })
-            : (token ? { version, agent_token: token } : { version }),
-        ),
-      }),
-      `${tag} signed-url`, 30_000,
-    );
-    if (!fnRes.ok) {
-      const txt = await fnRes.text().catch(() => "");
-      return { ok: false, status: fnRes.status, text: txt.slice(0, 200), signed: null, isAgentToken };
-    }
-    const signed = await fnRes.json().catch(() => null);
-    return { ok: true, status: 200, text: "", signed, isAgentToken };
-  };
-
-  let res;
-  try { res = await attempt(false); }
-  catch (e) { return { ok: false, status: 0, text: `rede: ${e && e.message ? e.message : e}`, signed: null }; }
-
-  if (!res.ok && (res.status === 401 || res.status === 403)) {
-    pushLog("warn", "update", `[${tag}] signed-url ${res.status} (${res.text}) — forçando novo agent token e tentando novamente`);
-    try { res = await attempt(true); }
-    catch (e) { return { ok: false, status: 0, text: `rede no retry: ${e && e.message ? e.message : e}`, signed: null }; }
-  }
-  return res;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// v3.25.60 — OTA da PASTA do serial_bridge (--onedir). Atualiza a pasta INTEIRA
-// (resources/serial_bridge/) baixando um .zip, parando a bridge, substituindo a
-// pasta e reiniciando o agente. ROLLBACK total: a pasta boa NUNCA é apagada antes
-// de a nova ser extraída e validada; se qualquer passo falhar, restaura a antiga.
-// Windows only (a bridge compilada é .exe). NÃO usa --onefile/_MEI.
-let isInstallingBridge = false;
-async function downloadAndInstallBridgeUpdate(cmdId, version, downloadUrl, expectedHash, expectedSize) {
-  if (isInstallingBridge) { try { await resolveAgentCommand(cmdId, "error", { error: "bridge OTA já em andamento" }); } catch (_) {} return; }
-  if (process.platform !== "win32") { await resolveAgentCommand(cmdId, "error", { error: "bridge OTA só no Windows" }); return; }
-  if (!downloadUrl) { await resolveAgentCommand(cmdId, "error", { error: "payload sem download_url (zip da pasta serial_bridge)" }); return; }
-  isInstallingBridge = true;
-
-  const fs = require("fs");
-  let ofs; try { ofs = require("original-fs"); } catch (_) { ofs = fs; }
-  const https = require("https"); const http = require("http");
-  const { execFile } = require("child_process");
-
-  const resourcesDir = process.resourcesPath || __dirname;
-  const targetDir = path.join(resourcesDir, "serial_bridge");
-  const stagingDir = path.join(resourcesDir, "serial_bridge.new");
-  const backupDir = path.join(resourcesDir, "serial_bridge.old");
-  const updatesDir = path.join(app.getPath("userData"), "updates");
-  try { ofs.mkdirSync(updatesDir, { recursive: true }); } catch (_) {}
-  const zipPath = path.join(updatesDir, `serial_bridge-${version || "new"}.zip`);
-  const rmrf = (p) => { try { ofs.rmSync(p, { recursive: true, force: true }); } catch (_) {} };
-
-  let bridgeStopped = false;
-  try {
-    pushLog("info", "update", `[BRIDGE-OTA] baixando pasta v${version || "?"}: ${String(downloadUrl).slice(0, 60)}...`);
-    // 1) download do zip
-    await new Promise((resolve, reject) => {
-      const lib = downloadUrl.startsWith("https:") ? https : http;
-      const doGet = (u, redirects) => {
-        lib.get(u, (res) => {
-          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) { res.resume(); return doGet(res.headers.location, redirects - 1); }
-          if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-          const file = fs.createWriteStream(zipPath);
-          res.pipe(file);
-          file.on("finish", () => file.close((e) => (e ? reject(e) : resolve())));
-          file.on("error", reject);
-        }).on("error", reject);
-      };
-      doGet(downloadUrl, 5);
-    });
-    const st = ofs.statSync(zipPath);
-    if (st.size < 100 * 1024) throw new Error(`zip muito pequeno (${st.size} B)`);
-    if (expectedSize && st.size !== Number(expectedSize)) throw new Error(`tamanho não bate (${st.size} != ${expectedSize})`);
-    if (expectedHash) {
-      const h = require("crypto").createHash("sha256").update(ofs.readFileSync(zipPath)).digest("hex");
-      if (h.toLowerCase() !== String(expectedHash).toLowerCase()) throw new Error("sha256 não bate");
-    }
-
-    // 2) extrai para staging (PowerShell Expand-Archive) e valida o exe ANTES de trocar
-    rmrf(stagingDir);
-    await new Promise((resolve, reject) => {
-      execFile("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${stagingDir}' -Force`],
-        { windowsHide: true, timeout: 120_000 }, (err) => (err ? reject(err) : resolve()));
-    });
-    let newRoot = stagingDir;
-    if (!ofs.existsSync(path.join(newRoot, "serial_bridge.exe")) &&
-        ofs.existsSync(path.join(stagingDir, "serial_bridge", "serial_bridge.exe"))) {
-      newRoot = path.join(stagingDir, "serial_bridge"); // zip continha a pasta serial_bridge/
-    }
-    if (!ofs.existsSync(path.join(newRoot, "serial_bridge.exe"))) throw new Error("serial_bridge.exe ausente no zip");
-
-    // 3) para a bridge e troca as pastas (rename = rápido; janela sem pasta ~ms)
-    await stopBridge();
-    bridgeStopped = true;
-    await new Promise((r) => setTimeout(r, 900)); // solta locks do .exe
-    rmrf(backupDir);
-    if (ofs.existsSync(targetDir)) ofs.renameSync(targetDir, backupDir);
-    try {
-      ofs.renameSync(newRoot, targetDir);
-    } catch (e) {
-      if (!ofs.existsSync(targetDir) && ofs.existsSync(backupDir)) { try { ofs.renameSync(backupDir, targetDir); } catch (_) {} }
-      throw e;
-    }
-    if (!ofs.existsSync(path.join(targetDir, "serial_bridge.exe"))) {
-      rmrf(targetDir);
-      if (ofs.existsSync(backupDir)) ofs.renameSync(backupDir, targetDir); // restaura a antiga
-      throw new Error("pós-troca sem serial_bridge.exe — revertido para a pasta anterior");
-    }
-
-    // sucesso → limpa e reinicia o agente (re-resolve o caminho e sobe a bridge nova)
-    rmrf(backupDir); rmrf(stagingDir);
-    try { ofs.unlinkSync(zipPath); } catch (_) {}
-    pushLog("info", "update", `[BRIDGE-OTA] pasta serial_bridge/ atualizada (v${version}) — reiniciando o agente`);
-    await resolveAgentCommand(cmdId, "done", { data: { version: version || null, restarted: true } });
-    isInstallingBridge = false;
-    setTimeout(() => { void relaunchAgent("update_bridge", 0); }, 1200);
-    return;
-  } catch (e) {
-    const msg = (e && e.message) || String(e);
-    pushLog("error", "update", `[BRIDGE-OTA] falhou: ${msg} — pasta anterior preservada`);
-    rmrf(stagingDir);
-    try { await resolveAgentCommand(cmdId, "error", { error: `bridge OTA falhou: ${msg}` }); } catch (_) {}
-    isInstallingBridge = false;
-    // Se paramos a bridge, a pasta antiga já foi restaurada acima → reinicia para subir.
-    if (bridgeStopped) setTimeout(() => { void relaunchAgent("update_bridge_rollback", 0); }, 1200);
-    return;
-  }
-}
-
 async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize) {
   if (isInstallingUpdate) return;
   isInstallingUpdate = true;
@@ -7176,11 +3944,26 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
 
   try {
     pushLog("info", "update", `[OTA-asar] Solicitando URL assinada para v${version}...`);
-    const res = await requestAgentReleaseSignedUrl(version, "OTA-asar");
-    if (!res.ok) {
-      return recordFailure(res.status === 0 ? (res.text || "sem sessão autenticada") : `signed-url HTTP ${res.status}: ${res.text}`);
+    const sessionRes = await supabase.auth.getSession();
+    const accessToken = sessionRes && sessionRes.data && sessionRes.data.session && sessionRes.data.session.access_token;
+    if (!accessToken) return recordFailure("sem sessão autenticada");
+
+    const baseUrl = (typeof activeSupabaseUrl !== "undefined" && activeSupabaseUrl) || SUPABASE_URL_DEFAULT;
+    const baseAnon = (typeof activeSupabaseAnonKey !== "undefined" && activeSupabaseAnonKey) || SUPABASE_ANON_DEFAULT;
+    const fnRes = await fetch(`${baseUrl}/functions/v1/agent-release-signed-url`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+        "apikey": baseAnon,
+      },
+      body: JSON.stringify({ version }),
+    });
+    if (!fnRes.ok) {
+      const txt = await fnRes.text().catch(() => "");
+      return recordFailure(`signed-url HTTP ${fnRes.status}: ${txt.slice(0, 200)}`);
     }
-    const signed = res.signed;
+    const signed = await fnRes.json();
     if (!signed || !signed.url) return recordFailure(`signed-url payload inválido`);
 
     const downloadUrl = signed.url;
@@ -7276,19 +4059,14 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
       return recordFailure(`nenhum app.asar nem pasta app encontrados em ${process.resourcesPath}`);
     }
 
-    // v3.25.48: OTA sem NTFS — baixar, substituir, reiniciar. Sem icacls, sem
-    // permissões locais. Se o copy falhar, restaura o backup e reporta (o próximo
-    // ciclo tenta de novo); a pasta é gravável porque o INSTALAR.bat não tranca nada.
-    pushLog("info", "update", `[OTA-asar] Substituindo app.asar... (destino ${currentAsar})`);
+    pushLog("info", "update", "[OTA-asar] Substituindo app.asar...");
     try {
       // tmpAsar é .new fora do asar — usa fs normal pra ler; destino é .asar — usa originalFs.
-      if (!originalFs.existsSync(tmpAsar)) return recordFailure(`arquivo temporario sumiu: ${tmpAsar}`);
       originalFs.copyFileSync(tmpAsar, currentAsar);
       try { fs.unlinkSync(tmpAsar); } catch (_) {}
     } catch (e) {
-      const code = (e && e.code) || "?";
       try { originalFs.copyFileSync(bakAsar, currentAsar); } catch (_) {}
-      return recordFailure(`falha ao substituir app.asar: ${e.message} (code=${code}) — backup restaurado`);
+      return recordFailure(`falha ao substituir app.asar: ${e.message} — backup restaurado`);
     }
 
     await reportUpdateStatus({ update_status: "installing", completed_at: new Date().toISOString() });
@@ -7304,14 +4082,11 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
       await supabase.from("farms").update({ agent_previous_version: AGENT_VERSION }).eq("id", farmId);
     } catch (_) {}
 
-    // PREVENÇÃO DE DISCO: apaga o backup do asar (.bak, 11MB) imediatamente após
-    // o sucesso. Rollback passa a usar o fluxo OTA da versão anterior (o código já
-    // trata .bak ausente). Também remove resíduos de temp/download.
-    try { if (originalFs.existsSync(bakAsar)) originalFs.unlinkSync(bakAsar); } catch (_) {}
-    try { cleanupDiskTemp(false); } catch (_) {}
-
     pushLog("info", "update", `[OTA-asar] Atualização v${version} instalada com sucesso — reiniciando`);
-    setTimeout(() => { void relaunchAgent("update_agent", 0); }, 1500);
+    setTimeout(() => {
+      try { app.relaunch(); } catch (_) {}
+      try { app.exit(0); } catch (_) { try { app.quit(); } catch (__) {} }
+    }, 1500);
   } catch (e) {
     await recordFailure(`exceção: ${e.message}`);
   }
@@ -7324,14 +4099,29 @@ async function downloadAndInstallAsarUpdate(version, expectedHash, expectedSize)
 async function resolveSignedUrlAndInstallExe(version, expectedHash, expectedSize) {
   try {
     pushLog("info", "update", `[OTA-exe] Solicitando URL assinada para v${version}...`);
-    const res = await requestAgentReleaseSignedUrl(version, "OTA-exe");
-    if (!res.ok) {
-      pushLog("error", "update", res.status === 0
-        ? `[OTA-exe] ${res.text || "sem sessão autenticada"} — abortando`
-        : `[OTA-exe] signed-url HTTP ${res.status}: ${res.text}`);
+    const sessionRes = await supabase.auth.getSession();
+    const accessToken = sessionRes?.data?.session?.access_token;
+    if (!accessToken) {
+      pushLog("error", "update", "[OTA-exe] sem sessão autenticada — abortando");
       return;
     }
-    const signed = res.signed;
+    const baseUrl = (typeof activeSupabaseUrl !== "undefined" && activeSupabaseUrl) || SUPABASE_URL_DEFAULT;
+    const baseAnon = (typeof activeSupabaseAnonKey !== "undefined" && activeSupabaseAnonKey) || SUPABASE_ANON_DEFAULT;
+    const fnRes = await fetch(`${baseUrl}/functions/v1/agent-release-signed-url`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+        "apikey": baseAnon,
+      },
+      body: JSON.stringify({ version }),
+    });
+    if (!fnRes.ok) {
+      const txt = await fnRes.text().catch(() => "");
+      pushLog("error", "update", `[OTA-exe] signed-url HTTP ${fnRes.status}: ${txt.slice(0, 200)}`);
+      return;
+    }
+    const signed = await fnRes.json();
     if (!signed?.url) {
       pushLog("error", "update", "[OTA-exe] signed-url payload inválido");
       return;
@@ -7506,30 +4296,12 @@ async function downloadAndInstallUpdate(url, version, expectedHash) {
 async function tickEnqueuePolling() {
   if (!supabase || !farmId) return;
   if (!bridgeReady) return; // sem porta serial nao adianta enfileirar
-  if (serialTerminalActive) return; // v3.25.43: terminal serial em curso — não enfileira polling
-  // FIX lentidão: manuais têm prioridade — não enfileira polling novo enquanto
-  // houver comandos manuais pendentes na fila da fazenda.
-  try {
-    const { data: pendingManuals } = await supabase
-      .from("commands")
-      .select("id")
-      .eq("farm_id", farmId)
-      .eq("status", "pending")
-      .eq("type", "manual")
-      .limit(1);
-    if (pendingManuals && pendingManuals.length > 0) return;
-  } catch (_) {}
-  // No inicio de cada ciclo, verifica se ha reset de vazao pendente marcado
-  // pelo frontend (equipments.vazao_reset_pending=true) e transfere para o
-  // Map local. O sufixo RV sera injetado no proximo frame TX daquele TSNN.
-  await checkRemoteResetPending();
   try {
     const { data, error } = await supabase.rpc("enqueue_polling_for_due_equipments", {
       _farm_id: farmId,
     });
     if (error) {
       pushLog("debug", "system", `enqueue_polling falhou: ${error.message}`);
-      noteCloudError(error, "tickEnqueuePolling");
     } else if (typeof data === "number" && data > 0) {
       // v3.9.30: nova rodada de polling enfileirada → fecha o ciclo anterior
       if (pollingCycleStats.startedAt > 0) {
@@ -7544,7 +4316,6 @@ async function tickEnqueuePolling() {
     }
   } catch (e) {
     pushLog("debug", "system", `enqueue_polling exception: ${e.message}`);
-    noteCloudError(e, "tickEnqueuePolling");
   }
 }
 
@@ -7552,11 +4323,10 @@ async function tickMarkTimeouts() {
   if (!supabase || !farmId) return;
   try {
     await supabase.rpc("mark_commands_timeout", { _farm_id: farmId });
-  } catch (e) {
-    noteCloudError(e, "tickMarkTimeouts");
+  } catch (_) {
+    /* silencioso */
   }
 }
-
 
 // v3.8.24 — Burst de polling no startup usando last_outputs_state como base.
 // Roda a cada 2s durante 15 min. Não tenta mudar estado das bombas — só lê e
@@ -7571,7 +4341,6 @@ async function tickStartupSyncPolling() {
     });
     if (error) {
       pushLog("debug", "system", `startup_sync_polling falhou: ${error.message}`);
-      noteCloudError(error, "tickStartupSyncPolling");
       return;
     }
     if (typeof data === "number" && data > 0) {
@@ -7586,7 +4355,6 @@ async function tickStartupSyncPolling() {
     }
   } catch (e) {
     pushLog("debug", "system", `startup_sync exception: ${e.message}`);
-    noteCloudError(e, "tickStartupSyncPolling");
   }
 }
 
@@ -7594,7 +4362,7 @@ function endStartupBurst(reason) {
   if (startupSyncTimer) { clearInterval(startupSyncTimer); startupSyncTimer = null; }
   pushLog("info", "system", `[STARTUP SYNC] burst de 3s encerrado (${reason}). Polling normal de 11s assume. Janela RX→desired segue ativa.`);
   if (!pollingEnqueueTimer && supabase && farmId) {
-    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, activePollingEnqueueIntervalMs);
+    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, POLLING_ENQUEUE_INTERVAL_MS);
     void tickEnqueuePolling();
   }
 }
@@ -7610,7 +4378,7 @@ function startCriticalPollingLoops() {
     pollTimer = setInterval(() => { void processNextCommand(); }, POLL_INTERVAL_MS);
   }
   if (!pollingTimeoutTimer) {
-    pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, activeSweepTimeoutMs);
+    pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, POLLING_TIMEOUT_SWEEP_MS);
   }
   if (!plcSilenceCheckTimer) {
     plcSilenceCheckTimer = setInterval(checkPlcSilence, PLC_SILENCE_CHECK_INTERVAL_MS);
@@ -7634,23 +4402,12 @@ function startCriticalPollingLoops() {
     }
     void tickStartupSyncPolling();
   } else if (!pollingEnqueueTimer && !isInStartupSyncWindow()) {
-    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, activePollingEnqueueIntervalMs);
+    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, POLLING_ENQUEUE_INTERVAL_MS);
     void tickEnqueuePolling();
   }
 
   void tickMarkTimeouts();
   void processNextCommand();
-}
-
-// v3.25.39: conta quedas seguidas de Realtime; após REALTIME_MAX_FAILS desliga o
-// Realtime e opera SÓ por polling HTTP (sempre-ativo). Retorna true = parar de reagendar.
-function noteRealtimeFail(which) {
-  realtimeConsecutiveFails++;
-  if (realtimeConsecutiveFails >= REALTIME_MAX_FAILS && !realtimeDisabled) {
-    realtimeDisabled = true;
-    try { pushLog("warn", "system", `[DEGRADED] Realtime instável (${realtimeConsecutiveFails} quedas em ${which}) — desligado; operando só por polling HTTP.`); } catch (_) {}
-  }
-  return realtimeDisabled;
 }
 
 function startRealtimeSubscriptionsBestEffort() {
@@ -7709,13 +4466,9 @@ async function connectCloudServices(cfg, options = {}) {
     startCriticalPollingLoops();
     pushLog("info", "system", "Polling HTTP iniciado imediatamente; Realtime é best-effort.");
     void refreshEquipmentCache();
-    scheduleMidnightReset();
     void sendHeartbeat();
     void flushLogs();
     void flushTelemetryQueue();
-    // v3.25.40 (#10): a nuvem voltou — reenvia o estado REAL das bombas agora,
-    // sem esperar o próximo ciclo de polling.
-    void resyncKnownStateToCloud(quiet ? "reconexão" : "startup");
     startRealtimeSubscriptionsBestEffort();
     // Marca início de sessão do agente no Relatório de Automação (origem
     // "Sistema"). Útil para correlacionar perda de estado de bombas após
@@ -7746,158 +4499,34 @@ function showSetupWindow() {
   setupWindow.loadFile(path.join(__dirname, "setup.html")).catch((e) => {
     _bootLog(`setupWindow loadFile FAIL: ${e && e.stack || e}`);
     try {
-      trayNotify("Renov Agent — Setup não encontrado",
-        `Não abriu setup.html (${path.join(__dirname, "setup.html")}). Reinstale o pacote v${AGENT_VERSION}.`, "error");
+      dialog.showErrorBox("Renov Agent — Setup não encontrado",
+        `Não consegui abrir a tela de configuração.\n\nArquivo esperado:\n${path.join(__dirname, "setup.html")}\n\nReinstale usando o pacote v${AGENT_VERSION}.`);
     } catch (_) {}
   });
   setupWindow.on("closed", () => { setupWindow = null; });
 }
 
-// ── v3.25.33: autenticação do Tray (Ver Log / Reconfigurar) ──────────────────
-const LOG_VIEW_PASSWORD = process.env.RENOV_LOG_PASSWORD || "Renov@Log2026";
-// v3.25.38: inclui platform_admin (o super-admin real do sistema — o frontend
-// inteiro usa isPlatformAdmin). Antes só ["admin","owner"] rejeitava o super-admin
-// na reconfiguração/saída pelo Tray ("Apenas administrador/owner..."). super_admin
-// incluído por robustez caso o role exista em algum ambiente.
-const RECONFIG_ADMIN_ROLES = ["admin", "owner", "platform_admin", "super_admin"];
-let authPromptMode = "password";
-let authPromptOpen = false;
-
-// Janela de auth reutilizável. Resolve com {email, password} ou null (cancelou).
-function promptAuth(mode) {
-  return new Promise((resolve) => {
-    if (authPromptOpen) return resolve(null);
-    authPromptOpen = true;
-    authPromptMode = mode;
-    let win = null;
-    let settled = false;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      authPromptOpen = false;
-      try { ipcMain.removeListener("auth:submit", onSubmit); } catch (_) {}
-      try { ipcMain.removeListener("auth:cancel", onCancel); } catch (_) {}
-      try { if (win && !win.isDestroyed()) win.close(); } catch (_) {}
-      win = null;
-      resolve(result);
-    };
-    const onSubmit = (_e, data) => finish(data || {});
-    const onCancel = () => finish(null);
-    try {
-      win = new BrowserWindow({
-        width: 380, height: mode === "login" ? 320 : 240,
-        resizable: false, minimizable: false, maximizable: false, fullscreenable: false,
-        title: "RENOV Agent", alwaysOnTop: true, icon: path.join(__dirname, "icon.png"),
-        webPreferences: { preload: path.join(__dirname, "auth-preload.cjs"), contextIsolation: true, nodeIntegration: false },
-      });
-      ipcMain.on("auth:submit", onSubmit);
-      ipcMain.on("auth:cancel", onCancel);
-      win.on("closed", () => finish(null));
-      win.loadFile(path.join(__dirname, "auth.html")).catch(() => finish(null));
-    } catch (e) {
-      finish(null);
-    }
-  });
-}
-ipcMain.handle("auth:get-mode", () => authPromptMode);
-
-// Valida login ONLINE para reconfigurar: signInWithPassword + role admin/owner.
-async function validateReconfigLogin(email, password) {
-  if (!email || !password) return { ok: false, reason: "Informe email e senha." };
-  let cfg = null;
-  try { cfg = (typeof loadConfig === "function") ? loadConfig() : null; } catch (_) {}
-  const url = (cfg && cfg.supabaseUrl) || SUPABASE_URL_DEFAULT;
-  const anon = (cfg && cfg.supabaseAnonKey) || SUPABASE_ANON_DEFAULT;
-  let tmp;
-  try { tmp = createClient(url, anon, { auth: { persistSession: false, autoRefreshToken: false } }); }
-  catch (e) { return { ok: false, reason: "Falha ao inicializar autenticação." }; }
-  let signIn;
-  try {
-    signIn = await tmp.auth.signInWithPassword({ email, password });
-  } catch (e) {
-    return { ok: false, reason: "Reconfiguração requer conexão com a internet." };
-  }
-  if (signIn && signIn.error) {
-    const msg = String(signIn.error.message || "").toLowerCase();
-    if (msg.includes("fetch") || msg.includes("network") || msg.includes("timeout") || msg.includes("failed to")) {
-      return { ok: false, reason: "Reconfiguração requer conexão com a internet." };
-    }
-    return { ok: false, reason: "Credenciais inválidas." };
-  }
-  const user = signIn && signIn.data && signIn.data.user;
-  if (!user || !user.id) return { ok: false, reason: "Credenciais inválidas." };
-  try {
-    const { data: roles, error } = await tmp.from("user_roles").select("role,farm_id").eq("user_id", user.id);
-    if (error) return { ok: false, reason: "Não foi possível verificar a permissão (online)." };
-    const isAdmin = (roles || []).some((r) =>
-      RECONFIG_ADMIN_ROLES.includes(r.role) && (!farmId || !r.farm_id || String(r.farm_id) === String(farmId)));
-    if (!isAdmin) return { ok: false, reason: "Apenas administrador/owner pode reconfigurar este agente." };
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, reason: "Reconfiguração requer conexão com a internet." };
-  } finally {
-    try { await tmp.auth.signOut(); } catch (_) {}
-  }
-}
-
-// Reconfigurar (item 1): exige login admin ONLINE antes de resetar o agente.
-async function reconfigureWithAuth() {
-  let r = null;
-  try { r = await promptAuth("login"); } catch (_) { return; }
-  if (!r) return; // cancelado
-  const check = await validateReconfigLogin(r.email, r.password);
-  if (!check.ok) {
-    try { trayNotify("Reconfiguração negada", check.reason); } catch (_) {}
-    try { pushLog("warn", "system", `[SECURITY] Reconfiguração NEGADA (${r.email || "?"}): ${check.reason}`); } catch (_) {}
-    return;
-  }
-  try { pushLog("warn", "system", `[SECURITY] Reconfiguração AUTORIZADA por ${r.email}`); } catch (_) {}
-  try {
-    if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
-    if (pollTimer) clearInterval(pollTimer);
-    if (pollingEnqueueTimer) clearInterval(pollingEnqueueTimer);
-    if (pollingTimeoutTimer) clearInterval(pollingTimeoutTimer);
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    if (siteHealthTimer) clearInterval(siteHealthTimer);
-    if (heartbeatWatchdogTimer) clearInterval(heartbeatWatchdogTimer);
-    if (inemaTimer) clearInterval(inemaTimer);
-    stopInternalWatchdog();
-  } catch (_) {}
-  void stopBridge().finally(() => showSetupWindow());
-}
-
-// Sair (item 5): fechar o agente pelo menu exige o MESMO login admin ONLINE do
-// Reconfigurar. Sem login válido = não fecha. Só protege o clique do menu — os
-// demais caminhos de saída (OTA/relaunch, anti-clone, watchdog) seguem diretos.
-async function quitWithAuth() {
-  let r = null;
-  try { r = await promptAuth("login"); } catch (_) { return; }
-  if (!r) return; // cancelado
-  const check = await validateReconfigLogin(r.email, r.password);
-  if (!check.ok) {
-    try { trayNotify("Saída negada", check.reason); } catch (_) {}
-    try { pushLog("warn", "system", `[SECURITY] Saída pelo menu NEGADA (${r.email || "?"}): ${check.reason}`); } catch (_) {}
-    return;
-  }
-  try { pushLog("warn", "system", `[SECURITY] Saída pelo menu AUTORIZADA por ${r.email}`); } catch (_) {}
-  appClosing = true;
-  try { flushLogs(); } catch (_) {}
-  void stopBridge().finally(() => app.quit());
-}
-
 // --- Log window ---
-// v3.25.46 SEGURANÇA: a janela de log foi REMOVIDA por completo. O log expunha
-// frames TX/RX, endereços de PLC e o protocolo serial a qualquer pessoa que
-// abrisse o agente na fazenda. Não existe mais NENHUMA interface visual de log
-// (nem com senha — a senha só denunciava que o log existia). O log continua
-// sendo enviado para a nuvem (agent_logs). Sem log local sensível e sem NTFS
-// (v3.25.48: zero proteção local); só liveness.txt (timestamp) permanece.
-// Estas funções viraram no-op para blindar qualquer caminho remanescente.
-async function showLogWindow() {
-  try { _bootLog("[SECURITY] showLogWindow() ignorado — janela de log removida (v3.25.46)"); } catch (_) {}
-}
-function openLogWindow() {
-  try { _bootLog("[SECURITY] openLogWindow() ignorado — janela de log removida (v3.25.46)"); } catch (_) {}
+function showLogWindow() {
+  if (logWindow && !logWindow.isDestroyed()) {
+    logWindow.show();
+    logWindow.focus();
+    return;
+  }
+  logWindow = new BrowserWindow({
+    width: 720, height: 480,
+    title: "RENOV Agent - Log",
+    icon: path.join(__dirname, "icon.png"),
+    webPreferences: {
+      preload: path.join(__dirname, "log-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  logWindow.loadFile(path.join(__dirname, "log.html")).catch((e) => {
+    _bootLog(`logWindow loadFile FAIL: ${e && e.stack || e}`);
+  });
+  logWindow.on("closed", () => { logWindow = null; });
 }
 
 // --- Config window ---
@@ -7936,7 +4565,7 @@ async function closeComPort() {
   processing = false;
   await stopBridge();
   pushLog("warn", "system", "Porta COM fechada manualmente pelo usuário");
-  if (tray) setTrayStatus("Porta COM fechada");
+  if (tray) tray.setToolTip("RENOV Agent - Porta COM fechada");
   return { success: true };
 }
 
@@ -7957,13 +4586,13 @@ async function openComPort(newPort) {
     }
     if (!pollingEnqueueTimer) {
       void tickEnqueuePolling();
-      pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, activePollingEnqueueIntervalMs);
+      pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, POLLING_ENQUEUE_INTERVAL_MS);
     }
     if (!pollingTimeoutTimer) {
       void tickMarkTimeouts();
-      pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, activeSweepTimeoutMs);
+      pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, POLLING_TIMEOUT_SWEEP_MS);
     }
-    if (tray) setTrayStatus(`Online (${comPort})`);
+    if (tray) tray.setToolTip(`RENOV Agent - Online (${comPort})`);
     return { success: true };
   } catch (e) {
     pushLog("error", "system", `Falha ao reabrir: ${e.message}`);
@@ -7974,189 +4603,6 @@ async function openComPort(newPort) {
 // ============================================================================
 // REMOTE CONTROL — agent_commands (web → agent via Supabase Realtime)
 // ============================================================================
-
-// v3.25.43 — TERMINAL SERIAL REMOTO (substitui o Hércules) ───────────────────
-// Monta o frame para o MODO POR EQUIPAMENTO. Diagnóstico PURO: não grava
-// desired_running nem arma safety — só constrói o frame no mesmo formato do
-// polling e devolve o TSNN/saída para o parse da resposta.
-//   action: 'status' | 'ping' → leitura ({0…}); 'on' → bit da saída = 1;
-//           'off' → bit da saída = 0 (preservando as demais saídas do PLC).
-async function buildEquipmentTerminalFrame(equipmentId, action) {
-  const meta = equipmentById.get(String(equipmentId));
-  if (!meta || !meta.hw_id) throw new Error("equipamento sem hw_id no cache");
-  const hw = String(meta.hw_id).toUpperCase();
-  const tsnn = hw.substring(0, 4);
-  const saida = Number(meta.saida) || 1;
-  const bit = action === "on" ? "1" : "0"; // status/ping/off → 0
-  const payload = await buildSafetyOffPayloadPreserving(tsnn, saida, bit);
-  const frame = `[${tsnn}_1_]{${payload}}[${tsnn}_ETX_]\r`;
-  return { frame, tsnn, saida, name: meta.name };
-}
-
-// Lê o bit da saída no primeiro RX de telemetria capturado (parse legível).
-function parseEquipmentStatusFromFrames(frames, tsnn, saida) {
-  for (const f of frames || []) {
-    const parts = extractTelemetryParts(f.frame);
-    if (!parts || parts.tsnn !== String(tsnn).toUpperCase()) continue;
-    const p = String(parts.payload || "");
-    const idx = Math.max(0, (Number(saida) || 1) - 1);
-    const bit = p.length === 1 ? p[0] : (idx < p.length ? p[idx] : null);
-    if (bit === "0" || bit === "1") {
-      return { status: bit === "1" ? "ligado" : "desligado", raw: f.frame };
-    }
-  }
-  return null;
-}
-
-async function handleSerialTerminal(cmd, startedAt) {
-  // v3.25.47: NÃO erra no instante. A bridge pode estar num reopen transitório do
-  // PL2303 (ou subindo logo após o boot) com bridgeReady=false por alguns segundos.
-  // Aguarda até 8s a bridge ficar pronta; só erra se realmente não conectar.
-  if (!bridgeReady || !bridgeProcess) {
-    pushLog("info", "remote", "[SERIAL-TERM] bridge não-pronta — aguardando até 8s...");
-    const readyDeadline = Date.now() + 8_000;
-    while ((!bridgeReady || !bridgeProcess) && Date.now() < readyDeadline) {
-      await new Promise((r) => setTimeout(r, 200));
-    }
-  }
-  if (!bridgeReady || !bridgeProcess) {
-    await resolveAgentCommand(cmd.id, "error", { error: "Bridge serial nao conectada (aguardou 8s)" });
-    return;
-  }
-  if (serialTerminalActive) {
-    await resolveAgentCommand(cmd.id, "error", { error: "Outro comando de terminal em curso" });
-    return;
-  }
-  const p = cmd.payload || {};
-  const mode = p.mode === "equipment" ? "equipment" : "raw";
-  // Teto de 30s (item 5): a serial nunca fica presa; o safety do firmware é 15min.
-  const timeoutMs = Math.max(500, Math.min(30_000, Number(p.timeout_ms) || 5_000));
-
-  // Exceção (pedido do usuário): se há desligamento forçado em curso, ESPERA ele
-  // terminar (cap ~10s) e só então executa — nunca corta uma sequência de failsafe.
-  if (forcedShutdownActive) {
-    pushLog("info", "remote", "[SERIAL-TERM] aguardando desligamento forçado terminar antes de executar");
-    const waitUntil = Date.now() + 10_000;
-    while (forcedShutdownActive && Date.now() < waitUntil) {
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    if (forcedShutdownActive) {
-      await resolveAgentCommand(cmd.id, "error", { error: "Desligamento forçado em curso — tente novamente em instantes" });
-      return;
-    }
-  }
-
-  let frame = null;
-  let parsedMeta = null; // { tsnn, saida } quando mode=equipment
-  try {
-    if (mode === "equipment") {
-      if (!p.equipment_id) throw new Error("equipment_id ausente");
-      const built = await buildEquipmentTerminalFrame(p.equipment_id, String(p.action || "status"));
-      frame = built.frame;
-      parsedMeta = { tsnn: built.tsnn, saida: built.saida };
-    } else {
-      const raw = String(p.command || "").replace(/[\r\n]+$/g, "");
-      if (!raw.trim()) throw new Error("comando vazio");
-      frame = raw; // \r é anexado abaixo, sempre
-    }
-  } catch (e) {
-    await resolveAgentCommand(cmd.id, "error", { error: `Falha ao montar frame: ${e.message}` });
-    return;
-  }
-
-  // Garante exatamente um CR no fim (item 1: o sistema SEMPRE adiciona \r).
-  const frameCR = frame.endsWith("\r") ? frame : `${frame}\r`;
-
-  serialTerminalActive = true;
-  // Classificação tech_terminal vale pela janela inteira + 3s de graça (RX atrasado).
-  serialTerminalGraceUntil = Date.now() + timeoutMs + 3_000;
-  serialCaptureBuf = { frames: [], startedAt: Date.now() };
-  const txAt = Date.now();
-  try {
-    // Corta a fila: descarta APENAS os frames de polling pendentes (mantém
-    // manual/reset/safety em voo — decisão do usuário: pausa só o automático).
-    let dropped = 0;
-    for (let i = txQueue.length - 1; i >= 0; i--) {
-      if (txQueue[i] && txQueue[i].priority === "polling") { txQueue.splice(i, 1); dropped++; }
-    }
-    pushLog("warn", "remote",
-      `[SERIAL-TERM] prioridade absoluta: polling pausado, ${dropped} frame(s) de polling descartado(s). TX-> ${frameCR.replace(/\r/g, "")}`,
-      frameCR);
-
-    // Escreve DIRETO na serial (bypass dos gaps de TX). Prova de vida + anti-colisão.
-    const ok = _txWriteNow(frameCR);
-    if (!ok) throw new Error("bridge indisponível na escrita");
-
-    // Captura tudo que chegar durante a janela.
-    await new Promise((r) => setTimeout(r, timeoutMs));
-
-    const frames = (serialCaptureBuf && serialCaptureBuf.frames) || [];
-    const responses = frames.map((f) => f.frame);
-    const data = {
-      sent: frameCR,
-      mode,
-      responses,
-      raw: responses.join("\n"),
-      count: responses.length,
-      elapsed_ms: Date.now() - txAt,
-    };
-    if (parsedMeta) {
-      data.parsed = parseEquipmentStatusFromFrames(frames, parsedMeta.tsnn, parsedMeta.saida);
-    }
-    pushLog("info", "remote", `[SERIAL-TERM] ${responses.length} resposta(s) em ${data.elapsed_ms}ms`);
-    await resolveAgentCommand(cmd.id, "done", { duration_ms: Date.now() - startedAt, data });
-  } catch (e) {
-    await resolveAgentCommand(cmd.id, "error", {
-      duration_ms: Date.now() - startedAt,
-      error: `Terminal serial: ${e.message}`,
-      data: { sent: frameCR, mode },
-    });
-  } finally {
-    serialCaptureBuf = null;
-    serialTerminalActive = false;
-    // Retoma o polling imediatamente (zero tempo morto).
-    setImmediate(() => { void processNextCommand(); void tickEnqueuePolling(); });
-  }
-}
-
-// SNIFF PASSIVO — captura o tráfego por duration_ms SEM pausar o polling.
-// Flush incremental para a web ver os frames chegando ao vivo (poll a cada 2s).
-async function handleSerialSniff(cmd, startedAt) {
-  if (serialSniffBuf) {
-    await resolveAgentCommand(cmd.id, "error", { error: "Outra captura (sniff) em curso" });
-    return;
-  }
-  const p = cmd.payload || {};
-  // v3.25.60: teto elevado 30s → 60s (captura passiva, não pausa o polling). O Log
-  // ao Vivo do Terminal Serial reenfileira chunks de 60s → menos "furos" entre eles.
-  const durationMs = Math.max(1_000, Math.min(60_000, Number(p.duration_ms) || 10_000));
-  serialSniffBuf = { frames: [], startedAt: Date.now() };
-  pushLog("info", "remote", `[SERIAL-SNIFF] captura passiva por ${durationMs}ms (polling segue normal)`);
-  const endAt = Date.now() + durationMs;
-  try {
-    // Flush parcial a cada ~1.5s: status 'executing' + result.data.frames crescendo.
-    while (Date.now() < endAt) {
-      await new Promise((r) => setTimeout(r, 1_500));
-      const partial = (serialSniffBuf.frames || []).slice();
-      try {
-        await supabase.from("agent_commands").update({
-          status: "executing",
-          result: { data: { frames: partial, capturing: true, count: partial.length } },
-        }).eq("id", cmd.id);
-      } catch (_) {}
-    }
-    const frames = (serialSniffBuf.frames || []).slice();
-    await resolveAgentCommand(cmd.id, "done", {
-      duration_ms: Date.now() - startedAt,
-      data: { frames, capturing: false, count: frames.length },
-    });
-    pushLog("info", "remote", `[SERIAL-SNIFF] fim — ${frames.length} frame(s) capturado(s)`);
-  } catch (e) {
-    await resolveAgentCommand(cmd.id, "error", { error: `Sniff: ${e.message}` });
-  } finally {
-    serialSniffBuf = null;
-  }
-}
 
 async function resolveAgentCommand(cmdId, status, extra = {}) {
   if (!supabase || !cmdId) return;
@@ -8259,43 +4705,12 @@ async function handleAgentCommand(cmd) {
           await resolveAgentCommand(cmd.id, "error", { error: "payload.port ausente" });
           break;
         }
-        const previousPort = comPort;
-        pushLog("info", "system", `[CONFIG] Comando remoto de troca de porta: ${previousPort} → ${newPort}`);
         await closeComPort();
         const r = await openComPort(newPort);
-        if (!r.success) {
-          // Rollback: tenta reabrir a porta anterior.
-          pushLog("warn", "system", `[CONFIG] Falha em ${newPort} (${r.error}) — revertendo para ${previousPort}`);
-          let rolledBack = false;
-          if (previousPort && previousPort !== newPort) {
-            const rb = await openComPort(previousPort);
-            rolledBack = !!(rb && rb.success);
-          }
-          await resolveAgentCommand(cmd.id, "error", {
-            duration_ms: Date.now() - startedAt,
-            error: `Falha ao abrir ${newPort}: ${r.error}${rolledBack ? ` (revertido para ${previousPort})` : ""}`,
-            data: { attempted: newPort, current: comPort, rolled_back: rolledBack },
-          });
-          break;
-        }
-        // Sucesso → persiste em agent_config (fonte da verdade) sem disparar hot-reload duplicado.
-        if (supabase && farmId) {
-          try {
-            const nowIso = new Date().toISOString();
-            await supabase
-              .from("agent_config")
-              .upsert({ farm_id: farmId, serial_port: newPort, updated_at: nowIso },
-                      { onConflict: "farm_id" });
-            lastAgentConfigUpdatedAt = nowIso;
-            if (liveAgentConfig) liveAgentConfig.serial_port = newPort;
-          } catch (e) {
-            pushLog("warn", "system", `[CONFIG] não pôde persistir porta em agent_config: ${formatError(e)}`);
-          }
-        }
-        pushLog("info", "system", `[CONFIG] Bridge reconectada em ${newPort}`);
-        await resolveAgentCommand(cmd.id, "done", {
+        await resolveAgentCommand(cmd.id, r.success ? "done" : "error", {
           duration_ms: Date.now() - startedAt,
-          data: { port: comPort, previous: previousPort },
+          error: r.success ? undefined : r.error,
+          data: { port: comPort },
         });
         break;
       }
@@ -8334,42 +4749,12 @@ async function handleAgentCommand(cmd) {
         await resolveAgentCommand(cmd.id, "done", { duration_ms: Date.now() - startedAt });
         break;
       }
-      case "start_log_stream": {
-        const ok = startLiveLogStream();
-        await resolveAgentCommand(cmd.id, ok ? "done" : "error", {
-          duration_ms: Date.now() - startedAt,
-          data: { buffer_size: liveStreamBuffer.length, ttl_ms: LIVE_STREAM_INACTIVE_MS },
-          error: ok ? undefined : "Falha ao abrir canal broadcast",
-        });
-        break;
-      }
-      case "renew_log_stream": {
-        const ok = renewLiveLogStream();
-        await resolveAgentCommand(cmd.id, ok ? "done" : "error", {
-          duration_ms: Date.now() - startedAt,
-          error: ok ? undefined : "Stream não estava ativo",
-        });
-        break;
-      }
-      case "stop_log_stream": {
-        stopLiveLogStream("manual");
-        await resolveAgentCommand(cmd.id, "done", { duration_ms: Date.now() - startedAt });
-        break;
-      }
       case "list_ports": {
         const ports = await listSerialPortsAsync();
         await resolveAgentCommand(cmd.id, "done", {
           duration_ms: Date.now() - startedAt,
           data: { ports },
         });
-        break;
-      }
-      case "serial_terminal": {
-        await handleSerialTerminal(cmd, startedAt);
-        break;
-      }
-      case "serial_sniff": {
-        await handleSerialSniff(cmd, startedAt);
         break;
       }
       case "send_manual_frame": {
@@ -8480,53 +4865,22 @@ async function handleAgentCommand(cmd) {
         break;
       }
 
-      case "update_bridge": {
-        // OTA da PASTA do serial_bridge (--onedir). payload:
-        //   { version, download_url (zip da pasta), file_hash?, file_size_bytes? }
-        // O agente para a bridge, substitui resources/serial_bridge/ e reinicia.
-        // A própria função resolve o comando (done/error) e faz o relaunch.
-        const bv = cmd.payload && cmd.payload.version;
-        const burl = cmd.payload && cmd.payload.download_url;
-        const bhash = cmd.payload && (cmd.payload.file_hash || cmd.payload.sha256);
-        const bsize = cmd.payload && (cmd.payload.file_size_bytes || cmd.payload.size);
-        pushLog("info", "update", `[BRIDGE-OTA] comando recebido v${bv || "?"}`);
-        await downloadAndInstallBridgeUpdate(cmd.id, bv, burl, bhash || null, bsize || null);
-        break;
-      }
-
-      case "agent_restart":
-      case "reboot_agent":
-      case "restart_agent": {
-        // v3.25.39: aceita os kinds (restart_agent/reboot_agent = aliases da web).
-        // v3.25.48: funciona MESMO com o agente bloqueado — handleAgentCommand não
-        // checa agentBlocked e o poll HTTP (tickAgentCommandPoll) segue ativo.
-        pushLog("warn", "system", "[REMOTE] Restart solicitado via plataforma web. Reiniciando...");
-        // marca done ANTES de reiniciar (garante o PATCH antes do relaunch)
+      case "agent_restart": {
+        pushLog("warn", "remote", "Reinício do agente Electron solicitado remotamente");
         await resolveAgentCommand(cmd.id, "done", {
           duration_ms: Date.now() - startedAt,
           data: { restarting: true },
         });
-        setTimeout(() => { void relaunchAgent("manual_restart", 0); }, 800);
-        break;
-      }
-
-      case "unblock_agent": {
-        // v3.25.48: DESTRAVA o agente remotamente mesmo se ele entrou em bloqueio
-        // de segurança. Apaga o kill-file, zera o estado de bloqueio em memória e
-        // reinicia limpo (com self-heal + enforcement off, sobe operando 100%).
-        // Processado mesmo com agentBlocked=true (o switch não checa o flag).
-        pushLog("warn", "system", "[REMOTE] Unblock solicitado via plataforma web — limpando bloqueio e reiniciando.");
-        try { fs.unlinkSync(BLOCK_FLAG_FILE); } catch (_) {}
-        agentBlocked = false;
-        licenseKillSwitchTriggered = false;
-        antiCloneTriggered = false;
-        machineMismatchStrikes = 0;
-        pollingPaused = false;
-        await resolveAgentCommand(cmd.id, "done", {
-          duration_ms: Date.now() - startedAt,
-          data: { unblocked: true, restarting: true },
-        });
-        setTimeout(() => { void relaunchAgent("remote_unblock", 0); }, 800);
+        // dá tempo do PATCH chegar antes de relaunch
+        setTimeout(() => {
+          try {
+            pushLog("warn", "system", "Relaunch do app.exe (agent_restart)");
+            app.relaunch();
+            app.exit(0);
+          } catch (e) {
+            pushLog("error", "system", `Falha relaunch: ${e.message}`);
+          }
+        }, 800);
         break;
       }
 
@@ -8580,7 +4934,10 @@ async function handleAgentCommand(cmd) {
             });
 
             pushLog("warn", "update", `[ROLLBACK] app.asar.bak restaurado — reiniciando`);
-            setTimeout(() => { void relaunchAgent("update_agent", 0); }, 1500);
+            setTimeout(() => {
+              try { app.relaunch(); } catch (_) {}
+              try { app.exit(0); } catch (_) { try { app.quit(); } catch (__) {} }
+            }, 1500);
           } catch (e) {
             await resolveAgentCommand(cmd.id, "error", { error: `swap falhou: ${e.message}` });
           }
@@ -8613,7 +4970,10 @@ async function handleAgentCommand(cmd) {
             });
 
             pushLog("warn", "update", `[ROLLBACK] pasta app_pre_ota.bak restaurada — reiniciando`);
-            setTimeout(() => { void relaunchAgent("update_agent", 0); }, 1500);
+            setTimeout(() => {
+              try { app.relaunch(); } catch (_) {}
+              try { app.exit(0); } catch (_) { try { app.quit(); } catch (__) {} }
+            }, 1500);
           } catch (e) {
             await resolveAgentCommand(cmd.id, "error", { error: `restore folder falhou: ${e.message}` });
           }
@@ -8655,7 +5015,6 @@ function scheduleAgentCmdRetry(reason) {
 
 async function startAgentCommandSubscription() {
   if (!supabase || !farmId) return;
-  if (realtimeDisabled) return; // modo degradado: só polling HTTP
 
   try {
     // Limpar subscription anterior
@@ -8699,10 +5058,8 @@ async function startAgentCommandSubscription() {
       .subscribe((status) => {
         if (status === "SUBSCRIBED") {
           agentCmdRetryAttempts = 0;
-          realtimeConsecutiveFails = 0;
           pushLog("info", "remote", `Subscription agent_commands: ${status}`);
         } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR" || status === "CLOSED") {
-          if (noteRealtimeFail("agent_commands")) return; // 3 quedas → só HTTP polling
           scheduleAgentCmdRetry(status);
         }
       });
@@ -8756,7 +5113,6 @@ function scheduleCommandsRetry(reason) {
 
 async function startCommandsSubscription() {
   if (!supabase || !farmId) return;
-  if (realtimeDisabled) return; // modo degradado: só polling HTTP
 
   try {
     if (commandsChannel) {
@@ -8808,10 +5164,8 @@ async function startCommandsSubscription() {
       .subscribe((status) => {
         if (status === "SUBSCRIBED") {
           commandsRetryAttempts = 0;
-          realtimeConsecutiveFails = 0;
           pushLog("info", "system", `Subscription commands: ${status}`);
         } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR" || status === "CLOSED") {
-          if (noteRealtimeFail("commands")) return; // 3 quedas → só HTTP polling
           scheduleCommandsRetry(status);
         }
       });
@@ -8820,214 +5174,11 @@ async function startCommandsSubscription() {
   }
 }
 
-// ============================================================================
-// v3.12.2 — Configuração remota da fazenda (tabela public.agent_config)
-// ----------------------------------------------------------------------------
-// Tudo que antes ficava em config local (porta COM, intervalo de polling,
-// timeout de sweep) agora vem do banco. O agente:
-//   1) Busca/cria o registro da fazenda no boot (após gate de licença).
-//   2) Reconsulta a cada 60s; se updated_at mudou, aplica em hot-reload.
-//   3) Se serial_port mudou: fecha bridge e reabre na nova porta.
-//   4) Se intervalos mudaram: reinicia os timers afetados.
-// ============================================================================
-function _agentConfigCacheFile() {
-  try { return path.join(app.getPath("userData"), "agent-config-cache.json"); } catch (_) { return null; }
-}
-function _loadAgentConfigCache() {
-  try {
-    const f = _agentConfigCacheFile();
-    if (!f || !fs.existsSync(f)) return null;
-    const j = JSON.parse(fs.readFileSync(f, "utf8"));
-    if (j && typeof j === "object" && j.serial_port) return j;
-  } catch (_) {}
-  return null;
-}
-function _saveAgentConfigCache(cfg) {
-  try {
-    const f = _agentConfigCacheFile();
-    if (!f || !cfg) return;
-    fs.writeFileSync(f, JSON.stringify({
-      serial_port: cfg.serial_port,
-      polling_interval_ms: cfg.polling_interval_ms,
-      sweep_timeout_ms: cfg.sweep_timeout_ms,
-      tx_gap_ms: cfg.tx_gap_ms,
-      updated_at: cfg.updated_at,
-      cached_at: new Date().toISOString(),
-    }), "utf8");
-  } catch (_) {}
-}
-
-async function fetchAgentConfig() {
-  if (!supabase || !farmId) {
-    const cached = _loadAgentConfigCache();
-    if (cached) {
-      pushLog("warn", "system", `[CONFIG] sem conexao com nuvem — usando cache local (porta ${cached.serial_port})`);
-      return cached;
-    }
-    return null;
-  }
-  try {
-    const { data, error } = await supabase
-      .from("agent_config")
-      .select("serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at")
-      .eq("farm_id", farmId)
-      .maybeSingle();
-    if (error) throw error;
-    if (data) return data;
-    // Não existe — cria com defaults para esta fazenda.
-    const defaults = {
-      farm_id: farmId,
-      serial_port: comPort || "COM1",
-      polling_interval_ms: POLLING_ENQUEUE_INTERVAL_MS,
-      sweep_timeout_ms: POLLING_TIMEOUT_SWEEP_MS,
-      tx_gap_ms: activeTxGapMs,
-    };
-    const { data: created, error: insErr } = await supabase
-      .from("agent_config")
-      .insert(defaults)
-      .select("serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at")
-      .single();
-    if (insErr) {
-      pushLog("warn", "system", `[CONFIG] não pôde criar agent_config (${formatError(insErr)}) — usando defaults locais`);
-      return {
-        serial_port: defaults.serial_port,
-        polling_interval_ms: defaults.polling_interval_ms,
-        sweep_timeout_ms: defaults.sweep_timeout_ms,
-        tx_gap_ms: defaults.tx_gap_ms,
-        updated_at: new Date().toISOString(),
-      };
-    }
-    pushLog("info", "system", `[CONFIG] registro agent_config criado com defaults (porta ${defaults.serial_port})`);
-    return created;
-  } catch (e) {
-    pushLog("warn", "system", `[CONFIG] fetchAgentConfig falhou: ${formatError(e)}`);
-    const cached = _loadAgentConfigCache();
-    if (cached) {
-      pushLog("warn", "system", `[CONFIG] fallback: cache local (porta ${cached.serial_port}, salvo em ${cached.cached_at || "?"})`);
-      return cached;
-    }
-    return null;
-  }
-}
-
-async function applyAgentConfig(newCfg, options = {}) {
-  if (!newCfg) return;
-  const { initial = false } = options;
-  const oldPort = (liveAgentConfig && liveAgentConfig.serial_port) || comPort;
-  const oldPoll = activePollingEnqueueIntervalMs;
-  const oldSweep = activeSweepTimeoutMs;
-  const oldTxGap = activeTxGapMs;
-
-  // Intervalos — sanity bounds.
-  const newPoll = Math.max(1_000, Math.min(120_000, Number(newCfg.polling_interval_ms) || POLLING_ENQUEUE_INTERVAL_MS));
-  const newSweep = Math.max(500, Math.min(60_000, Number(newCfg.sweep_timeout_ms) || POLLING_TIMEOUT_SWEEP_MS));
-  const newTxGap = Math.max(0, Math.min(5_000, Number(newCfg.tx_gap_ms) || 100));
-  const newPort = (newCfg.serial_port || "").trim() || oldPort;
-
-  liveAgentConfig = newCfg;
-  lastAgentConfigUpdatedAt = newCfg.updated_at || lastAgentConfigUpdatedAt;
-  activePollingEnqueueIntervalMs = newPoll;
-  activeSweepTimeoutMs = newSweep;
-  activeTxGapMs = newTxGap;
-  _saveAgentConfigCache(newCfg);
-
-  if (initial) {
-    comPort = newPort;
-    pushLog("info", "system",
-      `[CONFIG] aplicada (porta=${newPort}, polling=${newPoll}ms, sweep=${newSweep}ms, tx_gap=${newTxGap}ms)`);
-    return;
-  }
-
-  if (newPoll !== oldPoll && pollingEnqueueTimer) {
-    clearInterval(pollingEnqueueTimer);
-    pollingEnqueueTimer = setInterval(() => { void tickEnqueuePolling(); }, activePollingEnqueueIntervalMs);
-    pushLog("info", "system", `[CONFIG] polling_interval_ms ${oldPoll} → ${newPoll}ms (timer reiniciado)`);
-  }
-  if (newSweep !== oldSweep && pollingTimeoutTimer) {
-    clearInterval(pollingTimeoutTimer);
-    pollingTimeoutTimer = setInterval(() => { void tickMarkTimeouts(); }, activeSweepTimeoutMs);
-    pushLog("info", "system", `[CONFIG] sweep_timeout_ms ${oldSweep} → ${newSweep}ms (timer reiniciado)`);
-  }
-  if (newTxGap !== oldTxGap) {
-    pushLog("info", "system", `[CONFIG] tx_gap_ms ${oldTxGap} → ${newTxGap}ms`);
-  }
-  if (newPort && newPort !== oldPort) {
-    pushLog("warn", "system", `[CONFIG] Porta alterada para ${newPort} — reconectando bridge`);
-    try {
-      await closeComPort();
-      const r = await openComPort(newPort);
-      if (r && r.success) {
-        pushLog("info", "system", `[CONFIG] Bridge reconectada em ${newPort}`);
-      } else {
-        pushLog("error", "system", `[CONFIG] Falha ao reabrir ${newPort}: ${r && r.error}`);
-      }
-    } catch (e) {
-      pushLog("error", "system", `[CONFIG] Exceção ao trocar porta: ${formatError(e)}`);
-    }
-  }
-}
-
-async function tickAgentConfigWatch() {
-  if (!supabase || !farmId) return;
-  // Timeout de comunicação por fazenda — relido junto do watch de config (60s),
-  // pode mudar sem OTA. Alimenta wasOfflineLong (proteção do PLC).
-  await refreshCommTimeout();
-  await refreshScheduledAutomations(); // regras de desligamento programado (janela p/ não marcar 'local')
-  try {
-    const { data, error } = await supabase
-      .from("agent_config")
-      .select("serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at")
-      .eq("farm_id", farmId)
-      .maybeSingle();
-    if (error) { pushLog("debug", "system", `[CONFIG] watch erro: ${formatError(error)}`); return; }
-    if (!data) return;
-    if (lastAgentConfigUpdatedAt && data.updated_at === lastAgentConfigUpdatedAt) return;
-    pushLog("info", "system", `[CONFIG] mudanca detectada (updated_at=${data.updated_at}) — aplicando hot-reload`);
-    await applyAgentConfig(data, { initial: false });
-  } catch (e) {
-    pushLog("debug", "system", `[CONFIG] watch exception: ${formatError(e)}`);
-  }
-}
-
-function startAgentConfigWatch() {
-  if (agentConfigWatchTimer) return;
-  agentConfigWatchTimer = setInterval(() => { void tickAgentConfigWatch(); }, AGENT_CONFIG_POLL_MS);
-}
-
-
 
 async function startAgent(cfg) {
   if (startingAgent) return;
   startingAgent = true;
   let startupStep = "preparação";
-
-  // v3.25.42: kill-file presente = bloqueio de segurança anterior (clone ou asar
-  // adulterado). NÃO inicia a operação — nem bridge, nem nuvem, nem polling.
-  // Só sai deste estado quando alguém apagar o arquivo manualmente.
-  try {
-    const blocked = readBlockFlag();
-    // v3.25.48 SELF-HEAL: com o enforcement de segurança OFF, um kill-file remanescente
-    // (gravado por um falso positivo de asar_tampered/clone em versão anterior) NÃO pode
-    // mais manter a fazenda parada. Apaga o flag e inicia a operação normalmente.
-    if (blocked && !SECURITY_BLOCK_ENFORCEMENT) {
-      try { fs.unlinkSync(BLOCK_FLAG_FILE); } catch (_) {}
-      agentBlocked = false;
-      pushLog("warn", "system",
-        `[SECURITY] kill-file remanescente (motivo: ${blocked.reason || "?"}) IGNORADO e removido — enforcement DESATIVADO (v3.25.48). Iniciando operação.`);
-    } else if (blocked) {
-      agentBlocked = true;
-      pushLog("error", "system",
-        `[SECURITY] Agente BLOQUEADO desde ${blocked.at || "?"} (motivo: ${blocked.reason || "?"}). ` +
-        `Operação não será iniciada. Remova ${BLOCK_FLAG_FILE} após autorização do suporte RENOV.`);
-      try { if (tray) setTrayStatus("BLOQUEADO"); } catch (_) {}
-      try {
-        trayNotify("RENOV Agent - BLOQUEADO",
-          "Arquivo do sistema foi modificado. Contate o suporte RENOV.", "error");
-      } catch (_) {}
-      startingAgent = false;
-      return;
-    }
-  } catch (_) {}
 
   try {
     startupStep = "limpar timers anteriores";
@@ -9035,11 +5186,6 @@ async function startAgent(cfg) {
     if (pollingEnqueueTimer) { clearInterval(pollingEnqueueTimer); pollingEnqueueTimer = null; }
     if (pollingTimeoutTimer) { clearInterval(pollingTimeoutTimer); pollingTimeoutTimer = null; }
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-    if (siteHealthTimer) { clearInterval(siteHealthTimer); siteHealthTimer = null; }
-    if (heartbeatWatchdogTimer) { clearInterval(heartbeatWatchdogTimer); heartbeatWatchdogTimer = null; }
-    if (inemaTimer) { clearInterval(inemaTimer); inemaTimer = null; }
-    if (agentConfigWatchTimer) { clearInterval(agentConfigWatchTimer); agentConfigWatchTimer = null; }
-    stopInternalWatchdog();
     processing = false;
     inflightCmd = null;
     inflightTsnn = null;
@@ -9048,45 +5194,10 @@ async function startAgent(cfg) {
     await stopBridge();
 
     farmId = cfg.farmId;
-    // v3.22.0: prioriza última COM que funcionou (evita re-scan em toda inicialização)
-    let portToTry = null;
-    try {
-      const fs3 = require("fs");
-      const lastComFile = path.join(app.getPath("userData"), "last_working_com.txt");
-      portToTry = fs3.readFileSync(lastComFile, "utf8").trim();
-    } catch (_) {}
-    if (!portToTry) portToTry = cfg.comPort;
-    comPort = portToTry || "COM12";
+    comPort = cfg.comPort || "COM12";
 
-    // v3.25.39 COM-FIRST: abre a bridge serial ANTES de qualquer nuvem. Com 0% de
-    // internet as bombas operam imediatamente. A nuvem (login + anti-clone + agent_config)
-    // roda DEPOIS, best-effort. Se a porta remota (agent_config) diferir do cache, o
-    // applyAgentConfig(initial:false) mais abaixo reabre; e o hot-reload (60s) cobre o resto.
-    // v3.25.61: garante a bridge --onedir (auto-compila se a pasta não existir).
-    // Best-effort e com teto de tempo próprio — NUNCA trava o boot.
-    startupStep = "garantir bridge onedir (auto-compile)";
-    try { await ensureBridgeOnedir(); }
-    catch (e) { pushLog("warn", "bridge", `[BRIDGE-AUTOCOMPILE] exceção ignorada: ${(e && e.message) || e}`); }
-
-    pushLog("info", "system", `[COM-FIRST] Abrindo bridge serial em ${comPort} ANTES da nuvem...`);
-    try {
-      startupStep = `abrir bridge serial (COM-first) em ${comPort}`;
-      await startBridge(comPort);
-    } catch (bridgeErr) {
-      // v3.25.49: SEM popup/tray "ERRO Python" no headless. Qualquer erro da bridge
-      // é APENAS logado + reportado no heartbeat (last_error). O auto-recovery com
-      // backoff tenta reabrir em background; o polling HTTP segue funcionando.
-      pushLog("error", "system", `Bridge falhou (COM-first): ${bridgeErr.message} — auto-recovery em background (sem popup)`);
-      lastBridgeError = "bridge_start_failed";
-      // NÃO seta bridgeWasEverReady aqui: se a bridge nunca subiu (Python/porta),
-      // o watchdog interno de AGENTE não deve relançar o processo. O relaunch da
-      // BRIDGE é feito pelo scheduleBridgeRelaunch (independente daquele flag).
-      scheduleBridgeRelaunch(`falha no boot: ${bridgeErr.message}`);
-      // NÃO retorna: segue p/ nuvem; o polling HTTP e o auto-recovery cuidam do resto.
-    }
-
-    // Nuvem é BEST-EFFORT — conecta DEPOIS do COM. Anti-clone valida em background.
-    startupStep = "conectar serviços da nuvem (pós-COM)";
+    // v3.10.7 SECURITY: conecta nuvem PRIMEIRO e valida hardware ANTES do bridge.
+    startupStep = "conectar serviços da nuvem (pré-gate)";
     try { await connectCloudServices(cfg); } catch (_) {}
 
     // v3.11.9: SEMPRE reporta versão atual ao banco logo após autenticação,
@@ -9094,25 +5205,6 @@ async function startAgent(cfg) {
     // a versão real do .asar em execução.
     try {
       if (supabase && farmId) {
-        // Lê o timeout de comunicação da fazenda ANTES de decidir wasOfflineLong.
-        await refreshCommTimeout();
-        await refreshScheduledAutomations();
-        // STARTUP SYNC: mede o tempo OFFLINE (último heartbeat ANTES deste boot vs
-        // agora) — LER antes de sobrescrever. > comm_timeout ⇒ proteção do PLC
-        // desligou as bombas ⇒ bomba ligada = acionamento LOCAL (botoeira).
-        try {
-          const { data: prevSh } = await supabase
-            .from("site_health").select("last_heartbeat").eq("farm_id", farmId).maybeSingle();
-          if (prevSh?.last_heartbeat) {
-            bootOfflineMs = Date.now() - new Date(prevSh.last_heartbeat).getTime();
-            wasOfflineLong = bootOfflineMs > commTimeoutMs;
-            if (wasOfflineLong) {
-              pushLog("warn", "system",
-                `[STARTUP SYNC] agente ficou OFFLINE ~${Math.round(bootOfflineMs / 60000)}min (> ${Math.round(commTimeoutMs / 60000)}min) — bombas ligadas serão tratadas como acionamento LOCAL (botoeira)`);
-            }
-          }
-        } catch (_) { /* sem site_health prévio (1º boot) → wasOfflineLong=false */ }
-
         await supabase.from("agent_update_status").upsert(
           {
             farm_id: farmId,
@@ -9135,80 +5227,39 @@ async function startAgent(cfg) {
       pushLog("warn", "system", `[HEARTBEAT] Falha ao reportar versão: ${formatError(e)}`);
     }
 
-    // v3.13.1 SECURITY: gate de licença NÃO-INVASIVO.
-    // Fluxo legacy (fazendas em produção): email+password+farmId salvos localmente
-    // + autenticação bem-sucedida no Supabase (já ocorreu acima) ⇒ agente licenciado.
-    // O licenseToken/anticlone é OPCIONAL — se ausente, tenta provisionar em background,
-    // mas NUNCA bloqueia a inicialização do bridge/polling.
-    startupStep = "gate de licença (legacy-friendly)";
+    startupStep = "gate de hardware fingerprint";
     _loadLicenseGrace();
-    // v3.25.38: MODO LOCAL RESILIENTE — a "licença" do agente legacy é o CACHE LOCAL
-    // de credenciais (email+senha+farm_id, salvo criptografado em renov-agent-config.enc
-    // via DPAPI), NÃO a conexão viva com a nuvem. Internet caída no boot NÃO é "licença
-    // ausente": o agente inicia em MODO LOCAL (COM/serial opera as bombas normalmente) e
-    // reconecta/valida em background (grace offline 72h; reconnect a cada 15s).
-    // ANTES o gate exigia `&& supabase` e, offline, mostrava um modal BLOQUEANTE + return
-    // → o bridge serial nunca abria e a fazenda parava. Este era o bug. CORRIGIDO.
-    const hasLocalLicense = !!(cfg.email && cfg.password && cfg.farmId);
-    if (!hasLocalLicense && !cfg.licenseToken) {
-      // Agente CRU (nunca vinculado): não há farm_id nem cache local → nada para operar.
-      // Aviso NÃO-bloqueante no tray (nunca um modal que trava a UI/operação).
-      pushLog("error", "system",
-        "[SECURITY] Sem credenciais locais nem licença — reconfigure pelo Tray → 'Reconfigurar (login)'.");
-      if (tray) {
-        try {
-          setTrayStatus("NÃO VINCULADO");
-          if (typeof tray.displayBalloon === "function") {
-            tray.displayBalloon({ title: "RENOV Agent",
-              content: "Não vinculado a uma fazenda. Tray → 'Reconfigurar (login)'." });
-          }
-        } catch (_) {}
-      }
-      return;
-    }
-    if (!supabase) {
-      // Boot offline COM cache local: segue para o bridge. NÃO bloqueia.
-      if (tray) { try { setTrayStatus("MODO LOCAL (sem nuvem)"); } catch (_) {} }
-      pushLog("warn", "system",
-        "[SECURITY] Nuvem indisponível no boot — iniciando em MODO LOCAL (COM/serial opera normalmente). " +
-        "Reconexão + validação de licença rodam em background (reconnect 15s, grace offline 72h).");
-    }
-    // Se já temos licenseToken novo, valida — mas SÓ desliga se servidor responder revogado.
-    // Falha de rede / token ausente NÃO bloqueia o legacy.
-    if (cfg.licenseToken) {
-      lastLicenseValidationAt = 0;
-      try { await validateLicenseHeartbeat(cfg); } catch (_) {}
-      if (licenseKillSwitchTriggered) {
+    try {
+      const res = await awaitAndVerifyHardware(cfg);
+      if (res.level === "blocked") {
         pushLog("error", "system",
-          "[SECURITY] Licença revogada pelo servidor — agente NÃO iniciará bridge.");
-        if (tray) setTrayStatus("LICENÇA REVOGADA");
+          `[SECURITY] Bloqueado — máquina não autorizada (${res.changed.join(", ")}). Agente NÃO iniciará.`);
+        if (tray) tray.setToolTip("RENOV Agent - BLOQUEADO (hardware)");
+        try {
+          await reportTampering(cfg, "hardware_changed", "critical",
+            { reason: "blocked_at_startup", changed: res.changed, blocking: true }, null, null);
+        } catch (_) {}
+        try {
+          dialog.showErrorBox("Renov Agent — Hardware bloqueado",
+            "O hardware deste PC mudou em 2 ou mais componentes desde a última ativação.\n\n" +
+            "Por segurança, o agente foi desativado. Contate o suporte da Renov para reautorizar.");
+        } catch (_) {}
+        try { app.exit(2); } catch (_) { process.exit(2); }
         return;
       }
-    } else {
-      pushLog("info", "system",
-        "[SECURITY] Legacy license (email+senha OK). licenseToken ausente — provisionamento anticlone será tentado em background.");
+    } catch (e) {
+      pushLog("warn", "system", `Hardware gate falhou (continuando): ${formatError(e)}`);
     }
 
-    // v3.14.0 — Anti-clone em BACKGROUND (não bloqueia inicialização).
-    // A verificação de fingerprint (agent_hardware, keyed por farm_id) foi
-    // movida para depois do polling estar rodando. Ver scheduleBackgroundAntiCloneCheck().
-    _loadLicenseGrace();
+    pushLog("info", "system", `Iniciando bridge Serial em ${comPort}...`);
 
-
-
-    // v3.25.39 COM-FIRST: a bridge JÁ foi aberta acima (porta em cache). Agora aplica o
-    // agent_config remoto; se a porta remota diferir do cache, applyAgentConfig(initial:false)
-    // fecha e reabre na porta certa. Sem internet, mantém a porta em cache já aberta.
-    startupStep = "carregar agent_config remoto";
     try {
-      const remoteCfg = await fetchAgentConfig();
-      if (remoteCfg) {
-        await applyAgentConfig(remoteCfg, { initial: false });
-      } else {
-        pushLog("warn", "system", "[CONFIG] agent_config indisponível — usando porta/intervalos locais");
-      }
-    } catch (e) {
-      pushLog("warn", "system", `[CONFIG] falha ao carregar agent_config: ${formatError(e)}`);
+      startupStep = `abrir bridge serial em ${comPort}`;
+      await startBridge(comPort);
+    } catch (bridgeErr) {
+      pushLog("error", "system", `Bridge falhou: ${bridgeErr.message}`);
+      if (tray) tray.setToolTip("RENOV Agent - ERRO Python");
+      return;
     }
 
     try { verifyAgentObfuscation(cfg); } catch (_) {}
@@ -9222,46 +5273,11 @@ async function startAgent(cfg) {
     void sendHeartbeat();
     heartbeatTimer = setInterval(() => { sendHeartbeat(); flushLogs(); flushTelemetryQueue(); }, HEARTBEAT_INTERVAL_MS);
 
-    // v3.25.36: HEARTBEAT INDESTRUTÍVEL — timer DEDICADO só do upsert de site_health,
-    // decoplado do sendHeartbeat (que pode travar na validação de licença). Roda a cada
-    // 30s independente de qualquer erro/hang das tarefas pesadas.
-    lastSiteHealthOkAt = Date.now(); // baseline p/ o watchdog
-    writeLiveness();                 // v3.25.39: liveness imediato p/ o watchdog externo (.bat)
-    void upsertSiteHealth();
-    if (siteHealthTimer) clearInterval(siteHealthTimer);
-    siteHealthTimer = setInterval(() => { writeLiveness(); void upsertSiteHealth(); }, HEARTBEAT_INTERVAL_MS);
-
-    // v3.25.39: WATCHDOG INTERNO — relaunch se a bridge ficar caída ~3min (deadlock/leak).
-    startInternalWatchdog();
-
-    // Watchdog: se o site_health não teve upsert BEM-SUCEDIDO há > 5 min, algo travou
-    // (timer morto, upsert em erro persistente) → recria o timer dedicado e força retry.
-    if (heartbeatWatchdogTimer) clearInterval(heartbeatWatchdogTimer);
-    heartbeatWatchdogTimer = setInterval(() => {
-      if (!farmId || !supabase) return;
-      const ageMs = Date.now() - lastSiteHealthOkAt;
-      if (ageMs > 5 * 60_000) {
-        try { pushLog("warn", "system", `[HEARTBEAT-WATCHDOG] site_health sem sucesso há ${Math.round(ageMs / 60000)}min — recriando timer + retry forçado`); } catch (_) {}
-        try { if (siteHealthTimer) clearInterval(siteHealthTimer); } catch (_) {}
-        siteHealthTimer = setInterval(() => { writeLiveness(); void upsertSiteHealth(); }, HEARTBEAT_INTERVAL_MS);
-        void upsertSiteHealth();
-      }
-    }, 60_000);
-
-    // v3.25.37 — Compliance INEMA a cada 15 min (1ª checagem 60s após subir).
-    setTimeout(() => { void checkInemaCompliance(); }, 60_000).unref?.();
-    if (inemaTimer) clearInterval(inemaTimer);
-    inemaTimer = setInterval(() => { void checkInemaCompliance(); }, INEMA_CHECK_INTERVAL_MS);
-
     // Enqueue de polling de bombas no PROPRIO main process — independente do
     // navegador/renderer (que sofre throttle quando minimizado).
     startupStep = "iniciar polling";
     startCriticalPollingLoops();
-    pushLog("info", "system", `Enqueue de polling no agente: ${activePollingEnqueueIntervalMs}ms | sweep timeouts: ${activeSweepTimeoutMs}ms`);
-
-    // v3.12.2 — hot-reload de agent_config a cada 60s.
-    startupStep = "iniciar watcher de agent_config";
-    startAgentConfigWatch();
+    pushLog("info", "system", "Enqueue de polling no agente: 11s | sweep timeouts: 5s");
 
     // Log rotation diaria + subscription de agent_commands
     startupStep = "ativar subscriptions";
@@ -9270,18 +5286,10 @@ async function startAgent(cfg) {
     logRotationTimer = setInterval(rotateOldLogs, 6 * 60 * 60 * 1000);
     startMemoryCleanup();
     startAutoRebootWatchdog();
-    startDiskWatchdog();  // limpeza de temp/crash/cache + disk_free_mb no heartbeat
-    // v3.25.40: #7 memory guard (5min) + #6 restart preventivo diário às 03:00.
-    startMemoryGuard();
-    startPreventiveRestart();
     startRealtimeSubscriptionsBestEffort();
-
-    // v3.14.0 — Anti-clone em BACKGROUND (30s após polling estar rodando).
-    // Se clone detectado: WhatsApp alert → aguarda 60s → encerra processo.
-    try { scheduleBackgroundAntiCloneCheck(cfg); } catch (_) {}
   } catch (e) {
     pushLog("error", "system", `Falha ao iniciar (${startupStep}): ${formatError(e)}`);
-    if (tray) setTrayStatus("ERRO");
+    if (tray) tray.setToolTip("RENOV Agent - ERRO");
   } finally {
     startingAgent = false;
   }
@@ -9304,45 +5312,29 @@ function createTray() {
   }
 
   tray = new Tray(icon);
-  buildTrayMenu();
-  tray.setToolTip(`RENOV Agent - ${trayStatusLabel}`);
-  // v3.25.46: NENHUM gatilho de log. O duplo-clique (que abria a janela de log)
-  // foi removido — vira no-op silencioso para não haver caminho para o log.
-  tray.on("double-click", () => {});
-  // Item 5: ao iniciar (inclusive manualmente), só um balão informativo que some.
-  try {
-    if (typeof tray.displayBalloon === "function") {
-      tray.displayBalloon({ title: "RENOV Agent", content: "Agente RENOV iniciado." });
-    }
-  } catch (_) {}
-}
-
-// v3.25.46: menu MÍNIMO do tray — sem "Ver Log", sem "Abrir Console", sem
-// "Configurações". Só versão, status atual e ações protegidas por login.
-function buildTrayMenu() {
-  if (!tray) return;
-  try {
-    const menu = Menu.buildFromTemplate([
-      { label: `RENOV Agent — v${AGENT_VERSION}`, enabled: false },
-      { label: `Status: ${trayStatusLabel}`, enabled: false },
-      { type: "separator" },
-      { label: "Reconfigurar (login)", click: () => { void reconfigureWithAuth(); } },
-      { label: "Sair (login)", click: () => { void quitWithAuth(); } },
-    ]);
-    tray.setContextMenu(menu);
-  } catch (_) {}
-}
-
-// Atualiza o status mostrado no tray (tooltip no hover + linha do menu). Usado no
-// lugar dos antigos tray.setToolTip para que o menu reflita o estado atual.
-function setTrayStatus(label) {
-  trayStatusLabel = String(label || "").trim() || "—";
-  try {
-    if (tray) {
-      tray.setToolTip(`RENOV Agent - ${trayStatusLabel}`);
-      buildTrayMenu();
-    }
-  } catch (_) {}
+  const contextMenu = Menu.buildFromTemplate([
+    { label: `RENOV Agent v${AGENT_VERSION}`, enabled: false },
+    { type: "separator" },
+    { label: "Ver Log", click: () => showLogWindow() },
+    { label: "Configurações", click: () => showConfigWindow() },
+    { label: "Reconfigurar (login)", click: () => {
+      if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
+      if (pollTimer) clearInterval(pollTimer);
+      if (pollingEnqueueTimer) clearInterval(pollingEnqueueTimer);
+      if (pollingTimeoutTimer) clearInterval(pollingTimeoutTimer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      void stopBridge().finally(() => showSetupWindow());
+    }},
+    { type: "separator" },
+    { label: "Sair", click: () => {
+      appClosing = true;
+      flushLogs();
+      void stopBridge().finally(() => app.quit());
+    }},
+  ]);
+  tray.setToolTip("RENOV Agent - Iniciando...");
+  tray.setContextMenu(contextMenu);
+  tray.on("double-click", () => showLogWindow());
 }
 
 // =====================================================================
@@ -9444,25 +5436,6 @@ async function tryAutoProvision() {
   }
 }
 
-// SHA-256 do app.asar real em disco (via original-fs, pois o Electron vê o .asar
-// como diretório virtual). Cacheado: o asar não muda sob um processo vivo — uma
-// OTA substitui o arquivo e REINICIA o app, então o cache é sempre coerente.
-let _cachedAsarHash;
-function computeAsarHash() {
-  if (_cachedAsarHash !== undefined) return _cachedAsarHash;
-  try {
-    if (!process.resourcesPath) return (_cachedAsarHash = null);
-    let originalFs;
-    try { originalFs = require("original-fs"); } catch (_) { originalFs = fs; }
-    const asarPath = path.join(process.resourcesPath, "app.asar");
-    if (!originalFs.existsSync(asarPath)) return (_cachedAsarHash = null);
-    return (_cachedAsarHash = crypto.createHash("sha256")
-      .update(originalFs.readFileSync(asarPath)).digest("hex"));
-  } catch (_) {
-    return (_cachedAsarHash = null);
-  }
-}
-
 // Verifica integridade do .asar (anti-tampering)
 // REFORÇADO: o hash de referência DEVE vir do build (extraResources/asar-hash.txt).
 // Se não existir hash de build, NÃO aceita gerar em runtime — falha fechada,
@@ -9470,8 +5443,15 @@ function computeAsarHash() {
 function verifyAsarIntegrity() {
   try {
     if (!process.resourcesPath) return { ok: true, reason: "dev-mode" };
-    const actualHash = computeAsarHash();
-    if (!actualHash) return { ok: true, reason: "no-asar" };
+    // Electron intercepta operações de fs em arquivos .asar (vê como diretório virtual).
+    // Para ler o arquivo .asar real precisamos do original-fs.
+    let originalFs;
+    try { originalFs = require("original-fs"); } catch (_) { originalFs = fs; }
+    const asarPath = path.join(process.resourcesPath, "app.asar");
+    if (!originalFs.existsSync(asarPath)) return { ok: true, reason: "no-asar" };
+
+    const fileBuf = originalFs.readFileSync(asarPath);
+    const actualHash = crypto.createHash("sha256").update(fileBuf).digest("hex");
 
     // Hash gerado em build-time pelo build-agent.bat
     if (fs.existsSync(ASAR_HASH_FILE_BUILD)) {
@@ -9493,51 +5473,6 @@ function verifyAsarIntegrity() {
   }
 }
 
-// v3.25.34 — item 4: verificação do asar contra o HASH ESPERADO BAIXADO DO BANCO.
-// verifyAsarIntegrity() compara com o asar-hash.txt LOCAL (build-time) — um atacante
-// que reempacota o asar pode regenerar esse .txt. Esta checagem compara o asar rodando
-// com agent_releases.file_hash da versão atual (fonte da verdade no servidor, que o
-// atacante não controla). Divergência = binário não-oficial → loga + reporta + CONTINUA
-// (warn-only, pra não dar dica ao adversário). Roda em background, não trava o boot.
-async function verifyAsarAgainstServer(cfg) {
-  try {
-    if (!supabase || !process.resourcesPath) return { level: "skip", reason: "no-client" };
-    const actual = computeAsarHash();
-    if (!actual) return { level: "skip", reason: "no-asar" };
-    const { data: rel } = await supabase
-      .from("agent_releases")
-      .select("file_hash")
-      .eq("version", AGENT_VERSION)
-      .maybeSingle();
-    if (!rel || !rel.file_hash) return { level: "skip", reason: "no-registered-hash", actual };
-    if (String(rel.file_hash).trim().toLowerCase() === actual.toLowerCase()) {
-      pushLog("info", "system", `[SECURITY] asar confere com o release oficial ${AGENT_VERSION} no banco.`);
-      return { level: "ok", actual };
-    }
-    // v3.25.42: deixou de ser warn-only — asar divergente BLOQUEIA a operação.
-    // Fail-open é preservado nos caminhos acima (sem cliente, sem asar, sem hash
-    // registrado ou erro de rede → 'skip'): só bloqueia quando o servidor tem um
-    // hash para ESTA versão e ele difere de fato do binário em execução.
-    pushLog("error", "system",
-      `[SECURITY] app.asar adulterado — hash local ${actual} != hash registrado ${String(rel.file_hash).trim()}`);
-    await reportTampering(cfg, "asar_server_mismatch", "critical",
-      { version: AGENT_VERSION, source: "agent_releases" }, rel.file_hash, actual);
-    // v3.25.48: enforcement OFF → NÃO bloqueia (falsos positivos por hash de
-    // release divergente pararam fazendas). Loga/reporta e SEGUE operando.
-    if (!SECURITY_BLOCK_ENFORCEMENT) {
-      pushLog("warn", "system",
-        "[SECURITY] enforcement DESATIVADO (v3.25.48) — asar divergente NÃO bloqueia; operação mantida.");
-      return { level: "mismatch_warn_only", expected: rel.file_hash, actual };
-    }
-    await blockAgentPermanently("asar_tampered",
-      `arquivo do agente foi adulterado na fazenda ${cfg?.farmName || cfg?.farmId || "?"}.`,
-      { version: AGENT_VERSION, expected: String(rel.file_hash).trim(), actual });
-    return { level: "mismatch", expected: rel.file_hash, actual };
-  } catch (e) {
-    return { level: "skip", reason: "error", error: e && e.message };
-  }
-}
-
 // Calcula HMAC-SHA256 hex do corpo usando o segredo embutido no agente.
 function _hmacHex(secret, data) {
   return crypto.createHmac("sha256", secret).update(data, "utf8").digest("hex");
@@ -9547,6 +5482,11 @@ function _hmacHex(secret, data) {
 // Adiciona header X-Tamper-Signature para que a edge function valide a origem.
 async function reportTampering(cfg, kind, level, details, expected, actual) {
   if (!cfg || !cfg.farmId) return;
+  // Falha fechada: sem segredo de build, não assina nem envia.
+  if (!TAMPER_SIGNING_SECRET) {
+    try { pushLog("warn", "security", "[TAMPER] segredo de assinatura ausente — reporte NÃO enviado"); } catch (_) {}
+    return;
+  }
   try {
     const url = (cfg.supabaseUrl || SUPABASE_URL_DEFAULT) + "/functions/v1/report-tampering";
     const anon = cfg.supabaseAnonKey || SUPABASE_ANON_DEFAULT;
@@ -9608,40 +5548,14 @@ function _primaryMac() {
   return null;
 }
 
-// Primeiro IPv4 não-interno (informativo — muda por DHCP, NÃO é usado no diff).
-function _localIPv4() {
-  try {
-    for (const list of Object.values(os.networkInterfaces())) {
-      for (const ni of list || []) {
-        if (ni && !ni.internal && ni.family === "IPv4" && ni.address) return ni.address;
-      }
-    }
-  } catch (_) {}
-  return null;
-}
-
 function collectHardwareFingerprint() {
-  const mac = _primaryMac();
-  const disk = _wmicValue("wmic diskdrive get serialnumber");
-  const bios = _wmicValue("wmic csproduct get uuid");
-  const cpu = _wmicValue("wmic cpu get processorid");
-  // machine_id derivado dos MESMOS componentes já coletados (sem wmic extra).
-  const machineId = crypto.createHash("sha256")
-    .update([mac, disk, bios, cpu].map((x) => x || "").join("|"))
-    .digest("hex").slice(0, 16);
   return {
     hostname: os.hostname() || null,
-    mac_address: mac,
-    disk_serial: disk,
-    bios_uuid: bios,
-    cpu_id: cpu,
+    mac_address: _primaryMac(),
+    disk_serial: _wmicValue("wmic diskdrive get serialnumber"),
+    bios_uuid: _wmicValue("wmic csproduct get uuid"),
+    cpu_id: _wmicValue("wmic cpu get processorid"),
     os_install_date: _wmicValue("wmic os get installdate"),
-    // v3.25.34 — item 4: registrar no banco machine_id, IP e hash do asar (p/ detectar
-    // clones). INFORMATIVOS: não entram em HW_COMPONENTS_BLOCKING/diffHardware — IP muda
-    // por DHCP e asar_hash muda a cada OTA legítima, então nenhum deles bloqueia.
-    machine_id: machineId,
-    local_ip: _localIPv4(),
-    asar_hash: computeAsarHash(),
     collected_at: new Date().toISOString(),
   };
 }
@@ -9738,99 +5652,6 @@ async function awaitAndVerifyHardware(cfg) {
 }
 
 // ============================================================
-// v3.14.0 — ANTI-CLONE em BACKGROUND (não bloqueia inicialização)
-// ------------------------------------------------------------
-// Fluxo:
-//  1) Polling já está rodando (agente operacional).
-//  2) Após 30s, verifica fingerprint em agent_hardware (keyed por farm_id).
-//  3) Se 'blocked' (≥2 componentes divergem) → CLONE:
-//     • Envia alerta WhatsApp genérico (best-effort).
-//     • Aguarda 60s para o alerta sair.
-//     • Encerra o processo com popup genérico.
-//  4) Falha de rede / sem cliente → ignora silenciosamente (retenta em 30 min).
-//  5) Repete a checagem a cada 30 minutos (troca de HW em runtime).
-// ============================================================
-let antiCloneScheduled = false;
-let antiCloneTriggered = false;
-function scheduleBackgroundAntiCloneCheck(cfg) {
-  if (antiCloneScheduled) return;
-  antiCloneScheduled = true;
-
-  let asarServerChecked = false;
-  const runCheck = async () => {
-    if (antiCloneTriggered) return;
-    // v3.25.34 — item 4: uma vez, confere o asar rodando contra agent_releases.file_hash
-    // (hash esperado baixado do banco). Warn-only, não encerra o processo.
-    if (!asarServerChecked) {
-      asarServerChecked = true;
-      try { await verifyAsarAgainstServer(cfg); }
-      catch (e) { pushLog("warn", "system", `[SECURITY] verifyAsarAgainstServer falhou (ignorado): ${e && e.message || e}`); }
-    }
-    try {
-      const res = await verifyHardwareFingerprint(cfg);
-      if (!res || res.level !== "blocked") return;
-      // v3.25.48: enforcement OFF → NÃO encerra nem bloqueia por hardware divergente
-      // (falsos positivos por wmic ausente/MAC de Starlink pararam fazendas). Apenas loga.
-      if (!SECURITY_BLOCK_ENFORCEMENT) {
-        pushLog("warn", "system",
-          `[SECURITY] anti-clone DESATIVADO (v3.25.48) — hardware divergente (${(res.changed || []).join(", ")}) NÃO bloqueia; operação mantida.`);
-        return;
-      }
-      antiCloneTriggered = true;
-      pushLog("error", "system",
-        `[SECURITY] CLONE detectado em background — componentes divergentes: ${(res.changed || []).join(", ")}. Encerrando em 60s.`);
-
-      // 1) Alerta WhatsApp (best-effort)
-      try {
-        if (supabase && cfg && cfg.farmId) {
-          await supabase.functions.invoke("whatsapp-alerts", {
-            body: {
-              kind: "agent_clone_detected",
-              farm_id: cfg.farmId,
-              message: "ALERTA: Clone detectado — hardware não autorizado tentou operar o agente desta fazenda.",
-              changed_components: res.changed || [],
-            },
-          });
-        }
-      } catch (e) {
-        pushLog("warn", "cloud", `[ANTI-CLONE] whatsapp-alerts falhou: ${e && e.message || e}`);
-      }
-
-      // 2) Report tampering (blocking)
-      try {
-        await reportTampering(cfg, "hardware_changed", "critical",
-          { reason: "clone_detected_background", changed: res.changed, blocking: true, farm_id: cfg.farmId },
-          null, null);
-      } catch (_) {}
-
-      // 3) v3.25.42: grava o kill-file ANTES de encerrar. Sem ele o watchdog .bat
-      // relançaria o clone a cada minuto — o agente tem que ficar MORTO até uma
-      // reconfiguração manual (apagar o agent-blocked.flag).
-      try {
-        await blockAgentPermanently("clone_detected",
-          `clone detectado na fazenda ${cfg?.farmName || cfg?.farmId || "?"} — hardware nao autorizado.`,
-          { changed: res.changed || [] });
-      } catch (_) {}
-
-      // 4) Aguarda 60s antes de encerrar (garante envio do alerta)
-      setTimeout(() => {
-        try { if (tray) setTrayStatus("Erro de licença"); } catch (_) {}
-        try { trayNotify("Renov Agent", "Erro de licença. Contate o suporte.", "error"); } catch (_) {}
-        try { app.exit(1); } catch (_) { process.exit(1); }
-      }, 60_000);
-    } catch (e) {
-      // Falha de rede → ignora, tenta de novo no próximo ciclo
-      pushLog("warn", "system", `[ANTI-CLONE] check em background falhou (ignorado): ${e && e.message || e}`);
-    }
-  };
-
-  // Primeira checagem 30s após polling; depois a cada 30 min.
-  setTimeout(runCheck, 30_000).unref?.();
-  setInterval(runCheck, 30 * 60_000).unref?.();
-}
-
-
-// ============================================================
 // ANTI-DEBUG (Camada 3) — detecta DevTools/inspector anexados ao processo
 // e força saída. Roda a cada 5s. Usa medição de latência do `debugger;`
 // statement: quando há debugger ativo, o statement pausa e o delta sobe.
@@ -9890,8 +5711,6 @@ const OFFLINE_LICENSE_GRACE_MS = 72 * 60 * 60 * 1000;
 const LICENSE_VALIDATE_INTERVAL_MS = 30_000;
 let lastLicenseValidationAt = 0;
 let lastLicenseOkAt = 0;
-// v3.25.40 (#10): throttle do aviso de grace offline — o gate deixou de encerrar.
-let lastOfflineGraceWarnAt = 0;
 let licenseKillSwitchTriggered = false;
 let obfuscationCheckDone = false;
 
@@ -9953,24 +5772,8 @@ async function stopAllPumpsBeforeExit(reason) {
   } catch (_) {}
 }
 
-// v3.25.45: fingerprint da máquina, computado UMA vez (wmic é caro) e reusado no
-// license-validate para a amarração SERVER-SIDE anti-clone. O servidor compara com
-// o device registrado (tolerância ≥2-de-4 componentes) e responde 403
-// machine_mismatch se for outro PC. É a única camada que o atacante NÃO patcheia.
-let _cachedFingerprint = null;
-function getCachedFingerprint() {
-  if (!_cachedFingerprint) {
-    try { _cachedFingerprint = getMachineFingerprint(); } catch (_) { _cachedFingerprint = { machine_id_hash: "", fingerprint: {} }; }
-  }
-  return _cachedFingerprint;
-}
-// Anti-falso-positivo: só bloqueia após N respostas machine_mismatch CONSECUTIVAS
-// (uma troca legítima de 1 componente nunca bate ≥2; 3 strikes cobrem transientes).
-let machineMismatchStrikes = 0;
-const MACHINE_MISMATCH_STRIKES_TO_BLOCK = 3;
-
 async function validateLicenseHeartbeat(cfg) {
-  if (licenseKillSwitchTriggered || agentBlocked) return;
+  if (licenseKillSwitchTriggered) return;
   if (!cfg?.licenseToken) return;
   if (Date.now() - lastLicenseValidationAt < LICENSE_VALIDATE_INTERVAL_MS - 1000) return;
   lastLicenseValidationAt = Date.now();
@@ -9978,56 +5781,19 @@ async function validateLicenseHeartbeat(cfg) {
   const baseUrl = cfg.supabaseUrl || SUPABASE_URL_DEFAULT;
   const anon = cfg.supabaseAnonKey || SUPABASE_ANON_DEFAULT;
   try {
-    const fp = getCachedFingerprint();
-    // v3.25.39: timeout de 10s (era 20s) — teto global de nuvem. license-validate
-    // travado nunca prende o sendHeartbeat; sem validação, grace offline de 72h cobre.
-    // v3.25.45: envia machine_id_hash + fingerprint p/ o servidor amarrar ao hardware.
-    const resp = await withCloudTimeout(fetch(`${baseUrl}/functions/v1/license-validate`, {
+    const resp = await fetch(`${baseUrl}/functions/v1/license-validate`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "apikey": anon,
         "Authorization": `Bearer ${cfg.licenseToken}`,
       },
-      body: JSON.stringify({
-        machine_id_hash: fp.machine_id_hash,
-        fingerprint: fp.fingerprint,
-        agent_version: AGENT_VERSION,
-      }),
-    }), "license-validate", 10_000);
+    });
     const body = await resp.json().catch(() => ({}));
 
     if (resp.ok && body?.valid) {
       lastLicenseOkAt = Date.now();
-      machineMismatchStrikes = 0; // hardware confere — zera strikes
       _saveLicenseGrace();
-      return;
-    }
-
-    // v3.25.45: CLONE detectado pelo SERVIDOR (fingerprint diverge do device
-    // registrado). Bloqueio PERMANENTE (kill-file) após strikes consecutivos —
-    // decisão server-side, o atacante não consegue patchear. Não desliga bombas
-    // ativamente (o clone em outro PC não tem rádio; na máquina real, um falso-
-    // positivo é recuperável re-provisionando).
-    if (body?.error === "machine_mismatch") {
-      machineMismatchStrikes++;
-      pushLog("error", "system",
-        `[SECURITY] Servidor reportou machine_mismatch (clone?) — strike ${machineMismatchStrikes}/${MACHINE_MISMATCH_STRIKES_TO_BLOCK}`);
-      if (machineMismatchStrikes >= MACHINE_MISMATCH_STRIKES_TO_BLOCK) {
-        // v3.25.48: enforcement OFF → o machine_mismatch do servidor NÃO bloqueia.
-        if (!SECURITY_BLOCK_ENFORCEMENT) {
-          pushLog("warn", "system",
-            "[SECURITY] anti-clone server-side DESATIVADO (v3.25.48) — machine_mismatch NÃO bloqueia; operação mantida.");
-          return;
-        }
-        try {
-          await blockAgentPermanently("clone_detected",
-            `hardware nao corresponde ao device registrado da fazenda ${cfg?.farmName || cfg?.farmId || "?"}.`,
-            { source: "license-validate", machine_id_hash: fp.machine_id_hash });
-        } catch (_) {}
-        try { await reportTampering(cfg, "hardware_changed", "critical",
-          { reason: "clone_detected_server", machine_id_hash: fp.machine_id_hash, blocking: true }, null, null); } catch (_) {}
-      }
       return;
     }
 
@@ -10045,20 +5811,17 @@ async function validateLicenseHeartbeat(cfg) {
     }
   } catch (_) {}
 
-  // v3.25.40 (#10) FALLBACK ÚLTIMO ESTADO — o agente NUNCA para a operação por
-  // falta de nuvem. O kill-switch antigo de "grace offline expirado" (72h)
-  // desligava as bombas e encerrava o processo: em Starlink instável isso derruba
-  // a fazenda sozinho, porque sem o agente não há polling e o safety de 15min do
-  // firmware desliga as bombas. Agora só encerra por decisão EXPLÍCITA do
-  // servidor (403 / revoked / farm_suspended, tratado acima). Offline, o estado
-  // local é soberano — apenas registramos o aviso (no máx. 1x a cada 6h).
   if (lastLicenseOkAt > 0 && (Date.now() - lastLicenseOkAt) > OFFLINE_LICENSE_GRACE_MS) {
-    if (Date.now() - lastOfflineGraceWarnAt > 6 * 60 * 60 * 1000) {
-      lastOfflineGraceWarnAt = Date.now();
-      const horas = Math.round((Date.now() - lastLicenseOkAt) / 3600000);
-      pushLog("warn", "system",
-        `[SECURITY] Licença não validada há ${horas}h (nuvem inacessível) — operação LOCAL mantida; nenhuma bomba é desligada por falta de nuvem`);
-    }
+    licenseKillSwitchTriggered = true;
+    pushLog("error", "system",
+      `[SECURITY] Licença não validada há > 72h (offline grace expirou) — encerrando`);
+    try {
+      await reportTampering(cfg, "config_replaced", "critical",
+        { reason: "offline_grace_expired", hours_offline: Math.round((Date.now() - lastLicenseOkAt) / 3600000) },
+        null, null);
+    } catch (_) {}
+    try { await stopAllPumpsBeforeExit("offline_grace_expired"); } catch (_) {}
+    setTimeout(() => { try { app.exit(1); } catch (_) { process.exit(1); } }, 1500);
   }
 }
 
@@ -10101,31 +5864,8 @@ function verifyAgentObfuscation(cfg) {
 }
 
 // --- App lifecycle ---
-// v3.25.47: LOCK DE INSTÂNCIA ÚNICA. Dois processos disputando a COM travam a
-// porta (um segura, o outro toma "Acesso negado"). Se já há uma instância viva,
-// a segunda encerra IMEDIATAMENTE, antes de tocar na serial. Cobre duplo-clique
-// no exe e o watchdog tentando subir enquanto o agente já roda.
-// NB: no Windows o lock é POR SESSÃO — duplicatas entre sessões (ex.: tarefa de
-// boot como SYSTEM + launch interativo do usuário) são cobertas pelo taskkill do
-// INSTALAR.bat e do watchdog (que agora reconhece o nome real do processo).
-let _singleInstanceOK = true;
-try { _singleInstanceOK = app.requestSingleInstanceLock(); }
-catch (_) { _singleInstanceOK = true; } // se a API falhar, não bloqueia o boot
-if (!_singleInstanceOK) {
-  try { _bootLog("[SINGLE-INSTANCE] outra instância já está rodando — encerrando esta"); } catch (_) {}
-  try { app.quit(); } catch (_) {}
-  try { app.exit(0); } catch (_) { try { process.exit(0); } catch (__) {} }
-} else {
-  // Headless: não há janela para focar; só registra a tentativa bloqueada.
-  app.on("second-instance", () => {
-    try { _bootLog("[SINGLE-INSTANCE] segunda instância bloqueada (agente headless)"); } catch (_) {}
-  });
-}
-
 _bootLog("registering app.whenReady handler");
 app.whenReady().then(async () => {
-  // Se não obtivemos o lock, o app já está encerrando — não inicia nada.
-  if (!_singleInstanceOK) { _bootLog("app.whenReady abortado — sem single-instance lock"); return; }
   _bootLog("app.whenReady fired");
   try {
     try { createTray(); _bootLog("createTray ok"); }
@@ -10159,23 +5899,6 @@ app.whenReady().then(async () => {
     try { cfg = loadConfig(); _bootLog(`loadConfig: ${cfg ? "found" : "empty"}`); }
     catch (e) { _bootLog(`loadConfig FAIL: ${e && e.stack || e}`); }
 
-    // 2.5) FASE 2: fallback machine-bound (credentials.enc em %ProgramData%).
-    // Se a config de userData sumiu mas há credentials.enc válido, recupera.
-    // Se existir mas não decifrar (copiado de outro PC) → dpapi_failed.
-    if (!cfg || !cfg.email || !cfg.password || !cfg.farmId) {
-      try {
-        const creds = readCredentialsEnc();
-        if (creds && creds.__dpapiFailed) {
-          credentialsDpapiFailed = true;
-          _bootLog("credentials.enc presente mas NÃO decifra (dpapi_failed)");
-        } else if (creds && creds.email && creds.password && creds.farmId) {
-          cfg = { ...creds };
-          try { saveConfig(cfg); } catch (_) {} // re-hidrata o .enc de userData
-          _bootLog("config recuperada de credentials.enc (machine-bound)");
-        }
-      } catch (e) { _bootLog(`readCredentialsEnc FAIL: ${e && e.stack || e}`); }
-    }
-
     // 3) Se não tem config, tenta auto-provision
     if (!cfg || !cfg.email || !cfg.password || !cfg.farmId) {
       try { cfg = await tryAutoProvision(); _bootLog(`tryAutoProvision: ${cfg ? "ok" : "no-token"}`); }
@@ -10184,10 +5907,6 @@ app.whenReady().then(async () => {
 
     // 4) Inicia agente OU setup manual
     if (cfg && cfg.email && cfg.password && cfg.farmId) {
-      // FASE 2: espelha credenciais (machine-bound) e apaga provisioning em texto
-      // puro; obtém o 1º token rotativo. Tudo best-effort/não-fatal (flag off).
-      try { ensureCredentialsEnc(cfg); } catch (e) { _bootLog(`ensureCredentialsEnc FAIL: ${e && e.message || e}`); }
-      try { refreshAgentTokenSafe(cfg); } catch (_) {}
       _bootLog("calling startAgent");
       try { startAgent(cfg); }
       catch (e) { _bootLog(`startAgent FAIL: ${e && e.stack || e}`); }
@@ -10204,8 +5923,8 @@ app.whenReady().then(async () => {
   } catch (e) {
     _bootLog(`app.whenReady TOP-LEVEL FAIL: ${e && e.stack || e}`);
     try {
-      trayNotify("Renov Agent — Erro de inicialização",
-        `Falha ao iniciar: ${e && e.message || e}. Veja boot.log em %APPDATA%\\GestorDeBombasKey\\.`, "error");
+      dialog.showErrorBox("Renov Agent — Erro de inicialização",
+        `Falha ao iniciar o agente:\n\n${e && e.message || e}\n\nVerifique o boot.log em %APPDATA%\\GestorDeBombasKey\\`);
     } catch (_) {}
   }
 }).catch((e) => {
@@ -10215,7 +5934,6 @@ app.on("window-all-closed", (e) => { e.preventDefault(); });
 app.on("before-quit", () => {
   appClosing = true;
   stopCloudReconnect();
-  stopInternalWatchdog();
   flushLogs();
   void stopBridge();
 });

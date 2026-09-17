@@ -29,7 +29,7 @@ export interface HorimetroByPump {
   /** Estado atual da bomba: true = ligada, false = desligada */
   isRunning: boolean;
   /** Origem da última atuação: 'remote' ou 'local' */
-  actuationOrigin: "remote" | "local" | "tech_terminal" | null;
+  actuationOrigin: "remote" | "local" | null;
   /** Timestamp da última comunicação */
   lastCommunication: string | null;
 }
@@ -60,13 +60,6 @@ function ymd(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-// Teto defensivo (heurística anti-inflação) para sessões que ficaram ABERTAS
-// (ended_at NULL) por trigger perdido/agente offline. Sem isso, uma sessão
-// pendurada seria contada até Date.now() e inflaria as horas indefinidamente.
-// 24h cobre folgado qualquer ciclo real de bombeamento; uma sessão aberta
-// recente/curta continua contando normalmente (o teto só morde as penduradas).
-const OPEN_SESSION_CAP_HOURS = 24;
-
 function aggregateRuntimeByDay(
   runtimes: RuntimeRow[],
   equipmentNameById: Map<string, string>,
@@ -76,14 +69,8 @@ function aggregateRuntimeByDay(
   const grouped = new Map<string, HorimetroDailyRow>();
 
   for (const row of runtimes) {
-    const startedMs = new Date(row.started_at).getTime();
-    // Sessão fechada: usa ended_at. Sessão aberta: conta até agora, MAS com teto
-    // de OPEN_SESSION_CAP_HOURS desde started_at para não inflar por sessão presa.
-    const rawEnd = row.ended_at
-      ? new Date(row.ended_at).getTime()
-      : Math.min(Date.now(), startedMs + OPEN_SESSION_CAP_HOURS * 3600000);
-    const sessionStart = Math.max(startedMs, fromMs);
-    const sessionEnd = Math.min(rawEnd, toMs);
+    const sessionStart = Math.max(new Date(row.started_at).getTime(), fromMs);
+    const sessionEnd = Math.min(row.ended_at ? new Date(row.ended_at).getTime() : Date.now(), toMs);
     if (!Number.isFinite(sessionStart) || !Number.isFinite(sessionEnd) || sessionEnd <= sessionStart) continue;
 
     let cursor = new Date(sessionStart);
@@ -215,7 +202,7 @@ export function useHorimetro(args: { from: Date; to: Date; enabled?: boolean }) 
         currentMonthTotal: periodTotals.get(eq.id) ?? 0,
         yearTotal: periodTotals.get(eq.id) ?? 0,
         isRunning,
-        actuationOrigin: (eq.last_actuation_origin as "remote" | "local" | "tech_terminal" | null) ?? null,
+        actuationOrigin: (eq.last_actuation_origin as "remote" | "local" | null) ?? null,
         lastCommunication: eq.last_communication ?? null,
       });
     }

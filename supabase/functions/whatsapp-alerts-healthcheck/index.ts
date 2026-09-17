@@ -6,6 +6,7 @@
 // nos últimos 7 dias. Se não teve, sinaliza como "silêncio suspeito" (fazenda
 // pode estar sem eventos, ou pode haver problema de rota — o admin decide).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { guardCron } from "../_shared/cronAuth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -14,6 +15,11 @@ const corsHeaders = {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
+  // ── GUARDA DE CRON ────────────────────────────────────────────────────────
+  // Antes de QUALQUER consulta, alerta, escrita ou ação operacional.
+  // Sem x-cron-secret válido (ou service_role), devolve 401/403 e para aqui.
+  { const blocked = guardCron(req, corsHeaders); if (blocked) return blocked; }
 
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,

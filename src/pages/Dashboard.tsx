@@ -27,13 +27,12 @@ import { logEvent } from "@/lib/automationLog";
 import { useAuth } from "@/contexts/AuthContext";
 import { useDefaultFarm } from "@/hooks/useDefaultFarm";
 import { supabase } from "@/integrations/supabase/client";
-// DUAL-BACKEND: leituras/escritas operacionais seguem o backend do farmId.
-import { getSupabaseForFarm, assertOperationalClient } from "@/lib/supabaseRouter";
 import { toast } from "sonner";
 
 // Diagrama hidráulico só carrega quando a aba "Diagrama" é aberta.
 const WaterFlowDiagram = lazy(() => import("@/components/dashboard/WaterFlowDiagram"));
 import { useDashboardEquipment } from "@/hooks/useDashboardEquipment";
+
 import { BridgeStatusCard } from "@/components/dashboard/BridgeStatusCard";
 import { WaterBalanceCard } from "@/components/dashboard/WaterBalanceCard";
 import { IndicatorsMiniSummary } from "@/components/dashboard/IndicatorsMiniSummary";
@@ -47,7 +46,7 @@ import { useAutomationActiveEquipments } from "@/hooks/useAutomationActiveEquipm
 import { useFarmFeatures } from "@/hooks/useFarmFeatures";
 import { triggerAutomationGuard, wasScheduledOffRecently } from "@/lib/automationGuard";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
-import { OpenMaintenanceProvider } from "@/contexts/MaintenanceContext";
+import { MaintenanceProvider as OpenMaintenanceProvider } from "@/contexts/MaintenanceContext";
 import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { useMasterManager } from "@/contexts/MasterManagerContext";
 import { useNavigate } from "react-router-dom";
@@ -156,7 +155,7 @@ const Dashboard = () => {
   useEffect(() => {
     if (!farmId) { setSedeCoords(null); return; }
     let cancelled = false;
-    void getSupabaseForFarm(farmId).from("farms").select("name, latitude_sede, longitude_sede" as any).eq("id", farmId).maybeSingle()
+    void supabase.from("farms").select("name, latitude_sede, longitude_sede" as any).eq("id", farmId).maybeSingle()
       .then(({ data }) => {
         if (cancelled) return;
         const d = data as any;
@@ -275,7 +274,7 @@ const Dashboard = () => {
     if (!farmId) return;
     let cancelled = false;
     void (async () => {
-      const { data } = await getSupabaseForFarm(farmId)
+      const { data } = await supabase
         .from("dashboard_layouts")
         .select("layout")
         .eq("farm_id", farmId)
@@ -309,7 +308,7 @@ const Dashboard = () => {
         },
       )
       .subscribe();
-    return () => { cancelled = true; void getSupabaseForFarm(farmId).removeChannel(channel); };
+    return () => { cancelled = true; void supabase.removeChannel(channel); };
   }, [farmId]);
 
   // Farms / Sectors / PLC groups for visual grouping in dashboard
@@ -493,6 +492,9 @@ const Dashboard = () => {
           lng: Number(e.longitude),
           alarm: r?.online !== false && !!r?.alarm,
           online: r?.online,
+          percent: r?.percent ?? 0,
+          level: r?.level ?? "—",
+          maxLevel: r?.maxLevel ?? "—",
         };
       });
   }, [cloudEquipments, allReservoirs]);
@@ -565,14 +567,13 @@ const Dashboard = () => {
           if (willTurnOn) {
             const cloudEq = cloudEquipments.find((e) => e.id === id);
             if (cloudEq?.forced_shutdown_enabled === true) {
-              await assertOperationalClient(farmId)
+              await supabase
                 .from("equipments")
                 .update({ forced_shutdown_enabled: false })
                 .eq("id", id);
             }
           }
           const enq = await enqueueManualPumpCommand({
-            farmId: farmId ?? "",
             equipmentId: target.id,
             turnOn: willTurnOn,
             userId: user?.id ?? null,
@@ -584,7 +585,7 @@ const Dashboard = () => {
           // só porque a bomba respondeu o estado antigo (0 ao ligar / 1 ao desligar).
           // O comando só finaliza antes de 120s se a telemetria confirmar o estado esperado
           // ou se o agente retornar erro real.
-          const result = await waitForCommand(enq.commandId, 140_000, { farmId });
+          const result = await waitForCommand(enq.commandId, 140_000);
           const succeeded = result.status === "executed";
           const isCommFail = !succeeded && (result.status === "timeout" || result.status === "unknown");
 
@@ -717,7 +718,6 @@ const Dashboard = () => {
       void (async () => {
         try {
           const enq = await enqueueResetPumpCommand({
-            farmId: farmId ?? "",
             equipmentId: target.id,
             userId: user?.id ?? null,
             userName: userEmail,
@@ -733,7 +733,7 @@ const Dashboard = () => {
 
           // Reset também respeita confirmação física: só finaliza antes de 120s
           // quando a bomba confirmar 0; resposta antiga não corta o estado visual.
-          const result = await waitForCommand(enq.commandId, 140_000, { farmId });
+          const result = await waitForCommand(enq.commandId, 140_000);
           const succeeded = result.status === "executed";
           const isCommFail = !succeeded && (result.status === "timeout" || result.status === "unknown");
 
@@ -822,7 +822,6 @@ const Dashboard = () => {
               : false;
 
           await enqueueManualStatusRead({
-            farmId: farmId ?? "",
             equipmentId: pump.id,
             userId: user?.id ?? null,
             desiredRunning: (() => {
@@ -994,7 +993,7 @@ const Dashboard = () => {
             const res = orderedReservoirs.find(r => r.id === id);
             const name = res?.name ?? "Reservatório";
             notify.tip("Dashboard", `Atualizando nível de ${name}...`);
-            void enqueueManualLevelRead({ farmId: farmId ?? "", equipmentId: id, userId: user?.id ?? null })
+            void enqueueManualLevelRead({ equipmentId: id, userId: user?.id ?? null })
               .catch((e: any) => notify.fail("Dashboard", `${name}: falha ao enfileirar leitura — ${e?.message ?? e}`));
           }} />
         </div>
@@ -1007,17 +1006,18 @@ const Dashboard = () => {
   const fitScreen = true;
 
   return (
-    <OpenMaintenanceProvider farmId={farmId}>
+    <OpenMaintenanceProvider>
     <div className={fitScreen ? "flex flex-col gap-2 min-h-full" : "space-y-3"}>
 
 
 
 
-      {/* Header with view toggle */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-        <div>
-          <p className="text-xs text-muted-foreground">{t.realTimeMonitoring}</p>
-        </div>
+      {/* Header with view toggle.
+          O rótulo decorativo do topo foi REMOVIDO: só a UI saiu — Realtime,
+          subscriptions de `public.equipments` e a atualização dos cards sem
+          F5 continuam exatamente como estão. `sm:justify-end` mantém os
+          botões à direita agora que o lado esquerdo não existe mais. */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center sm:justify-end gap-2">
         <div className="flex items-center gap-2 w-full sm:w-auto">
           <Button
             variant="outline"

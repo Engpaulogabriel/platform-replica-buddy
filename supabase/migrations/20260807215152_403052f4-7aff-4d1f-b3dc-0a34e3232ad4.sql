@@ -1,0 +1,1 @@
+ALTER TABLE public.agent_releases ALTER COLUMN artifact_type SET DEFAULT 'asar';

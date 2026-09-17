@@ -13,6 +13,19 @@ REM ============================================================
 
 cd /d "%~dp0"
 
+REM ── Segredo de assinatura anti-tampering (OBRIGATORIO) ────────
+REM Deve ser um valor aleatorio unico por deployment, igual ao
+REM LICENSE_SIGNING_SECRET configurado no backend. NUNCA versionar.
+REM Gerar:  powershell -Command "[guid]::NewGuid().ToString('N')+[guid]::NewGuid().ToString('N')"
+if "%RENOV_TAMPER_SECRET%"=="" (
+  echo ERRO: RENOV_TAMPER_SECRET nao definido.
+  echo   set RENOV_TAMPER_SECRET=^<mesmo valor do LICENSE_SIGNING_SECRET no backend^>
+  pause
+  exit /b 1
+)
+> build-secrets.json echo {"tamperSecret":"%RENOV_TAMPER_SECRET%"}
+if exist app\ > app\build-secrets.json echo {"tamperSecret":"%RENOV_TAMPER_SECRET%"}
+
 echo.
 echo === [1/4] Instalando dependencias ===
 call npm install

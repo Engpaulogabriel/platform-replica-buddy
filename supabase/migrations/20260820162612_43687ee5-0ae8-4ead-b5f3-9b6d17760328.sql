@@ -1,0 +1,1 @@
+ALTER TYPE public.event_origin ADD VALUE IF NOT EXISTS 'whatsapp';

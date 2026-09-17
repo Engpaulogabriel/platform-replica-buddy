@@ -248,8 +248,7 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
               </div>
             </div>
 
-            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-            <div className="overflow-x-auto -mx-2 px-2">
+            <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -269,9 +268,7 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
                       <TableCell className="text-right">
                         {r.flow == null
                           ? <span className="text-muted-foreground">— configurar</span>
-                          : r.hours > 0
-                            ? `${r.flow.toLocaleString("pt-BR")} m³/h`
-                            : <span className="text-muted-foreground">—</span>}
+                          : `${r.flow.toLocaleString("pt-BR")} m³/h`}
                       </TableCell>
                       <TableCell className="text-right">{formatHM(r.hours)}</TableCell>
                       <TableCell className="text-right font-semibold">
@@ -336,9 +333,9 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
 
         {/* SECTION 4 - Histórico */}
         <Card className="bg-card border-border">
-          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <CardHeader className="flex flex-row items-center justify-between gap-2">
             <CardTitle className="text-base">Histórico Detalhado ({ymdToBR(fromDate)} → {ymdToBR(toDate)})</CardTitle>
-            <Button variant="outline" size="sm" onClick={exportCSV} className="gap-2 w-full sm:w-auto">
+            <Button variant="outline" size="sm" onClick={exportCSV} className="gap-2">
               <Download className="w-4 h-4" /> CSV
             </Button>
           </CardHeader>
@@ -347,9 +344,8 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
               Total no período: <strong className="text-foreground">{fmtM3(historyTotalM3)} m³</strong>
               {" · "}{historyRows.length} registros
             </div>
-            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-            <div className="overflow-x-auto -mx-2 px-2 max-h-[500px]">
-              <Table className="md:[&_th]:px-2 md:[&_td]:px-2 md:[&_td]:py-1.5 xl:[&_th]:px-4 xl:[&_td]:p-4">
+            <div className="overflow-x-auto max-h-[500px]">
+              <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Data</TableHead>
@@ -369,9 +365,7 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
                       <TableCell>{r.eqName}</TableCell>
                       <TableCell className="text-right">{formatHM(r.hours)}</TableCell>
                       <TableCell className="text-right">
-                        {r.flow == null || !(r.hours > 0)
-                          ? <span className="text-muted-foreground">—</span>
-                          : `${r.flow.toLocaleString("pt-BR")} m³/h`}
+                        {r.flow == null ? <span className="text-muted-foreground">—</span> : `${r.flow.toLocaleString("pt-BR")} m³/h`}
                       </TableCell>
                       <TableCell className="text-right font-semibold">
                         {r.m3 == null ? "—" : `${fmtM3(r.m3)} m³`}

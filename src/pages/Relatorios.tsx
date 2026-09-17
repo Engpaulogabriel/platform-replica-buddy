@@ -2,20 +2,19 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, useTransition } f
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Clock, Droplet, Droplets, FileText, Loader2, Power } from "lucide-react";
+import { Clock, Droplet, Droplets, FileText, Loader2, Power, ScrollText } from "lucide-react";
 import AutomacaoReportTab from "@/components/reports/AutomacaoReportTab";
 import AuditoriaReportTab from "@/components/reports/AuditoriaReportTab";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { useFarmFeatures } from "@/hooks/useFarmFeatures";
-import { useAutomationLog } from "@/lib/automationLog";
-import { useEnvironmentalAgency } from "@/hooks/useEnvironmentalAgency";
 import { supabase } from "@/integrations/supabase/client";
+import { useAutomationLog } from "@/lib/automationLog";
 
 const NiveisReport = lazy(() => import("@/components/NiveisReport"));
 const HorimetroReportTab = lazy(() => import("@/components/reports/HorimetroReportTab"));
 const VazaoReportTab = lazy(() => import("@/components/reports/VazaoReportTab"));
 const AguaConsumoReportTab = lazy(() => import("@/components/reports/AguaConsumoReportTab"));
-const InemaReport = lazy(() => import("@/components/inema/InemaReport").then((m) => ({ default: m.InemaReport })));
+const InemaReport = lazy(() => import("@/components/inema/InemaReport"));
 
 type ReportTab = "automacao" | "horimetro" | "niveis" | "vazao" | "agua" | "auditoria" | "inema";
 
@@ -53,27 +52,48 @@ const Relatorios = () => {
   const [tabReady, setTabReady] = useState(true);
   const farmId = useDefaultFarmId();
   const features = useFarmFeatures();
-  const automationEntries = useAutomationLog((s) => s.entries);
-  const { agency } = useEnvironmentalAgency(farmId); // nome do órgão por estado
-  // INEMA é opt-in por fazenda (farms.inema_enabled) — a aba só aparece se ligado.
   const [inemaEnabled, setInemaEnabled] = useState(false);
+  const [inemaFeatureLoading, setInemaFeatureLoading] = useState(true);
+  const automationEntries = useAutomationLog((s) => s.entries);
+
   useEffect(() => {
-    let alive = true;
-    if (!farmId) { setInemaEnabled(false); return; }
-    void supabase.from("farms").select("inema_enabled" as any).eq("id", farmId).maybeSingle()
-      .then(({ data }) => { if (alive) setInemaEnabled(Boolean((data as any)?.inema_enabled)); });
-    return () => { alive = false; };
+    let cancelled = false;
+
+    if (!farmId) {
+      setInemaEnabled(false);
+      setInemaFeatureLoading(false);
+      return;
+    }
+
+    setInemaFeatureLoading(true);
+
+    void supabase
+      .from("farms")
+      .select("inema_enabled")
+      .eq("id", farmId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (cancelled) return;
+        setInemaEnabled(Boolean((data as { inema_enabled?: boolean } | null)?.inema_enabled));
+        setInemaFeatureLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [farmId]);
 
   // Se a aba ativa pertence a um módulo desativado, cair para "automacao"
   useEffect(() => {
     if (features.loading) return;
     if ((activeTab === "niveis" && !features.niveis) ||
-        (activeTab === "agua" && !features.vazao_consumo)) {
+        (activeTab === "agua" && !features.vazao_consumo) ||
+        (activeTab === "vazao" && !features.vazao_consumo) ||
+        (activeTab === "inema" && !inemaEnabled)) {
       changeTab("automacao");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [features.loading, features.niveis, features.vazao_consumo, activeTab]);
+  }, [features.loading, features.niveis, features.vazao_consumo, inemaEnabled, activeTab]);
 
   // Antigo toggle localStorage 'module_flow' foi migrado para farms.modules.vazao_consumo
 
@@ -219,14 +239,14 @@ const Relatorios = () => {
               <Droplets className="w-4 h-4" /> Vazão e Consumo
             </button>
           )}
+          {!inemaFeatureLoading && inemaEnabled && (
+            <button type="button" className={tabButtonClass("inema")} onClick={() => changeTab("inema")}>
+              <ScrollText className="w-4 h-4" /> INEMA
+            </button>
+          )}
           <button type="button" className={tabButtonClass("auditoria")} onClick={() => changeTab("auditoria")}>
             <FileText className="w-4 h-4" /> Auditoria
           </button>
-          {inemaEnabled && (
-            <button type="button" className={tabButtonClass("inema")} onClick={() => changeTab("inema")}>
-              <FileText className="w-4 h-4" /> {agency.agency_acronym}
-            </button>
-          )}
         </div>
 
         <Suspense fallback={<ReportLoading />}>
@@ -246,7 +266,7 @@ const Relatorios = () => {
           ) : renderedTab === "auditoria" ? (
             <AuditoriaReportTab farmId={farmId} />
           ) : renderedTab === "inema" && inemaEnabled ? (
-            <InemaReport farmId={farmId} />
+            <InemaReport farmId={farmId} fromDate={fromDate} toDate={toDate} />
           ) : null}
         </div>
         </Suspense>

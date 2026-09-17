@@ -1,8 +1,7 @@
 // useEquipmentMaintenance — fonte única de dados de manutenção de
 // equipamentos por fazenda. Polling 30s. Expõe ações para bloquear/liberar.
 import { useCallback, useEffect, useState } from "react";
-// DUAL-BACKEND: maintenance_mode e leitura de equipments seguem o farmId.
-import { getSupabaseForFarm, assertOperationalClient } from "@/lib/supabaseRouter";
+import { supabase } from "@/integrations/supabase/client";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { useAuth } from "@/contexts/AuthContext";
 import { enqueueManualPumpCommand } from "@/lib/commandQueue";
@@ -36,7 +35,7 @@ export function useEquipmentMaintenance() {
   const reload = useCallback(async () => {
     if (!farmId) return;
     setLoading(true);
-    const { data } = await getSupabaseForFarm(farmId)
+    const { data } = await supabase
       .from("equipments")
       .select(SELECT_COLS)
       .eq("farm_id", farmId)
@@ -63,7 +62,7 @@ export function useEquipmentMaintenance() {
       if (!farmId) throw new Error("Fazenda não definida");
 
       // 1) Marca manutenção primeiro — qualquer comando ON em paralelo será rejeitado pelo trigger.
-      const { error: upErr } = await assertOperationalClient(farmId)
+      const { error: upErr } = await supabase
         .from("equipments")
         .update({
           maintenance_mode: true,
@@ -79,7 +78,7 @@ export function useEquipmentMaintenance() {
       // 2) Se solicitado, envia desligamento agora (desired_running=false é permitido).
       if (shutdownNow) {
         try {
-          await enqueueManualPumpCommand({ farmId, equipmentId, turnOn: false, userId: user?.id ?? null, userName: userLabel });
+          await enqueueManualPumpCommand({ equipmentId, turnOn: false, userId: user?.id ?? null, userName: userLabel });
         } catch (err) {
           // Não falha a operação inteira — bloqueio já está ativo.
           console.warn("[manutencao] falha ao enviar desligamento:", err);
@@ -94,7 +93,7 @@ export function useEquipmentMaintenance() {
   const release = useCallback(
     async (equipmentId: string) => {
       if (!farmId) throw new Error("Fazenda não definida");
-      const { error } = await assertOperationalClient(farmId)
+      const { error } = await supabase
         .from("equipments")
         .update({
           maintenance_mode: false,

@@ -19,6 +19,7 @@
 // whatsapp-automation-notify (insere o 9º dígito BR). Dedup dos avisos: por FAIXA,
 // 1x por (fazenda, poço, faixa) por dia (BRT), via watchdog_alerts_state.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { guardCron } from "../_shared/cronAuth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -92,6 +93,11 @@ async function sendTemplate(token: string, phoneNumberId: string, to: string, pa
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  // ── GUARDA DE CRON ────────────────────────────────────────────────────────
+  // Antes de QUALQUER consulta, alerta, escrita ou ação operacional.
+  // Sem x-cron-secret válido (ou service_role), devolve 401/403 e para aqui.
+  { const blocked = guardCron(req, corsHeaders); if (blocked) return blocked; }
   const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
   const now = new Date();

@@ -1,0 +1,48 @@
+componente,dominio,responsabilidade,dependencias,evidencia_de_uso,categoria,risco,prerequisito_remocao
+src/components/RestrictedAuth.tsx,frontend,Gate 2FA/senha mestra das telas admin,"projeto Supabase ANTIGO feqyexitblmhyzykttgu; funcao validate-2fa inexistente no repo","importado por Cadastros, Configuracoes, SuporteTecnico, DiagnosticoAuth",SECURITY_REMEDIATE,CRITICO,nao remover; repontar para projeto novo e portar validate-2fa
+src/pages/Licencas.tsx,frontend,Tela de licencas,"projeto ANTIGO feqyexitblmhyzykttgu; validate-2fa",nao referenciada em App.tsx,LEGADO_SEM_CONSUMO,MEDIO,confirmar ausencia de link externo/bookmark antes de arquivar
+src/pages/BridgeConsole.tsx,frontend,Console da bridge serial,supabase,nao roteada em App.tsx,DESCONHECIDO,MEDIO,verificar montagem via aba do Setor Tecnico
+src/pages/CadastroLogin.tsx,frontend,Login de cadastro,supabase,nao roteada,DESCONHECIDO,BAIXO,verificar uso como subcomponente
+src/pages/Cadastros.tsx,frontend,CRUD de cadastros,RestrictedAuth,nao roteada mas importada,ESSENCIAL,ALTO,nao remover
+src/pages/Diagnostico.tsx,frontend,Diagnostico tecnico,DiagnosticoAuth,nao roteada,DESCONHECIDO,MEDIO,verificar montagem indireta
+src/pages/HistoricoWhatsApp.tsx,frontend,Historico WhatsApp,whatsapp_message_log,nao roteada,DESCONHECIDO,BAIXO,verificar aba
+src/pages/Index.tsx,frontend,Landing,-,nao roteada,LEGADO_SEM_CONSUMO,BAIXO,confirmar rota raiz atual
+src/lib/mcp/*,frontend,Servidor MCP e ferramentas,supabase; referencias Lovable,referenciado por App.tsx e OAuthConsent,DESCONHECIDO,MEDIO,decidir se MCP acompanha a migracao
+supabase/functions/whatsapp-alerts,edge,Envia alerta WhatsApp,"Graph API; SERVICE_ROLE",verify_jwt=false SEM guarda,SECURITY_REMEDIATE,CRITICO,adicionar guarda antes de migrar
+supabase/functions/offline-daily-report,edge,Relatorio diario WhatsApp,"Graph API; SERVICE_ROLE",verify_jwt=false SEM guarda,SECURITY_REMEDIATE,CRITICO,adicionar guarda
+supabase/functions/command-verifier,edge,Verifica comandos e notifica,"Graph API; SERVICE_ROLE; insert/update",verify_jwt=false SEM guarda,SECURITY_REMEDIATE,CRITICO,adicionar guarda
+supabase/functions/agent-release-signed-url,edge,URL assinada de release do agente,"Storage agent-releases; SERVICE_ROLE",verify_jwt=false SEM guarda,SECURITY_REMEDIATE,CRITICO,exigir fingerprint/token do agente
+supabase/functions/agent-logs-cleanup,edge,Limpeza de logs do agente,"Storage agent-logs; SERVICE_ROLE",verify_jwt=false SEM guarda,SECURITY_REMEDIATE,ALTO,adicionar guarda de cron
+supabase/functions/diag-license,edge,Licenca de diagnostico,"SERVICE_ROLE; insert/update",verify_jwt=false SEM guarda,SECURITY_REMEDIATE,ALTO,adicionar guarda
+supabase/functions/validate-diag-pin,edge,Valida PIN de diagnostico,"SERVICE_ROLE; update",verify_jwt=false SEM guarda,SECURITY_REMEDIATE,ALTO,rate limit + guarda
+supabase/functions/diag-session,edge,Sessao de diagnostico,"SERVICE_ROLE; update",verify_jwt=false SEM guarda,SECURITY_REMEDIATE,ALTO,guarda
+supabase/functions/api-rate-limiter,edge,Rate limit anti-scraping,"SERVICE_ROLE; insert",verify_jwt=false SEM guarda,SECURITY_REMEDIATE,MEDIO,avaliar se precisa ser publica
+supabase/functions/bridge-heartbeat,edge,Heartbeat da bridge,SERVICE_ROLE,verify_jwt=false SEM guarda,SECURITY_REMEDIATE,MEDIO,autenticar por fingerprint do agente
+supabase/functions/scheduled-shutdown,edge,Desligamento programado,"cron; CRON_SECRET",guardCron aplicado,ESSENCIAL,CRITICO,nao remover
+supabase/functions/agent-offline-watchdog,edge,Watchdog de agente offline,"cron; CRON_SECRET",guardCron aplicado,ESSENCIAL,ALTO,nao remover
+supabase/functions/well-hours-watchdog,edge,Watchdog de horas de poco,"cron; CRON_SECRET",guardCron aplicado,ESSENCIAL,ALTO,nao remover
+supabase/functions/security-anomaly-watchdog,edge,Anomalia de seguranca,"cron; CRON_SECRET",guardCron aplicado,ESSENCIAL,MEDIO,nao remover
+supabase/functions/whatsapp-alerts-healthcheck,edge,Saude dos alertas,"cron; CRON_SECRET",guardCron aplicado,ESSENCIAL,MEDIO,nao remover
+supabase/functions/whatsapp-automation-notify,edge,Notificacao de automacao,"Graph API; guardCron pendente de publicacao",6 jobs cron apontam para ela,ESSENCIAL,CRITICO,publicar com guarda
+supabase/functions/critical-alerts-tick,edge,Alertas criticos e incidentes,"CRON_SECRET; classificador de outage",job a cada minuto,ESSENCIAL,CRITICO,nao remover
+supabase/functions/agent-auth,edge,Auth do agente FASE 2,"AGENT_TOKEN_SECRET; fingerprint",guarda propria,ESSENCIAL,CRITICO,nao remover sem plano de versionamento
+supabase/functions/agent-asar-key,edge,Chave AES do asar FASE 3,"fingerprint + token",guarda propria,ESSENCIAL,CRITICO,nao remover sem piloto
+supabase/functions/license-validate,edge,Valida licenca do agente,HMAC proprio,guarda propria,ESSENCIAL,CRITICO,nao remover
+supabase/functions/whatsapp-webhook,edge,Webhook Meta,assinatura Meta,guarda propria,ESSENCIAL,CRITICO,revalidar no dominio novo
+supabase/functions/mcp,edge,Servidor MCP,referencias Lovable,integracao externa,DESCONHECIDO,MEDIO,decidir escopo na migracao
+table:system_logs,banco,Log de sistema,-,sem rotina de purga,CANDIDATO_A_ARQUIVO,MEDIO,definir retencao e destino de arquivo
+table:agent_logs,banco,Log do agente (alta cardinalidade),-,sem rotina de purga,CANDIDATO_A_ARQUIVO,ALTO,retencao + arquivo frio antes do dump
+table:automation_tick_logs,banco,Log do tick de automacao,-,sem rotina de purga,CANDIDATO_A_ARQUIVO,ALTO,retencao
+table:whatsapp_message_log,banco,Log de mensagens WhatsApp,-,sem rotina de purga,CANDIDATO_A_ARQUIVO,MEDIO,retencao; possivel exigencia legal
+table:farm_notifications,banco,Notificacoes por fazenda,-,sem rotina de purga,CANDIDATO_A_ARQUIVO,MEDIO,retencao
+table:whatsapp_health_log,banco,Saude do WhatsApp,-,sem rotina de purga,CANDIDATO_A_ARQUIVO,BAIXO,retencao
+table:command_audit,banco,Autoria duravel de comando,-,append-only por design,ESSENCIAL,CRITICO,NAO purgar; e a prova de autoria
+table:automation_log,banco,Relatorio de Automacao oficial,-,purga existente,ESSENCIAL,CRITICO,nao remover
+table:automation_cleanup_audit,banco,Trilha da Fase B,-,append-only,ESSENCIAL,ALTO,nao remover
+table:agent_technical_events,banco,Eventos tecnicos,purge 30d,retencao existente,ESSENCIAL,MEDIO,manter
+table:adaptive_telemetry_log,banco,Log do piloto de telemetria,purge 30d,retencao existente,ATIVO_MAS_DUPLICADO,BAIXO,so apos fim do piloto
+table:cron_job_backup,banco,Backup de comando de cron,-,contem anon key nos comandos antigos,SECURITY_REMEDIATE,ALTO,restringir leitura; nao migrar conteudo
+bucket:agent-releases,storage,Binarios do agente,agent-release-signed-url,OTA,ESSENCIAL,CRITICO,migrar com hashes e revalidar assinatura
+bucket:agent-logs,storage,Logs enviados pelo agente,agent-logs-cleanup,diagnostico,CANDIDATO_A_ARQUIVO,MEDIO,definir retencao
+electron-agent/main.cjs,agente,Agente Electron completo,"endpoint Supabase hardcoded; Graph API; raw.githubusercontent",producao,ESSENCIAL,CRITICO,nao alterar sem versao piloto
+migrations com JWT literal (33),banco,Cron chamando Edge com anon key,projeto de origem fixo,acoplamento,SECURITY_REMEDIATE,ALTO,substituir por cron_invoke/Vault no destino

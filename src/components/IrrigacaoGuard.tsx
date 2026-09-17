@@ -10,7 +10,7 @@ export function isIrrigacaoAllowed(email?: string | null) {
 export function IrrigacaoGuard({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   if (!isIrrigacaoAllowed(user?.email)) {
-    return <Navigate to="/platform" replace />;
+    return <Navigate to="/home" replace />;
   }
   return <>{children}</>;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { useUserFarms } from "@/hooks/useUserFarms";
@@ -10,6 +10,13 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetTrigger, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Download, FileText, Search, MessageSquare, Shield, Loader2, Users, Users2 } from "lucide-react";
+import type { Contact } from "@/lib/whatsappHistory";
+import {
+  DEFAULT_RANGE_DAYS, PAGE_SIZE, CONTACT_PAGE_SIZE, MAX_ROWS,
+  localDateString, dateRangeToIso, formatPhone, canonPhone, phoneSuffix8,
+  buildContacts, pageRange, hasMorePages, mergeUnique, createRequestGuard,
+  type ContactSeed,
+} from "@/lib/whatsappHistory";
 import { toast } from "sonner";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -31,14 +38,6 @@ type Row = {
   created_at: string;
 };
 
-type Contact = {
-  phone: string;
-  name: string;
-  count: number;
-  lastAt: string;
-  farmId: string | null;
-};
-
 const COMMAND_FILTERS = [
   { value: "all", label: "Todos comandos" },
   { value: "liga", label: "Liga" },
@@ -49,42 +48,6 @@ const COMMAND_FILTERS = [
   { value: "manual", label: "Manual" },
   { value: "prog", label: "Programações" },
 ];
-
-function defaultDate(daysAgo: number) {
-  const d = new Date();
-  d.setDate(d.getDate() - daysAgo);
-  return d.toISOString().slice(0, 10);
-}
-
-function formatPhone(phone: string) {
-  const d = phone.replace(/\D/g, "");
-  if (d.length === 13 && d.startsWith("55")) {
-    return `+55 ${d.slice(2, 4)} ${d.slice(4, 9)}-${d.slice(9)}`;
-  }
-  if (d.length === 12 && d.startsWith("55")) {
-    return `+55 ${d.slice(2, 4)} ${d.slice(4, 8)}-${d.slice(8)}`;
-  }
-  return phone;
-}
-
-// Telefone canônico BR: 55 + DDD(2) + 9 dígitos = 13 dígitos, sem "+"/espaços.
-// Corrige o "duplicado" (mesma pessoa em formatos diferentes: com/sem "+", com/sem
-// o 9º dígito) unindo tudo na mesma chave de contato.
-function canonPhone(raw: string): string {
-  let d = (raw || "").replace(/\D/g, "");
-  if (!d) return "";
-  if (!d.startsWith("55") && (d.length === 10 || d.length === 11)) d = "55" + d;
-  if (d.startsWith("55")) {
-    const rest = d.slice(2); // DDD(2) + local
-    if (rest.length === 10) d = "55" + rest.slice(0, 2) + "9" + rest.slice(2); // insere 9º dígito
-  }
-  return d;
-}
-// Últimos 8 dígitos são estáveis entre todos os formatos (o "+"/9º dígito ficam
-// antes) — usados para casar TODAS as variantes de um número no filtro do banco.
-function phoneSuffix8(raw: string): string {
-  return (raw || "").replace(/\D/g, "").slice(-8);
-}
 
 function resultBadge(result: string | null) {
   if (!result) return null;
@@ -114,90 +77,152 @@ export default function HistoricoWhatsApp() {
   const [search, setSearch] = useState("");
   const [contactSearch, setContactSearch] = useState("");
   const [selectedPhone, setSelectedPhone] = useState<string>("");
-  const [dateFrom, setDateFrom] = useState(defaultDate(7));
-  const [dateTo, setDateTo] = useState(defaultDate(0));
+  // 30 dias: nos últimos 7 há 6 mensagens; nos últimos 30, 10.122.
+  const [dateFrom, setDateFrom] = useState(localDateString(DEFAULT_RANGE_DAYS));
+  const [dateTo, setDateTo] = useState(localDateString(0));
   const [farmFilter, setFarmFilter] = useState<string>("all");
   const [commandFilter, setCommandFilter] = useState("all");
+  // Paginação das mensagens — substitui o .limit(2000) que truncava calado.
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [contactsTruncated, setContactsTruncated] = useState(false);
+
+  // Só a requisição mais recente escreve no estado. Trocar de contato ou de
+  // período rápido não deixa mais a resposta antiga sobrescrever a nova.
+  const msgGuard = useRef(createRequestGuard()).current;
+  const contactGuard = useRef(createRequestGuard()).current;
 
   const canAccess = isPlatformAdmin || canEditConfig;
 
+  /** Mensagem legível de um erro desconhecido, sem recorrer a `any`. */
+  const errMsg = (e: unknown): string =>
+    e instanceof Error ? e.message : String(e);
+
+  // ── Lista lateral: TODO o histórico acessível, SEM filtro de data ────────
+  // A causa do bug: antes esta query usava a mesma janela das mensagens. Com
+  // 26/08–02/09 só o Jonatan tinha tráfego, então os outros 26 contatos
+  // sumiam da barra lateral — parecia exclusão. Data agora filtra APENAS as
+  // mensagens do painel central. O escopo de FAZENDA continua valendo aqui,
+  // porque é acesso, não recorte temporal.
   const loadContacts = async () => {
+    const token = contactGuard.begin();
     setContactsLoading(true);
+    setContactsTruncated(false);
     try {
-      const from = new Date(dateFrom + "T00:00:00").toISOString();
-      const to = new Date(dateTo + "T23:59:59").toISOString();
-      let q = supabase
-        .from("whatsapp_message_log")
-        .select("phone, operator_name, created_at, farm_id")
-        .gte("created_at", from)
-        .lte("created_at", to)
-        .order("created_at", { ascending: false })
-        .limit(5000);
-      if (farmFilter !== "all") q = q.eq("farm_id", farmFilter);
-      const { data, error } = await q;
-      if (error) throw error;
-      const map = new Map<string, Contact>();
-      for (const r of (data ?? []) as { phone: string; operator_name: string | null; created_at: string; farm_id: string | null }[]) {
-        if (!r.phone) continue;
-        // Agrupa por telefone CANÔNICO — une variantes (com/sem "+", com/sem 9º dígito)
-        // da mesma pessoa numa única conversa.
-        const key = canonPhone(r.phone) || r.phone.replace(/\D/g, "");
-        const existing = map.get(key);
-        if (existing) {
-          existing.count += 1;
-          if (r.operator_name && (existing.name === formatPhone(existing.phone) || !existing.name)) {
-            existing.name = r.operator_name;
-          }
-          if (!existing.farmId && r.farm_id) existing.farmId = r.farm_id;
-        } else {
-          map.set(key, {
-            phone: key,
-            name: r.operator_name || formatPhone(key),
-            count: 1,
-            lastAt: r.created_at,
-            farmId: r.farm_id ?? null,
-          });
-        }
+      const seeds: ContactSeed[] = [];
+      let p = 0;
+      let truncated = false;
+      // Paginação das linhas leves (4 colunas). Sem o .limit(5000) mudo.
+      for (;;) {
+        const [rFrom, rTo] = pageRange(p, CONTACT_PAGE_SIZE);
+        let q = supabase
+          .from("whatsapp_message_log")
+          .select("phone, operator_name, created_at, farm_id")
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: false })
+          .range(rFrom, rTo);
+        if (farmFilter !== "all") q = q.eq("farm_id", farmFilter);
+        const { data, error } = await q;
+        if (error) throw error;
+        const batch = (data ?? []) as ContactSeed[];
+        seeds.push(...batch);
+        if (!hasMorePages(batch.length, CONTACT_PAGE_SIZE)) break;
+        if (seeds.length >= MAX_ROWS) { truncated = true; break; }
+        p += 1;
       }
-      const list = Array.from(map.values()).sort((a, b) => (a.lastAt < b.lastAt ? 1 : -1));
-      setContacts(list);
-    } catch (e: any) {
-      toast.error("Falha ao carregar contatos: " + (e?.message ?? e));
+      if (!contactGuard.isCurrent(token)) return;   // filtro mudou: descarta
+      setContacts(buildContacts(seeds));
+      setContactsTruncated(truncated);
+    } catch (e: unknown) {
+      if (!contactGuard.isCurrent(token)) return;
+      toast.error("Falha ao carregar contatos: " + errMsg(e));
     } finally {
-      setContactsLoading(false);
+      if (contactGuard.isCurrent(token)) setContactsLoading(false);
     }
   };
 
+  /** Uma página de mensagens do filtro atual. Usada pela tela e pela exportação. */
+  const fetchMessagePage = async (pageIndex: number): Promise<Row[]> => {
+    const { from, to } = dateRangeToIso(dateFrom, dateTo);
+    const [rFrom, rTo] = pageRange(pageIndex, PAGE_SIZE);
+    let q = supabase
+      .from("whatsapp_message_log")
+      .select("*")
+      .gte("created_at", from)
+      .lte("created_at", to)
+      // Ordenação ESTÁVEL: created_at pode empatar; o id desempata e impede
+      // que uma linha pule de página.
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .range(rFrom, rTo);
+    if (selectedPhone) {
+      const suffix = phoneSuffix8(selectedPhone);
+      q = suffix ? q.ilike("phone", `%${suffix}`) : q.eq("phone", selectedPhone);
+    }
+    if (farmFilter !== "all") q = q.eq("farm_id", farmFilter);
+    const { data, error } = await q;
+    if (error) throw error;
+    return (data ?? []) as Row[];
+  };
+
   const load = async () => {
+    const token = msgGuard.begin();
     setLoading(true);
     try {
-      const from = new Date(dateFrom + "T00:00:00").toISOString();
-      const to = new Date(dateTo + "T23:59:59").toISOString();
-      let q = supabase
-        .from("whatsapp_message_log")
-        .select("*")
-        .gte("created_at", from)
-        .lte("created_at", to)
-        .order("created_at", { ascending: false })
-        .limit(2000);
-      if (selectedPhone) {
-        // Casa TODAS as variantes de formato do número selecionado (o "+"/9º dígito
-        // ficam no prefixo; os últimos 8 dígitos são estáveis). Funciona mesmo antes
-        // do backfill; depois do backfill, os phones já ficam canônicos.
-        const suffix = phoneSuffix8(selectedPhone);
-        q = suffix ? q.ilike("phone", `%${suffix}`) : q.eq("phone", selectedPhone);
-      }
-      if (farmFilter !== "all") {
-        q = q.eq("farm_id", farmFilter);
-      }
-      const { data, error } = await q;
-      if (error) throw error;
-      setRows((data ?? []) as Row[]);
-    } catch (e: any) {
-      toast.error("Falha ao carregar histórico: " + (e?.message ?? e));
+      const first = await fetchMessagePage(0);
+      if (!msgGuard.isCurrent(token)) return;
+      setRows(first);
+      setPage(0);
+      setHasMore(hasMorePages(first.length, PAGE_SIZE));
+    } catch (e: unknown) {
+      if (!msgGuard.isCurrent(token)) return;
+      toast.error("Falha ao carregar histórico: " + errMsg(e));
     } finally {
-      setLoading(false);
+      if (msgGuard.isCurrent(token)) setLoading(false);
     }
+  };
+
+  const loadMore = async () => {
+    if (loadingMore || !hasMore) return;
+    const token = msgGuard.begin();
+    setLoadingMore(true);
+    try {
+      const next = page + 1;
+      const batch = await fetchMessagePage(next);
+      if (!msgGuard.isCurrent(token)) return;
+      // mergeUnique: entre duas páginas pode chegar mensagem nova e deslocar o
+      // offset. Sem isso, a linha da borda apareceria duas vezes.
+      setRows((prev) => mergeUnique(prev, batch));
+      setPage(next);
+      setHasMore(hasMorePages(batch.length, PAGE_SIZE));
+    } catch (e: unknown) {
+      if (!msgGuard.isCurrent(token)) return;
+      toast.error("Falha ao carregar mais: " + errMsg(e));
+    } finally {
+      if (msgGuard.isCurrent(token)) setLoadingMore(false);
+    }
+  };
+
+  /**
+   * Conjunto COMPLETO do filtro atual, para exportar. CSV e PDF não podem sair
+   * só com as páginas que o usuário rolou na tela.
+   */
+  const fetchAllForExport = async (): Promise<Row[]> => {
+    let all: Row[] = [];
+    let p = 0;
+    for (;;) {
+      const batch = await fetchMessagePage(p);
+      all = mergeUnique(all, batch);
+      if (!hasMorePages(batch.length, PAGE_SIZE)) break;
+      if (all.length >= MAX_ROWS) {
+        toast.warning(`Exportação limitada a ${MAX_ROWS.toLocaleString("pt-BR")} registros.`);
+        break;
+      }
+      p += 1;
+    }
+    return all;
   };
 
   useEffect(() => {
@@ -205,10 +230,12 @@ export default function HistoricoWhatsApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canAccess, dateFrom, dateTo, farmFilter, selectedPhone]);
 
+  // Sem dateFrom/dateTo nas dependências: a lista lateral é histórica e não
+  // pode encolher porque o usuário estreitou o período. Só fazenda a redefine.
   useEffect(() => {
     if (canAccess) void loadContacts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canAccess, dateFrom, dateTo, farmFilter]);
+  }, [canAccess, farmFilter]);
 
   const filteredContacts = useMemo(() => {
     const s = contactSearch.trim().toLowerCase();
@@ -236,9 +263,11 @@ export default function HistoricoWhatsApp() {
   }, [filteredContacts, farms]);
 
 
-  const filtered = useMemo(() => {
+  // Busca e filtro de comando são locais. Extraídos do useMemo para que a
+  // exportação aplique EXATAMENTE os mesmos critérios da tela.
+  const applyLocalFilters = (list: Row[]): Row[] => {
     const s = search.trim().toLowerCase();
-    return rows.filter((r) => {
+    return list.filter((r) => {
       if (commandFilter !== "all") {
         const cp = (r.command_parsed ?? "").toLowerCase();
         const body = (r.message_body ?? "").toLowerCase();
@@ -252,17 +281,31 @@ export default function HistoricoWhatsApp() {
         (r.command_parsed ?? "").toLowerCase().includes(s)
       );
     });
-  }, [rows, search, commandFilter]);
+  };
 
-  const exportCSV = () => {
+  const filtered = useMemo(() => applyLocalFilters(rows),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, search, commandFilter]);
+
+  const exportCSV = async () => {
+    setExporting(true);
+    let all: Row[];
+    try {
+      all = applyLocalFilters(await fetchAllForExport());
+    } catch (e: unknown) {
+      toast.error("Falha ao exportar: " + errMsg(e));
+      setExporting(false);
+      return;
+    }
+    setExporting(false);
     const headers = ["created_at", "direction", "phone", "operator_name", "farm_id", "message_type", "message_body", "message_id", "command_parsed", "command_result", "timestamp_meta"];
     const escape = (v: unknown) => {
       const s = v == null ? "" : String(v);
       return `"${s.replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
     };
     const lines = [headers.join(",")];
-    for (const r of filtered) {
-      lines.push(headers.map((h) => escape((r as any)[h])).join(","));
+    for (const r of all) {
+      lines.push(headers.map((h) => escape((r as unknown as Record<string, unknown>)[h])).join(","));
     }
     const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -273,7 +316,17 @@ export default function HistoricoWhatsApp() {
     URL.revokeObjectURL(url);
   };
 
-  const exportPDF = () => {
+  const exportPDF = async () => {
+    setExporting(true);
+    let all: Row[];
+    try {
+      all = applyLocalFilters(await fetchAllForExport());
+    } catch (e: unknown) {
+      toast.error("Falha ao exportar: " + errMsg(e));
+      setExporting(false);
+      return;
+    }
+    setExporting(false);
     const doc = new jsPDF({ unit: "pt", format: "a4" });
     const pageWidth = doc.internal.pageSize.getWidth();
     doc.setFontSize(14);
@@ -286,7 +339,7 @@ export default function HistoricoWhatsApp() {
     const farmName = farmFilter === "all" ? "Todas" : (farms.find((f) => f.id === farmFilter)?.name ?? farmFilter);
     doc.setFontSize(9);
     doc.text(
-      `Período: ${dateFrom} a ${dateTo}  |  Fazenda: ${farmName}  |  Telefone: ${selectedPhone || "todos"}  |  Registros: ${filtered.length}`,
+      `Período: ${dateFrom} a ${dateTo}  |  Fazenda: ${farmName}  |  Telefone: ${selectedPhone || "todos"}  |  Registros: ${all.length}`,
       40,
       78,
     );
@@ -294,7 +347,7 @@ export default function HistoricoWhatsApp() {
     autoTable(doc, {
       startY: 92,
       head: [["Data/Hora", "Dir.", "Telefone", "Operador", "Mensagem", "Resultado", "Message ID"]],
-      body: filtered.map((r) => [
+      body: all.map((r) => [
         new Date(r.created_at).toLocaleString("pt-BR"),
         r.direction === "incoming" ? "↓ IN" : "↑ OUT",
         r.phone,
@@ -378,6 +431,11 @@ export default function HistoricoWhatsApp() {
         </Button>
       </div>
       <div className="flex-1 overflow-y-auto">
+        {contactsTruncated && (
+          <div className="px-2 pb-2 text-[11px] text-amber-500">
+            Lista limitada a {MAX_ROWS.toLocaleString("pt-BR")} registros — pode haver contatos não exibidos.
+          </div>
+        )}
         {filteredContacts.length === 0 && !contactsLoading && (
           <div className="p-4 text-xs text-muted-foreground text-center">Nenhum contato no período.</div>
         )}
@@ -444,10 +502,10 @@ export default function HistoricoWhatsApp() {
               <div className="h-[calc(100vh-60px)]">{ContactsPanel}</div>
             </SheetContent>
           </Sheet>
-          <Button variant="outline" size="sm" onClick={exportCSV} disabled={!filtered.length}>
+          <Button variant="outline" size="sm" onClick={() => void exportCSV()} disabled={!filtered.length || exporting}>
             <Download className="w-4 h-4 mr-2" /> CSV
           </Button>
-          <Button variant="outline" size="sm" onClick={exportPDF} disabled={!filtered.length}>
+          <Button variant="outline" size="sm" onClick={() => void exportPDF()} disabled={!filtered.length || exporting}>
             <FileText className="w-4 h-4 mr-2" /> Exportar Relatório (PDF)
           </Button>
         </div>
@@ -527,7 +585,7 @@ export default function HistoricoWhatsApp() {
             <CardContent>
               {!loading && filtered.length === 0 && (
                 <div className="text-sm text-muted-foreground text-center py-8">
-                  Nenhuma mensagem encontrada com os filtros selecionados.
+                  Nenhuma mensagem encontrada no período selecionado.
                 </div>
               )}
               <div className="space-y-2 max-h-[65vh] overflow-y-auto pr-2">
@@ -563,6 +621,17 @@ export default function HistoricoWhatsApp() {
                   );
                 })}
               </div>
+              {hasMore && (
+                <div className="pt-3 flex items-center justify-center gap-3">
+                  <Button variant="outline" size="sm" onClick={() => void loadMore()} disabled={loadingMore}>
+                    {loadingMore ? <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> : null}
+                    Carregar mais
+                  </Button>
+                  <span className="text-[11px] text-muted-foreground">
+                    {rows.length.toLocaleString("pt-BR")} carregadas
+                  </span>
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

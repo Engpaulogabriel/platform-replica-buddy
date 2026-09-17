@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
-import { signInNewBackend } from "@/lib/supabaseRouter";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Lock, Mail, Loader2, ArrowRight, Droplets } from "lucide-react";
@@ -10,16 +9,18 @@ import renovLogo from "@/assets/renov-logo.png";
 import pivotBg from "@/assets/login-pivot-irrigation.jpg";
 
 /**
- * Pós-login: platform_admins / platform_support → /platform.
- * Demais usuários → /home (dashboard da fazenda).
+ * Pós-login: SOMENTE profiles.is_super_admin = true → /platform.
+ * Demais usuários (Técnico, Suporte, Proprietário, Visualizador) → /home.
  */
 async function resolvePostLoginRoute(userId: string): Promise<string> {
   try {
-    const [admin, support] = await Promise.all([
-      supabase.from("platform_admins").select("user_id").eq("user_id", userId).maybeSingle(),
-      supabase.from("platform_support" as any).select("user_id").eq("user_id", userId).maybeSingle(),
-    ]);
-    if (admin.data || support.data) return "/platform";
+    const { data: profile } = await supabase
+      .from("profiles" as any)
+      .select("is_super_admin")
+      .eq("id", userId)
+      .maybeSingle();
+    const access = profile as { is_super_admin?: boolean } | null;
+    if (access?.is_super_admin === true) return "/platform";
   } catch {
     // se a checagem falhar, cai no fluxo padrão de cliente
   }
@@ -63,10 +64,6 @@ const Login = () => {
     setLoading(true);
     const res = await login(email.trim(), password);
     if (res.ok) {
-      // DUAL BACKEND: autentica também no projeto novo, com as mesmas
-      // credenciais, enquanto elas ainda estão em memória. Falha aqui NÃO
-      // impede o acesso — só deixa as fazendas migradas fail-closed.
-      try { await signInNewBackend(email.trim(), password); } catch { /* noop */ }
       sessionStorage.setItem("just_logged_in", "1");
       sessionStorage.removeItem("onboarding_shown_this_session");
       const { data: { session } } = await supabase.auth.getSession();

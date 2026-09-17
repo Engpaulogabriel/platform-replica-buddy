@@ -1,8 +1,9 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { guardInternalOrUser } from "../_shared/internalAuth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret, x-internal-secret",
 };
 
 const GRAPH_VERSION = "v21.0";
@@ -95,8 +96,25 @@ function farmLine(name: string): string {
 }
 
 
+
+// ============================================================
+// KILL-SWITCH DE ALERTAS (política ativa)
+// Somente alertas CRÍTICOS de sistema podem sair.
+// Tudo o resto (state_change, local_change, com_missing, recovery,
+// tx_stuck, agent_restart, peak_hours, automações, etc.) é DESCARTADO.
+// ============================================================
+const ALERT_KILLSWITCH_ALLOWED = new Set(["agent_offline", "bridge_dead"]);
+function isAlertAllowed(t: unknown): boolean {
+  return ALERT_KILLSWITCH_ALLOWED.has(String(t ?? "").trim());
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
+  // ── GUARDA DE CHAMADOR INTERNO ───────────────────────────────────────────
+  // Aceita cron secret / service role / x-internal-secret (triggers do banco)
+  // ou JWT de usuário real (agente Electron). Anon key NÃO passa.
+  { const blocked = await guardInternalOrUser(req, corsHeaders); if (blocked) return blocked; }
 
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -111,47 +129,11 @@ Deno.serve(async (req) => {
     alert_type = body.kind;
   }
 
-  // ═══ POLÍTICA DE ALERTAS — CONFIGURÁVEL POR FAZENDA (opt-in) ═══════════════
-  // Os 2 alertas OBRIGATÓRIOS (AGENTE OFFLINE / BRIDGE MORTA) NÃO passam por aqui:
-  // vêm do agent-offline-watchdog → whatsapp-automation-notify e não podem ser
-  // desativados. Aqui só saem os alertas CONFIGURÁVEIS e SOMENTE se a fazenda os
-  // ativou explicitamente na plataforma (aba "Alertas"). Default = desativado.
-  // Todo tipo não-configurável (bridge_*, agent_*, tx_stalled, safety, level…) é
-  // descartado — não é papel desta função enviá-los.
-  const CONFIGURABLE_TYPE_COL: Record<string, string> = {
-    local_change: "alert_ligar_desligar",
-    offline: "alert_sem_resposta",
-    com_missing: "alert_sem_resposta",
-    back_online: "alert_com_restaurada",
-    peak_hours: "alert_pico",
-  };
-  const _cfgCol = CONFIGURABLE_TYPE_COL[String(alert_type)];
-  let _alertRecipients = "admin";
-  if (!_cfgCol) {
-    console.log(`[POLICY] whatsapp-alerts: tipo não-configurável descartado alert_type=${alert_type} farm=${farm_id}`);
-    return new Response(JSON.stringify({ ok: true, status: "alerts_policy_off", alert_type }), {
+  if (!isAlertAllowed(alert_type)) {
+    console.log("[whatsapp-alerts] KILL-SWITCH: alerta descartado", { alert_type, farm_id, equipment_id });
+    return new Response(JSON.stringify({ status: "blocked_by_killswitch", alert_type: alert_type ?? null }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  }
-  {
-    let enabled = false;
-    if (farm_id) {
-      const { data: s } = await supabase
-        .from("whatsapp_alert_settings")
-        .select("alerts_master_enabled, alert_ligar_desligar, alert_sem_resposta, alert_com_restaurada, alert_pico, alert_recipients")
-        .eq("farm_id", farm_id)
-        .maybeSingle();
-      if (s) {
-        enabled = (s as any).alerts_master_enabled === true && (s as any)[_cfgCol] === true;
-        _alertRecipients = String((s as any).alert_recipients ?? "admin");
-      }
-    }
-    if (!enabled) {
-      console.log(`[POLICY] whatsapp-alerts: ${alert_type} desativado p/ fazenda ${farm_id} (sem opt-in)`);
-      return new Response(JSON.stringify({ ok: true, status: "type_disabled_by_farm", alert_type }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
   }
 
   if (isSemear(farm_id)) {
@@ -266,38 +248,6 @@ Deno.serve(async (req) => {
 
   let operators = farmOperators;
   let usedGlobalFallback = false;
-
-  // ── REGRA ABSOLUTA: alertas TÉCNICOS nunca vão para o CLIENTE ────────────────
-  // O operador comum da fazenda (cliente) só pode receber acionamento de bomba
-  // (local_change). Bridge/agente/comunicação/erros = técnico → SÓ super_admins +
-  // fallback admin, mesmo que a fazenda tenha operadores locais.
-  const TECH_ALERT_TYPES = new Set([
-    "bridge_warning", "bridge_offline", "bridge_recovered", "bridge_down",
-    "agent_tx_stalled", "agent_clone_detected", "agent_dying", "agent_offline",
-    "offline", "back_online", "com_missing", "com_stuck",
-  ]);
-  if (TECH_ALERT_TYPES.has(String(alert_type))) {
-    const adminList: any[] = (allOperators ?? []).filter((o: any) => o.phone && o.role === "super_admin");
-    for (const phone of adminFallbackPhones) {
-      if (!adminList.some((o) => normalizePhone(o.phone) === normalizePhone(phone))) {
-        adminList.push({ phone, name: "Admin Renov", role: "super_admin", notification_preference: "default", receive_alerts: true, farm_id: null });
-      }
-    }
-    operators = adminList;
-    console.log(`[whatsapp-alerts] alerta TÉCNICO '${alert_type}' → SÓ admins (${adminList.length}); CLIENTE não recebe`);
-  }
-
-  // Destinatários configuráveis por fazenda (admin | operators | all). Só se aplica
-  // a tipos NÃO-técnicos (local_change, peak_hours) — a regra absoluta "técnico só
-  // admin" (offline/back_online/com_missing) permanece e nunca vai ao cliente.
-  if (!TECH_ALERT_TYPES.has(String(alert_type))) {
-    if (_alertRecipients === "admin") {
-      operators = (operators ?? []).filter((o: any) => o.role === "super_admin" || o.role === "admin");
-    } else if (_alertRecipients === "operators") {
-      operators = (operators ?? []).filter((o: any) => o.role !== "super_admin");
-    }
-    // "all" → mantém todos
-  }
 
   if ((!operators || !operators.length) && (isBridgeAlert || CRITICAL_ALERT_TYPES.has(String(alert_type)))) {
     // Alerta crítico sem responsável local — cai para admins globais.

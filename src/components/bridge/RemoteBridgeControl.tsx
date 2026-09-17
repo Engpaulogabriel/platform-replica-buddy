@@ -40,9 +40,7 @@ interface Props {
   comPort: string | null;
 }
 
-// Partial: serial_terminal/serial_sniff são tratados na aba Terminal Serial,
-// não neste componente de controle da bridge.
-const KIND_LABEL: Partial<Record<AgentCmdKind, string>> = {
+const KIND_LABEL: Record<AgentCmdKind, string> = {
   open_port: "Abrir porta",
   close_port: "Fechar porta",
   change_port: "Trocar porta",
@@ -53,12 +51,16 @@ const KIND_LABEL: Partial<Record<AgentCmdKind, string>> = {
   resume_polling: "Retomar polling",
   list_ports: "Listar portas",
   agent_restart: "Reiniciar agente",
+  reboot_agent: "Reboot do agente",
+  unblock_agent: "Desbloquear agente",
   update_agent: "Atualizar agente",
   force_reboot: "Reboot forçado",
   force_rollback: "Rollback",
   start_log_stream: "Iniciar stream de logs",
   renew_log_stream: "Renovar stream de logs",
   stop_log_stream: "Parar stream de logs",
+  serial_terminal: "Terminal serial",
+  serial_sniff: "Sniff serial",
 };
 
 interface PortInfo {

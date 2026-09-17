@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { ClipboardList, KeyRound, Stethoscope, Building2, Navigation, Timer, Settings, Users, TrendingUp, ShieldCheck, Cpu, Cable, Radio, Wrench, ShieldAlert } from "lucide-react";
+import { ClipboardList, KeyRound, Stethoscope, Building2, Navigation, Timer, Settings, Users, TrendingUp, ShieldCheck, Cpu, Cable, Radio, Power, ShieldAlert } from "lucide-react";
 import RestrictedAuth from "@/components/RestrictedAuth";
 import { Cadastros } from "./Cadastros";
 import { CadastroLoginInner } from "./CadastroLogin";
@@ -16,8 +16,7 @@ import DevicesAdmin from "@/components/DevicesAdmin";
 import HardwareSecurityPanel from "@/components/HardwareSecurityPanel";
 import BridgeConsole from "./BridgeConsole";
 import CommunicationReport from "@/components/CommunicationReport";
-import MaintenanceTab from "@/components/tecnico/MaintenanceTab";
-import SecurityEventsPanel from "@/components/tecnico/SecurityEventsPanel";
+import ForcedShutdownAdmin from "@/components/ForcedShutdownAdmin";
 import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,12 +24,15 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { useGuidedTour } from "@/hooks/useGuidedTour";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
+import AuthorshipReconciliationQueue from "@/components/tecnico/AuthorshipReconciliationQueue";
+import { SwitchingProtectionPanel } from "@/components/tecnico/SwitchingProtectionPanel";
+import { useCanViewTechnicalTelemetry } from "@/hooks/useTechnicalTelemetry";
+import { TechnicalDisplaySettings } from "@/components/tecnico/TechnicalDisplaySettings";
 
 const tabs = [
   { value: "equipamentos", label: "Equipamentos", icon: ClipboardList },
   { value: "login", label: "Login", icon: KeyRound },
   { value: "diagnostico", label: "Diagnóstico", icon: Stethoscope },
-  { value: "manutencao", label: "Manutenção", icon: Wrench },
   { value: "fazenda", label: "Fazenda", icon: Building2 },
   { value: "temporizadores", label: "Temporizadores", icon: Timer },
   { value: "sistema", label: "Sistema", icon: Settings },
@@ -40,6 +42,7 @@ const tabs = [
   { value: "hardware", label: "Hardware", icon: Cpu },
   { value: "bridge", label: "Bridge Serial", icon: Cable },
   { value: "comunicacao", label: "Comunicação", icon: Radio },
+  { value: "desligamento", label: "Desligamento Forçado", icon: Power },
 ];
 
 const toIsoDate = (d: Date) => d.toISOString().slice(0, 10);
@@ -52,9 +55,23 @@ const SuporteTecnico = () => {
   const { role } = useFarmAccess();
   // Aba Segurança (eventos do agente) só para platform_admin e owner.
   const canViewSecurity = role === "platform_admin" || role === "owner";
+  // Proteções por Poço é MAIS restrita que Segurança: só platform_admin e
+  // técnico cadastrado em platform_support. `owner` NÃO entra.
+  const canViewProtections = useCanViewTechnicalTelemetry();
   const shownTabs = useMemo(
-    () => (canViewSecurity ? [...tabs, { value: "seguranca", label: "Segurança", icon: ShieldAlert }] : tabs),
-    [canViewSecurity],
+    () => {
+      const base = canViewSecurity
+        ? [...tabs,
+           // Fila de reconciliação de autoria — mesma restrição da aba Segurança.
+           { value: "autoria", label: "Autoria", icon: ShieldAlert }]
+        : tabs;
+      return canViewProtections
+        ? [...base,
+           { value: "protecoes", label: "Proteções por Poço", icon: ShieldCheck },
+           { value: "exibicao", label: "Exibição", icon: Settings }]
+        : base;
+    },
+    [canViewSecurity, canViewProtections],
   );
 
   const defaults = useMemo(() => {
@@ -100,9 +117,14 @@ const SuporteTecnico = () => {
           <TabsContent value="equipamentos" className="mt-4"><Cadastros /></TabsContent>
           <TabsContent value="login" className="mt-4"><CadastroLoginInner /></TabsContent>
           <TabsContent value="diagnostico" className="mt-4"><Diagnostico /></TabsContent>
-          <TabsContent value="manutencao" className="mt-4"><MaintenanceTab /></TabsContent>
+          {canViewProtections && (
+            <TabsContent value="protecoes" className="mt-4"><SwitchingProtectionPanel /></TabsContent>
+          )}
+          {canViewProtections && (
+            <TabsContent value="exibicao" className="mt-4"><TechnicalDisplaySettings /></TabsContent>
+          )}
           {canViewSecurity && (
-            <TabsContent value="seguranca" className="mt-4"><SecurityEventsPanel /></TabsContent>
+            <TabsContent value="autoria" className="mt-4"><AuthorshipReconciliationQueue /></TabsContent>
           )}
           <TabsContent value="fazenda" className="mt-4"><FazendaContent /></TabsContent>
           <TabsContent value="temporizadores" className="mt-4"><TimersConfig /></TabsContent>
@@ -127,6 +149,7 @@ const SuporteTecnico = () => {
             </Card>
             <CommunicationReport farmId={farmId} fromDate={fromDate} toDate={toDate} equipmentFilter="all" />
           </TabsContent>
+          <TabsContent value="desligamento" className="mt-4"><ForcedShutdownAdmin /></TabsContent>
         </Tabs>
       </div>
     </RestrictedAuth>

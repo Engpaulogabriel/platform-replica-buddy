@@ -10,11 +10,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-// DUAL-BACKEND: dados da fazenda seguem o backend do farmId. Resolução de
-// fazenda e permissões (profiles/user_roles) continuam no backend ANTIGO,
-// que é onde vive a sessão.
-import { getSupabaseForFarm } from "@/lib/supabaseRouter";
-import { isFarmMigrated } from "@/lib/migrationRegistry";
+// BYPASS EXPLÍCITO do kill switch global: o dashboard de bombas PRECISA de
+// Realtime real em `public.equipments` — é onde apply_pump_telemetry grava
+// last_outputs_state a cada RX físico. Os demais módulos seguem bloqueados.
+import { getRealtimeChannel, removeRealtimeChannel } from "@/lib/realtimeKillSwitch";
 import { useAuth } from "@/contexts/AuthContext";
 import { notifyRegistry } from "@/lib/notify";
 import { enqueue, isOnline } from "@/lib/offlineQueue";
@@ -78,6 +77,8 @@ export interface CloudEquipamento {
   pending_command_id: string | null;
   /** Estado desejado pela última intenção (true=ligar, false=desligar). Sincronizado pelo worker. */
   desired_running?: boolean | null;
+  /** Modo Automático: início da tentativa de partida ainda não confirmada. */
+  automatic_on_attempt_since?: string | null;
   polling_interval_seconds?: number;
   /** Intervalo esperado de telemetria (min). Padrão 10. Boosters = 25. Usado para calcular a janela offline (telemetry_interval + 5 min). */
   telemetry_interval?: number | null;
@@ -119,6 +120,12 @@ interface State {
   sectors: CloudSector[];
   lastSyncAt: number | null;
   realtimeConnected: boolean;
+  /** Saúde da assinatura para o indicador técnico (não afeta bomba alguma):
+   *  connected = recebendo; reconnecting = caiu e está tentando;
+   *  degraded = não foi possível restabelecer após várias tentativas. */
+  realtimeHealth: "connected" | "reconnecting" | "degraded";
+  /** Horário da última leitura FÍSICA aplicada (mudança em equipments). */
+  lastPhysicalReadAt: number | null;
 }
 
 const MAX_SAIDAS = 6;
@@ -135,6 +142,7 @@ const EQUIP_COLS =
   "alarm_low,alarm_high,fonte_tipo,fonte_id,alimenta_id,active," +
   "last_communication,last_outputs_state,last_signal_bars,last_actuation_origin," +
   "local_ack_at,command_blocked_until,pending_command_id,desired_running," +
+  "automatic_on_attempt_since," +
   "polling_interval_seconds,rf_radio,rf_via_rep,forced_shutdown_enabled," +
   "level_last_raw,level_last_raw_at,level_cal_digital,level_cal_meters," +
   "level_max_meters,level_sensor_index," +
@@ -156,18 +164,18 @@ export function useCadastrosCloud() {
     sectors: [],
     lastSyncAt: null,
     realtimeConnected: false,
+    realtimeHealth: "reconnecting",
+    lastPhysicalReadAt: null,
   });
 
   const farmIdRef = useRef<string | null>(null);
   const reloadDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadAll = useCallback(async (farmId: string) => {
-    // Cliente resolvido UMA VEZ a partir do farmId desta carga.
-    const client = getSupabaseForFarm(farmId);
     const [plcsRes, equipsRes, sectorsRes] = await Promise.all([
-      client.from("plc_groups").select("id,farm_id,name,hw_id,output_count").eq("farm_id", farmId).order("name"),
-      client.from("equipments").select(EQUIP_COLS).eq("farm_id", farmId).order("name"),
-      client.from("sectors").select("id,farm_id,name").eq("farm_id", farmId).order("name"),
+      supabase.from("plc_groups").select("id,farm_id,name,hw_id,output_count").eq("farm_id", farmId).order("name"),
+      supabase.from("equipments").select(EQUIP_COLS).eq("farm_id", farmId).order("name"),
+      supabase.from("sectors").select("id,farm_id,name").eq("farm_id", farmId).order("name"),
 
     ]);
     if (plcsRes.error) throw new Error(`plcs: ${plcsRes.error.message}`);
@@ -198,19 +206,12 @@ export function useCadastrosCloud() {
     reloadDebounceRef.current = setTimeout(() => { void refresh(); }, 250);
   }, [refresh]);
 
-  // Refetch ao voltar para a aba/janela ou recuperar conexão
-  useEffect(() => {
-    const onFocus = () => { if (document.visibilityState === "visible") void refresh(); };
-    const onOnline = () => { void refresh(); };
-    window.addEventListener("visibilitychange", onFocus);
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("online", onOnline);
-    return () => {
-      window.removeEventListener("visibilitychange", onFocus);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("online", onOnline);
-    };
-  }, [refresh]);
+  // NOTA: os listeners de visibilitychange/focus/online que existiam AQUI foram
+  // consolidados no efeito de boot abaixo (visibilityHandler). Aquele conjunto só
+  // chamava refresh(); o consolidado também RE-INSCREVE o canal quando ele não
+  // está `joined` — que é o caso do Safari com a aba suspensa, em que o socket
+  // morre sem emitir CLOSED. Manter os dois causava refresh duplicado a cada
+  // retorno de aba.
 
   // Boot: pega farm + role + dados + assina realtime (com reconexão automática + poller fallback)
   useEffect(() => {
@@ -218,7 +219,7 @@ export function useCadastrosCloud() {
     let channel: ReturnType<typeof supabase.channel> | null = null;
     let broadcastChannel: ReturnType<typeof supabase.channel> | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let fallbackPoller: ReturnType<typeof setInterval> | null = null;
+    let visibilityHandler: (() => void) | null = null;
     let reconnectAttempts = 0;
 
     const handleEquipmentChange = (payload: any) => {
@@ -245,37 +246,75 @@ export function useCadastrosCloud() {
           const merged = { ...s.equipments[idx], ...next };
           const arr = s.equipments.slice();
           arr[idx] = merged;
-          return { ...s, equipments: arr, lastSyncAt: Date.now() };
+          return { ...s, equipments: arr, lastSyncAt: Date.now(), lastPhysicalReadAt: Date.now() };
         });
       } else {
         scheduleReload();
       }
     };
 
+    // Após esta quantidade de tentativas sem sucesso, o indicador passa a
+    // "Dados podem estar atrasados" e entra a rede de segurança abaixo.
+    const MAX_RECONNECT_BEFORE_DEGRADED = 4;
+    // Teto de tentativas. Sem ele, um canal que responde CLOSED imediatamente
+    // (foi o caso do kill switch global) gera reinscrição em laço para sempre.
+    const MAX_RECONNECT_ATTEMPTS = 8;
+
+    // REDE DE SEGURANÇA — só existe enquanto o canal está DEGRADADO.
+    // Não é polling do caminho normal: com Realtime saudável ela nunca liga.
+    // Sem isto, canal morto = ZERO atualização até F5 — exatamente o que
+    // aconteceu quando o kill switch estava ativo e o poller foi removido.
+    let degradedTimer: ReturnType<typeof setInterval> | null = null;
+    const stopDegradedSafetyNet = () => {
+      if (degradedTimer) { clearInterval(degradedTimer); degradedTimer = null; }
+    };
+    const startDegradedSafetyNet = () => {
+      if (degradedTimer || cancelled) return;
+      degradedTimer = setInterval(() => {
+        if (cancelled) return;
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+        void refresh();
+      }, 30_000);
+    };
+
     const subscribePostgresChanges = (farmId: string) => {
       if (cancelled) return;
-      if (channel) { try { void supabase.removeChannel(channel); } catch { /* ignore */ } channel = null; }
-      const ch = supabase
-        .channel(`cadastros-${farmId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`)
+      if (channel) { try { void removeRealtimeChannel(channel); } catch { /* ignore */ } channel = null; }
+      const ch = getRealtimeChannel(`cadastros-${farmId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`)
         .on("postgres_changes", { event: "*", schema: "public", table: "plc_groups", filter: `farm_id=eq.${farmId}` }, scheduleReload)
         .on("postgres_changes", { event: "*", schema: "public", table: "equipments", filter: `farm_id=eq.${farmId}` }, handleEquipmentChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "sectors", filter: `farm_id=eq.${farmId}` }, scheduleReload)
         .subscribe((status) => {
-          if (cancelled) { try { void supabase.removeChannel(ch); } catch { /* ignore */ } return; }
+          if (cancelled) { try { void removeRealtimeChannel(ch); } catch { /* ignore */ } return; }
           const ok = status === "SUBSCRIBED";
-          setState((s) => (s.realtimeConnected === ok ? s : { ...s, realtimeConnected: ok }));
+          setState((s) => (s.realtimeConnected === ok && s.realtimeHealth === (ok ? "connected" : s.realtimeHealth)
+            ? s
+            : { ...s, realtimeConnected: ok,
+                realtimeHealth: ok ? "connected"
+                  : (reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED ? "degraded" : "reconnecting") }));
           if (ok) {
             reconnectAttempts = 0;
+            stopDegradedSafetyNet();   // canal vivo → nada de rede de segurança
             // Sincroniza estado pós-reconexão
             void refresh();
           } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR" || status === "CLOSED") {
             // Reconexão com backoff exponencial: 2s, 4s, 8s, 16s, máx 30s
             const delay = Math.min(2000 * Math.pow(2, reconnectAttempts), 30_000);
             reconnectAttempts += 1;
+            setState((s) => {
+              const h = reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED ? "degraded" : "reconnecting";
+              return s.realtimeHealth === h ? s : { ...s, realtimeHealth: h };
+            });
             if (import.meta.env.DEV) {
               console.warn(`[useCadastrosCloud] realtime ${status} — reconectando em ${delay}ms (tentativa ${reconnectAttempts})`);
             }
             void refresh();
+            if (reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED) startDegradedSafetyNet();
+            if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+              // Desiste de reinscrever em laço; a rede de segurança e o retorno
+              // de aba continuam atualizando a tela.
+              return;
+            }
             if (reconnectTimer) clearTimeout(reconnectTimer);
             reconnectTimer = setTimeout(() => {
               if (!cancelled) subscribePostgresChanges(farmId);
@@ -285,12 +324,12 @@ export function useCadastrosCloud() {
       channel = ch;
       // Race: se o cleanup rodou DURANTE o setup acima, ele capturou channel=null
       // e não removeu este canal. Remove agora para não vazar nem segurar slot Realtime.
-      if (cancelled) { try { void supabase.removeChannel(ch); } catch { /* ignore */ } channel = null; }
+      if (cancelled) { try { void removeRealtimeChannel(ch); } catch { /* ignore */ } channel = null; }
     };
 
     const boot = async () => {
       if (!user) {
-        setState({ loading: false, error: null, farmId: null, isAdmin: false, plcs: [], equipments: [], sectors: [], lastSyncAt: null, realtimeConnected: false });
+        setState({ loading: false, error: null, farmId: null, isAdmin: false, plcs: [], equipments: [], sectors: [], lastSyncAt: null, realtimeConnected: false, realtimeHealth: "reconnecting", lastPhysicalReadAt: null });
         return;
       }
       try {
@@ -332,7 +371,7 @@ export function useCadastrosCloud() {
         if (!farmId) {
           farmIdRef.current = null;
           if (!cancelled) {
-            setState({ loading: false, error: "no_default_farm", farmId: null, isAdmin: false, plcs: [], equipments: [], sectors: [], lastSyncAt: null, realtimeConnected: false });
+            setState({ loading: false, error: "no_default_farm", farmId: null, isAdmin: false, plcs: [], equipments: [], sectors: [], lastSyncAt: null, realtimeConnected: false, realtimeHealth: "reconnecting", lastPhysicalReadAt: null });
           }
           return;
         }
@@ -352,7 +391,7 @@ export function useCadastrosCloud() {
 
         const data = await loadAll(farmId);
         if (cancelled) return;
-        setState({ loading: false, error: null, farmId, isAdmin, ...data, lastSyncAt: Date.now(), realtimeConnected: false });
+        setState({ loading: false, error: null, farmId, isAdmin, ...data, lastSyncAt: Date.now(), realtimeConnected: false, realtimeHealth: "reconnecting", lastPhysicalReadAt: null });
 
         try {
           if (cancelled) return;
@@ -360,8 +399,9 @@ export function useCadastrosCloud() {
 
           // Canal Broadcast paralelo (WebSocket direto, sem passar pelo banco).
           if (cancelled) return;
-          const bch = supabase
-            .channel(`farm-${farmId}`)
+          // Também pelo bypass: este canal entrega estado de equipamento por
+          // broadcast (sem passar pelo banco) e alimenta os mesmos cards.
+          const bch = getRealtimeChannel(`farm-${farmId}`)
             .on("broadcast", { event: "equipment_state" }, (msg: any) => {
               if (cancelled) return;
               const p = msg?.payload;
@@ -375,21 +415,42 @@ export function useCadastrosCloud() {
                   last_outputs_state: p.outputs ?? arr[idx].last_outputs_state,
                   last_communication: p.timestamp ?? arr[idx].last_communication,
                 };
-                return { ...s, equipments: arr, lastSyncAt: Date.now() };
+                return { ...s, equipments: arr, lastSyncAt: Date.now(), lastPhysicalReadAt: Date.now() };
               });
             })
             .subscribe();
           broadcastChannel = bch;
-          if (cancelled) { try { void supabase.removeChannel(bch); } catch { /* ignore */ } broadcastChannel = null; }
+          if (cancelled) { try { void removeRealtimeChannel(bch); } catch { /* ignore */ } broadcastChannel = null; }
 
-          // Poller de segurança (fallback): refetch leve a cada 60s.
-          // Realtime (postgres_changes + broadcast) é o canal primário; este
-          // poll só existe p/ o caso do WebSocket cair em rede instável.
-          fallbackPoller = setInterval(() => {
+          // ── Safari/aba em segundo plano ───────────────────────────────────
+          // O WebSocket costuma ser suspenso quando a aba sai de foco; ao voltar,
+          // eventos perdidos NÃO chegam sozinhos — era isso que obrigava o F5.
+          // Ao retornar: reconcilia UMA vez a fazenda ativa e, se o canal não
+          // estiver conectado, reinscreve. Sem reload e sem polling.
+          let lastWake = 0;
+          visibilityHandler = () => {
             if (cancelled) return;
-            if (document.visibilityState !== "visible") return;
-            void refresh();
-          }, 60_000);
+            if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+            const now = Date.now();
+            if (now - lastWake < 1_000) return;   // coalescing: visibility + focus juntos
+            lastWake = now;
+            void refresh();                        // reconciliação única da fazenda ativa
+            const st = (channel as { state?: string } | null)?.state;
+            if (st !== "joined") {
+              reconnectAttempts = 0;              // volta da aba = nova chance
+              subscribePostgresChanges(farmId);   // sem duplicar canal
+            }
+          };
+          if (typeof document !== "undefined") {
+            document.addEventListener("visibilitychange", visibilityHandler);
+            window.addEventListener("focus", visibilityHandler);
+            window.addEventListener("online", visibilityHandler);
+          }
+
+          // POLLING DE REDE REMOVIDO. Antes havia um setInterval de 60s chamando
+          // refresh() — polling contínuo de API. A recuperação agora é por EVENTO:
+          // reconexão do canal (SUBSCRIBED), retorno da aba (visibilitychange/
+          // focus), volta da internet (online) e timeout de um comando específico.
         } catch (subErr) {
           console.warn("[useCadastrosCloud] realtime subscribe falhou:", subErr);
         }
@@ -397,27 +458,19 @@ export function useCadastrosCloud() {
         if (!cancelled) setState((s) => ({ ...s, loading: false, error: e instanceof Error ? e.message : String(e) }));
       }
     };
-    // Fazenda migrada: backend novo com Realtime publication=0 — sem um
-    // refresh por relógio os cards congelariam após a carga inicial.
-    let migratedPollTimer: ReturnType<typeof setInterval> | null = null;
-    const startMigratedPoll = (fid: string) => {
-      if (!isFarmMigrated(fid) || migratedPollTimer) return;
-      migratedPollTimer = setInterval(() => {
-        if (cancelled) return;
-        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
-        void refresh();
-      }, 15_000);
-    };
-    void (async () => { const fid = farmIdRef.current; if (fid) startMigratedPoll(fid); })();
 
     void boot();
     return () => {
       cancelled = true;
-      if (migratedPollTimer) clearInterval(migratedPollTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (fallbackPoller) clearInterval(fallbackPoller);
-      if (channel) { try { void supabase.removeChannel(channel); } catch { /* ignore */ } }
-      if (broadcastChannel) { try { void supabase.removeChannel(broadcastChannel); } catch { /* ignore */ } }
+      stopDegradedSafetyNet();
+      if (visibilityHandler && typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", visibilityHandler);
+        window.removeEventListener("focus", visibilityHandler);
+        window.removeEventListener("online", visibilityHandler);
+      }
+      if (channel) { try { void removeRealtimeChannel(channel); } catch { /* ignore */ } }
+      if (broadcastChannel) { try { void removeRealtimeChannel(broadcastChannel); } catch { /* ignore */ } }
       if (reloadDebounceRef.current) clearTimeout(reloadDebounceRef.current);
     };
   }, [user, loadAll, scheduleReload, refresh]);
@@ -471,7 +524,7 @@ export function useCadastrosCloud() {
       notifyRegistry.queuedOffline(`PLC "${payload.name}"`);
       return null;
     }
-    const { data, error } = await getSupabaseForFarm(farmIdRef.current).from("plc_groups").insert(payload).select("*").single();
+    const { data, error } = await supabase.from("plc_groups").insert(payload).select("*").single();
     if (error) { notifyRegistry.error("PLC", `falha ao criar — ${error.message}`); return null; }
     notifyRegistry.created("PLC", payload.name);
     return data as CloudPlc;
@@ -495,7 +548,7 @@ export function useCadastrosCloud() {
       notifyRegistry.queuedOffline(`PLC "${label}"`);
       return true;
     }
-    const { error } = await getSupabaseForFarm(farmIdRef.current).from("plc_groups").update(next).eq("id", id);
+    const { error } = await supabase.from("plc_groups").update(next).eq("id", id);
     if (error) { notifyRegistry.error("PLC", error.message); return false; }
     notifyRegistry.updated("PLC", label);
     return true;
@@ -514,7 +567,7 @@ export function useCadastrosCloud() {
       notifyRegistry.queuedOffline(`Exclusão de PLC "${label}"`);
       return true;
     }
-    const { error } = await getSupabaseForFarm(farmIdRef.current).from("plc_groups").delete().eq("id", id);
+    const { error } = await supabase.from("plc_groups").delete().eq("id", id);
     if (error) { notifyRegistry.error("PLC", error.message); return false; }
     notifyRegistry.removed("PLC", label);
     return true;
@@ -550,7 +603,7 @@ export function useCadastrosCloud() {
 
   const syncPlcOutputCount = async (plcGroupId: string, type: EquipTipo, outputCount?: number) => {
     const next = type === "bombeamento" ? (outputCount === 6 ? 6 : 1) : 1;
-    const { error } = await getSupabaseForFarm(farmIdRef.current).from("plc_groups").update({ output_count: next }).eq("id", plcGroupId);
+    const { error } = await supabase.from("plc_groups").update({ output_count: next }).eq("id", plcGroupId);
     if (error) throw new Error(error.message);
   };
 
@@ -603,7 +656,7 @@ export function useCadastrosCloud() {
       return null;
     }
     await syncPlcOutputCount(input.plc_group_id, input.type, input.output_count);
-    const { data, error } = await getSupabaseForFarm(farmIdRef.current).from("equipments").insert(payload as never).select("*").single();
+    const { data, error } = await supabase.from("equipments").insert(payload as never).select("*").single();
     if (error) { notifyRegistry.error("Equipamento", error.message); return null; }
     notifyRegistry.created("Equipamento", payload.name);
     return data as CloudEquipamento;
@@ -664,7 +717,7 @@ export function useCadastrosCloud() {
       return true;
     }
     await syncPlcOutputCount(newPlcId!, input.type ?? current.type, input.output_count);
-    const { error } = await getSupabaseForFarm(farmIdRef.current).from("equipments").update(patch as never).eq("id", id);
+    const { error } = await supabase.from("equipments").update(patch as never).eq("id", id);
     if (error) { notifyRegistry.error("Equipamento", error.message); return false; }
     notifyRegistry.updated("Equipamento", label);
     return true;
@@ -679,7 +732,7 @@ export function useCadastrosCloud() {
       notifyRegistry.queuedOffline(`Exclusão de equipamento "${label}"`);
       return true;
     }
-    const { error } = await getSupabaseForFarm(farmIdRef.current).from("equipments").delete().eq("id", id);
+    const { error } = await supabase.from("equipments").delete().eq("id", id);
     if (error) { notifyRegistry.error("Equipamento", error.message); return false; }
     notifyRegistry.removed("Equipamento", label);
     return true;
@@ -693,7 +746,7 @@ export function useCadastrosCloud() {
     const trimmed = name.trim();
     const payload = { farm_id: farmId, name: trimmed };
     if (!isOnline()) { enqueue({ table: "sectors", op: "insert", payload }); notifyRegistry.queuedOffline(`Setor "${trimmed}"`); return null; }
-    const { data, error } = await getSupabaseForFarm(farmIdRef.current).from("sectors").insert(payload).select("*").single();
+    const { data, error } = await supabase.from("sectors").insert(payload).select("*").single();
     if (error) { notifyRegistry.error("Setor", error.message); return null; }
     notifyRegistry.created("Setor", trimmed);
     return data as CloudSector;
@@ -704,7 +757,7 @@ export function useCadastrosCloud() {
     const trimmed = name.trim();
     const patch = { name: trimmed };
     if (!isOnline()) { enqueue({ table: "sectors", op: "update", payload: patch, matchId: id }); notifyRegistry.queuedOffline(`Setor "${trimmed}"`); return true; }
-    const { error } = await getSupabaseForFarm(farmIdRef.current).from("sectors").update(patch).eq("id", id);
+    const { error } = await supabase.from("sectors").update(patch).eq("id", id);
     if (error) { notifyRegistry.error("Setor", error.message); return false; }
     notifyRegistry.updated("Setor", trimmed);
     return true;
@@ -715,7 +768,7 @@ export function useCadastrosCloud() {
     const current = state.sectors.find((s) => s.id === id);
     const label = current?.name ?? id;
     if (!isOnline()) { enqueue({ table: "sectors", op: "delete", payload: {}, matchId: id }); notifyRegistry.queuedOffline(`Exclusão de setor "${label}"`); return true; }
-    const { error } = await getSupabaseForFarm(farmIdRef.current).from("sectors").delete().eq("id", id);
+    const { error } = await supabase.from("sectors").delete().eq("id", id);
     if (error) { notifyRegistry.error("Setor", error.message); return false; }
     notifyRegistry.removed("Setor", label);
     return true;

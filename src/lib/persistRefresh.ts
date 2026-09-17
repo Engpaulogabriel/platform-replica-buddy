@@ -2,7 +2,6 @@
 // (AES-GCM) com chave derivada do device fingerprint + TTL de 30 dias.
 // Copiar o localStorage para outra máquina não permite descriptografar,
 // pois o fingerprint (canvas/UA/hardware) será diferente.
-// v(fix login): TTL 7d → 30d — o usuário só reautentica após 30+ dias sem uso.
 import { getDeviceInfo } from "@/lib/deviceFingerprint";
 
 const STORAGE_KEY = "renov-persist-refresh";

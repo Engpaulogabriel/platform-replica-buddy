@@ -112,7 +112,7 @@ export default function AgentUpdateStatusPanel() {
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="flex items-center gap-2">
             <Activity className="w-5 h-5 text-primary" />
             Atualizações em andamento
@@ -178,10 +178,7 @@ export default function AgentUpdateStatusPanel() {
           {recent.length === 0 ? (
             <div className="text-sm text-muted-foreground py-4 text-center">Sem registros.</div>
           ) : (
-            <>
-            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-            <div className="overflow-x-auto -mx-2 px-2">
-            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
+            <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Fazenda</TableHead>
@@ -224,8 +221,6 @@ export default function AgentUpdateStatusPanel() {
                 })}
               </TableBody>
             </Table>
-            </div>
-            </>
           )}
         </CardContent>
       </Card>
@@ -238,10 +233,7 @@ export default function AgentUpdateStatusPanel() {
           {history.length === 0 ? (
             <div className="text-sm text-muted-foreground py-4 text-center">Nenhum histórico ainda.</div>
           ) : (
-            <>
-            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-            <div className="overflow-x-auto -mx-2 px-2">
-            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
+            <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Quando</TableHead>
@@ -276,8 +268,6 @@ export default function AgentUpdateStatusPanel() {
                 ))}
               </TableBody>
             </Table>
-            </div>
-            </>
           )}
         </CardContent>
       </Card>

@@ -1,0 +1,15 @@
+item,justificativa,dependencias_verificadas,evidencia_de_nao_uso,rollback,teste_necessario,aprovacao
+src/pages/Licencas.tsx,"Tela nao roteada que fixa projeto Supabase antigo","grep em App.tsx e em todo src/: nenhuma referencia","ausente de App.tsx; nenhum import em src/","git revert do arquivo","abrir a app e confirmar que nenhuma rota /licencas responde",PENDENTE
+src/pages/Index.tsx,"Landing sem rota","grep em App.tsx: ausente","ausente de App.tsx","git revert","confirmar qual componente atende a rota raiz",PENDENTE
+src/pages/HistoricoWhatsApp.tsx,"Sem rota direta","grep em App.tsx: ausente","ausente de App.tsx","git revert","verificar se e montada como aba do Setor Tecnico",PENDENTE
+src/pages/BridgeConsole.tsx,"Sem rota direta","importada por SuporteTecnico como aba (verificar)","ausente de App.tsx","git revert","abrir Setor Tecnico > Bridge e confirmar",PENDENTE
+src/pages/CadastroLogin.tsx,"Sem rota direta","referenciada como CadastroLoginInner em SuporteTecnico","ausente de App.tsx","git revert","abrir Setor Tecnico > Login",PENDENTE
+src/pages/Diagnostico.tsx,"Sem rota direta","usada por aba Diagnostico","ausente de App.tsx","git revert","abrir Setor Tecnico > Diagnostico",PENDENTE
+retencao: agent_logs,"Alta cardinalidade sem purga; encarece e alonga o restore","nenhuma rotina encontrada","grep purge/cleanup: 0 ocorrencias","re-inserir do arquivo frio","medir linhas e tamanho antes; validar consulta de diagnostico apos corte",PENDENTE
+retencao: automation_tick_logs,"Alta cardinalidade sem purga","nenhuma rotina encontrada","grep: 0 ocorrencias","re-inserir do arquivo frio","validar telas que leem tick",PENDENTE
+retencao: system_logs,"Sem purga","nenhuma rotina encontrada","grep: 0 ocorrencias","arquivo frio","verificar consumo em auditoria",PENDENTE
+retencao: farm_notifications,"Sem purga; cresce com alertas repetidos","nenhuma rotina encontrada","grep: 0 ocorrencias","arquivo frio","validar painel de notificacoes",PENDENTE
+retencao: whatsapp_message_log,"Sem purga","nenhuma rotina encontrada","grep: 0 ocorrencias","arquivo frio","confirmar exigencia legal de retencao antes de cortar",PENDENTE
+retencao: whatsapp_health_log,"Sem purga","nenhuma rotina encontrada","grep: 0 ocorrencias","arquivo frio","validar healthcheck",PENDENTE
+migrations com JWT literal (33 arquivos),"Fixam o projeto de origem; quebram na migracao","cron_invoke/Vault ja existe como substituto","anon key e publica: nao e vazamento, e acoplamento","manter migrations antigas intactas; substituir apenas no destino","rodar cron_invoke no destino e conferir net._http_response",PENDENTE
+conteudo de cron_job_backup,"Guarda comandos antigos com anon key embutida","tabela criada para rollback dos jobs","necessaria enquanto o rollback for possivel","N/A","restringir leitura a service_role; nao migrar conteudo",PENDENTE

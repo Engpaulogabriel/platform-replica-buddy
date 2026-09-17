@@ -10,16 +10,13 @@
 // Polling curto (3s) enquanto houver algum comando ativo; 10s ocioso.
 
 import { useEffect, useRef, useState, useCallback } from "react";
-// DUAL-BACKEND: pendências operacionais seguem o backend do farmId.
-import { getSupabaseForFarm } from "@/lib/supabaseRouter";
-import { isFarmMigrated } from "@/lib/migrationRegistry";
+import { supabase } from "@/integrations/supabase/client";
 
-// v3.25.21: 90s → 5min. O "Ligando…/Desligando…" é dirigido pelo STATUS do
-// comando (pending/sent). Enquanto o comando estiver nesses estados dentro da
-// janela, o card mostra o estado transitório; sai assim que o agente muda para
-// executed/timeout/cancelled (refletido em <1s pelo Realtime abaixo). 5min é só
-// o teto — combina com o fallback de erro do useDashboardEquipment.
-const PENDING_WINDOW_MS = 300_000;
+// FIX dashboard preso: 5min → 120s, alinhado ao PENDING_MAX_MS do
+// useDashboardEquipment. Status pending/sent NÃO é confirmação física: é apenas
+// o teto de tempo em que o card pode exibir a transição. Passados 120s, o card
+// volta ao último estado físico confirmado, sem depender deste hook.
+const PENDING_WINDOW_MS = 120_000;
 
 export interface PendingManualCommand {
   id: string;
@@ -39,7 +36,7 @@ export function usePendingManualCommands(farmId: string | null | undefined): Map
       return;
     }
     const since = new Date(Date.now() - PENDING_WINDOW_MS).toISOString();
-    const { data, error } = await getSupabaseForFarm(farmId)
+    const { data, error } = await supabase
       .from("commands")
       .select("id,equipment_id,created_at,status")
       .eq("farm_id", farmId)
@@ -82,15 +79,10 @@ export function usePendingManualCommands(farmId: string | null | undefined): Map
   useEffect(() => {
     if (!farmId) return;
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const loop = async () => {
-      if (cancelled) return;
-      await refresh();
-      if (cancelled) return;
-      const delay = activeRef.current ? 3_000 : 10_000;
-      timer = setTimeout(loop, delay);
-    };
-    void loop();
+    // Sem polling: uma leitura inicial e, daí em diante, só Realtime.
+    // A reconciliação pontual acontece no SUBSCRIBED (reconexão) e no timeout
+    // de 120s tratado pelo useDashboardEquipment.
+    void refresh();
 
     // Realtime na tabela `commands`: reflete a mudança de status do comando
     // (pending/sent → executed/cancelled/timeout) em <1s, liberando o
@@ -107,26 +99,23 @@ export function usePendingManualCommands(farmId: string | null | undefined): Map
         void refresh();
       }, 200);
     };
-    // Fazenda migrada: Realtime do backend novo está com publication=0, então
-    // o canal conecta mas não entrega evento. Sem isto a pendência congelaria.
-    const migratedPoll: ReturnType<typeof setInterval> | null = isFarmMigrated(farmId)
-      ? setInterval(() => { void refresh(); }, 10_000)
-      : null;
-    const channel = getSupabaseForFarm(farmId)
+    const channel = supabase
       .channel(`pending-manual-cmds-${farmId}-${Date.now().toString(36)}`)
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "commands", filter: `farm_id=eq.${farmId}` },
         onCommandsChange,
       )
-      .subscribe();
+      .subscribe((status) => {
+        // Reconexão do Realtime → reconcilia uma vez os comandos desta fazenda,
+        // para não ficar com pendência fantasma vinda de antes da queda.
+        if (status === "SUBSCRIBED") void refresh();
+      });
 
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
       if (coalesce) clearTimeout(coalesce);
-      try { void getSupabaseForFarm(farmId).removeChannel(channel); } catch { /* ignore */ }
-      if (migratedPoll) clearInterval(migratedPoll);
+      try { void supabase.removeChannel(channel); } catch { /* ignore */ }
     };
   }, [farmId, refresh]);
 

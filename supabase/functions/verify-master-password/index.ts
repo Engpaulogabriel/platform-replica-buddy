@@ -1,54 +1,43 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-
+// Verifies master password server-side; keeps secret out of client bundle.
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-client-info",
 };
 
-const json = (body: unknown, status: number) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-
-// Compara em tempo constante (evita timing side-channel na descoberta da senha).
-function constantTimeEqual(a: string, b: string): boolean {
-  const ea = new TextEncoder().encode(a);
-  const eb = new TextEncoder().encode(b);
-  let diff = ea.length ^ eb.length;
-  const len = Math.max(ea.length, eb.length);
-  for (let i = 0; i < len; i++) {
-    diff |= (ea[i] ?? 0) ^ (eb[i] ?? 0);
-  }
+function safeEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
 
-serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
-  }
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   if (req.method !== "POST") {
-    return json({ valid: false, error: "method_not_allowed" }, 405);
+    return new Response(JSON.stringify({ error: "method_not_allowed" }), {
+      status: 405,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
-
-  const masterPassword = Deno.env.get("MASTER_PASSWORD");
-  if (!masterPassword) {
-    // Secret ausente no projeto — não é senha errada, é configuração.
-    return json({ valid: false, error: "not_configured" }, 503);
-  }
-
-  let password = "";
   try {
-    const body = await req.json();
-    password = typeof body?.password === "string" ? body.password : "";
-  } catch (_) {
-    return json({ valid: false, error: "bad_request" }, 400);
+    const { password } = await req.json().catch(() => ({}));
+    const expected = Deno.env.get("MASTER_PASSWORD") ?? "";
+    if (!expected) {
+      return new Response(JSON.stringify({ valid: false, error: "not_configured" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    const valid = typeof password === "string" && password.length > 0 && safeEquals(password, expected);
+    return new Response(JSON.stringify({ valid }), {
+      status: 200,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  } catch {
+    return new Response(JSON.stringify({ valid: false }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
-
-  const valid = constantTimeEqual(password.trim(), masterPassword.trim());
-
-  // 200 tanto para válido quanto inválido — o cliente lê `data.valid`.
-  // Status !=2xx fica reservado a erros reais (not_configured/bad_request).
-  return json({ valid }, 200);
 });

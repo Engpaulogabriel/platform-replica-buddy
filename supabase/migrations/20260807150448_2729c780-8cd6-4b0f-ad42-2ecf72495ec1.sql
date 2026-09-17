@@ -1,0 +1,2 @@
+ALTER TABLE public.whatsapp_operators DROP CONSTRAINT IF EXISTS whatsapp_operators_phone_key;
+CREATE UNIQUE INDEX IF NOT EXISTS whatsapp_operators_farm_phone_key ON public.whatsapp_operators (farm_id, phone);

@@ -17,12 +17,6 @@
 // para várias saídas no mesmo frame.
 
 import { supabase } from "@/integrations/supabase/client";
-// MIGRAÇÃO DUAL-BACKEND: fluxos operacionais resolvem o cliente UMA VEZ, a
-// partir do farmId da própria operação. O singleton acima segue sendo o
-// backend ANTIGO e é usado só no que é escopo de USUÁRIO (auth/profiles).
-// A SEMÂNTICA DO COMANDO NÃO MUDA: continua INSERT direto em public.commands,
-// exatamente como a produção atual faz. Muda apenas o DESTINO.
-import { assertOperationalClient, type RenovSupabase } from "@/lib/supabaseRouter";
 import { buildLoRaFrame, buildDirectToServer, buildViaRepetidorTx } from "@/lib/protocol";
 import { buildPositionalPayload, buildCombinedPayload, loadRfRouting } from "@/lib/rfRouting";
 // notifyWhatsAppImmediate removido: notificações de equipamento agora aguardam
@@ -52,9 +46,9 @@ interface PlcGroupRow {
   output_count?: number | null;
 }
 
-async function resolveCommandUserId(provided?: string | null, client?: RenovSupabase): Promise<string> {
+async function resolveCommandUserId(provided?: string | null): Promise<string> {
   if (provided) return provided;
-  const { data, error } = await (client ?? supabase).auth.getUser();
+  const { data, error } = await supabase.auth.getUser();
   if (error || !data.user?.id) {
     throw new Error("Usuário logado não identificado para registrar o comando.");
   }
@@ -81,7 +75,7 @@ async function resolveCommandUserLabel(userId: string, provided?: string | null)
  * preservando o estado das demais saídas. Para PLCs com 1 saída, mantém o
  * comportamento posicional (1 dígito).
  */
-async function resolvePlcContext(client: RenovSupabase, equipment: {
+async function resolvePlcContext(equipment: {
   hw_id: string;
   saida: number | null;
   plc_group_id: string | null;
@@ -91,7 +85,7 @@ async function resolvePlcContext(client: RenovSupabase, equipment: {
   // saida é a posição da saída, não o tamanho do payload.
   let total = 1;
   if (equipment.plc_group_id) {
-    const { data: plc } = await client
+    const { data: plc } = await supabase
       .from("plc_groups")
       .select("hw_id, output_count")
       .eq("id", equipment.plc_group_id)
@@ -128,17 +122,12 @@ function buildOutputPayload(
  * desejado para a saída do equipamento.
  */
 export async function enqueueManualPumpCommand(args: {
-  /** Fazenda dona da operação. Decide o backend — obrigatório. */
-  farmId: string;
   equipmentId: string;
   turnOn: boolean;
   userId?: string | null;
   userName?: string | null;
 }): Promise<EnqueueManualResult> {
-  // Cliente resolvido UMA ÚNICA VEZ e capturado por todo este fluxo:
-  // trocar de fazenda na UI depois daqui NÃO muda o destino desta operação.
-  const client: RenovSupabase = assertOperationalClient(args.farmId);
-  const commandUserId = await resolveCommandUserId(args.userId, client);
+  const commandUserId = await resolveCommandUserId(args.userId);
   const displayName = await resolveCommandUserLabel(commandUserId, args.userName);
   // Formato "<Nome>|user:<uuid>" é interpretado pelo drain do
   // whatsapp-automation-notify para excluir o autor da notificação
@@ -146,17 +135,13 @@ export async function enqueueManualPumpCommand(args: {
   const whoLabel = `${displayName}|user:${commandUserId}`;
 
   // 1. Carrega equipamento
-  const { data: eq, error: eqErr } = await client
+  const { data: eq, error: eqErr } = await supabase
     .from("equipments")
     .select("id, hw_id, saida, farm_id, plc_group_id, last_outputs_state, type, last_actuation_origin, command_blocked_until")
     .eq("id", args.equipmentId)
     .maybeSingle();
   if (eqErr) throw new Error(eqErr.message);
   if (!eq) throw new Error("Equipamento não encontrado");
-  // FAIL-CLOSED: o equipamento carregado precisa ser da fazenda da operação.
-  if ((eq as { farm_id: string }).farm_id !== args.farmId) {
-    throw new Error("Equipamento não pertence à fazenda da operação — comando recusado.");
-  }
 
   const equipment = eq as EquipmentRow & {
     last_actuation_origin: string | null;
@@ -202,7 +187,7 @@ export async function enqueueManualPumpCommand(args: {
   }
 
   // 2. Resolve TSNN e total de saídas (PLC multi-saída usa payload combinado)
-  const { tsnn, total } = await resolvePlcContext(client, equipment);
+  const { tsnn, total } = await resolvePlcContext(equipment);
 
   // 3. Payload: combinado quando PLC tem >1 saída (preserva estado das outras),
   //    posicional quando saída única.
@@ -224,7 +209,7 @@ export async function enqueueManualPumpCommand(args: {
   // Sem isso, um polling "desligado" já enfileirado pode sair logo após o
   // comando manual de ligar e reverter a bomba.
   const cancelQueuedAt = new Date().toISOString();
-  const { error: cancelPollingErr } = await client
+  const { error: cancelPollingErr } = await supabase
     .from("commands")
     .update({
       status: "cancelled",
@@ -242,7 +227,7 @@ export async function enqueueManualPumpCommand(args: {
   // Comando manual só pode virar falha depois da janela física completa de
   // 120s; o timeout curto de 8/10s é apenas comunicação/RF, não desobediência.
   const clientEventId = crypto.randomUUID();
-  const { data: inserted, error: insErr } = await client
+  const { data: inserted, error: insErr } = await supabase
     .from("commands")
     .insert({
       farm_id: equipment.farm_id,
@@ -262,7 +247,7 @@ export async function enqueueManualPumpCommand(args: {
   if (insErr) throw new Error(insErr.message);
 
   const insertedCommandId = (inserted as { id: string }).id;
-  const { error: syncPendingErr } = await client
+  const { error: syncPendingErr } = await supabase
     .from("equipments")
     .update({
       pending_command_id: insertedCommandId,
@@ -294,31 +279,22 @@ export async function enqueueManualPumpCommand(args: {
 // envia DESLIGAR (0) com priority=0 (acima do manual=1). Usado pelo botão
 // "Reset" para cortar imediatamente um ciclo "Ligando" travado.
 export async function enqueueResetPumpCommand(args: {
-  /** Fazenda dona da operação. Decide o backend — obrigatório. */
-  farmId: string;
   equipmentId: string;
   userId?: string | null;
   userName?: string | null;
 }): Promise<EnqueueManualResult> {
-  // Cliente resolvido UMA ÚNICA VEZ e capturado por todo este fluxo:
-  // trocar de fazenda na UI depois daqui NÃO muda o destino desta operação.
-  const client: RenovSupabase = assertOperationalClient(args.farmId);
-  const commandUserId = await resolveCommandUserId(args.userId, client);
+  const commandUserId = await resolveCommandUserId(args.userId);
   const displayName = await resolveCommandUserLabel(commandUserId, args.userName);
   const whoLabel = `${displayName}|user:${commandUserId}`;
 
   // 1. Carrega equipamento (sem validar origem/bloqueio — reset é incondicional)
-  const { data: eq, error: eqErr } = await client
+  const { data: eq, error: eqErr } = await supabase
     .from("equipments")
     .select("id, hw_id, saida, farm_id, plc_group_id, type, last_outputs_state")
     .eq("id", args.equipmentId)
     .maybeSingle();
   if (eqErr) throw new Error(eqErr.message);
   if (!eq) throw new Error("Equipamento não encontrado");
-  // FAIL-CLOSED: o equipamento carregado precisa ser da fazenda da operação.
-  if ((eq as { farm_id: string }).farm_id !== args.farmId) {
-    throw new Error("Equipamento não pertence à fazenda da operação — comando recusado.");
-  }
 
   const equipment = eq as EquipmentRow & { last_outputs_state: string | null };
   if (equipment.type === "nivel" || equipment.type === "repetidor") {
@@ -328,7 +304,7 @@ export async function enqueueResetPumpCommand(args: {
   const saidaIdx = Math.max(1, Math.min(6, equipment.saida ?? 1));
 
   // 2. Resolve TSNN + total de saídas (PLC multi-saída usa payload combinado)
-  const { tsnn, total } = await resolvePlcContext(client, equipment);
+  const { tsnn, total } = await resolvePlcContext(equipment);
 
   // 3. Payload OFF preservando estado das demais saídas (ou 1 dígito se PLC=1).
   const newPayload = buildOutputPayload(equipment.last_outputs_state, saidaIdx, false, total);
@@ -341,7 +317,7 @@ export async function enqueueResetPumpCommand(args: {
 
   // 4. O enfileiramento oficial do RESET agora acontece no backend para garantir
   // o TX 0 mesmo sem depender da tela aberta.
-  const { data: insertedCommandId, error: rpcErr } = await client.rpc(
+  const { data: insertedCommandId, error: rpcErr } = await supabase.rpc(
     "enqueue_reset_pump_command" as never,
     {
       _farm_id: equipment.farm_id,
@@ -356,7 +332,7 @@ export async function enqueueResetPumpCommand(args: {
   // A RPC oficial grava o comando, mas não sabe o nome do usuário autenticado
   // no frontend. Atualiza o equipamento com o mesmo padrão usado no comando
   // manual para que notificações mostrem o nome real do usuário web.
-  await client
+  await supabase
     .from("equipments")
     .update({
       last_changed_by: whoLabel,
@@ -386,28 +362,19 @@ export interface EnqueueStatusReadResult {
 }
 
 export async function enqueueManualStatusRead(args: {
-  /** Fazenda dona da operação. Decide o backend — obrigatório. */
-  farmId: string;
   equipmentId: string;
   desiredRunning?: boolean;
   userId?: string | null;
 }): Promise<EnqueueStatusReadResult> {
-  // Cliente resolvido UMA ÚNICA VEZ e capturado por todo este fluxo:
-  // trocar de fazenda na UI depois daqui NÃO muda o destino desta operação.
-  const client: RenovSupabase = assertOperationalClient(args.farmId);
-  const commandUserId = await resolveCommandUserId(args.userId, client);
+  const commandUserId = await resolveCommandUserId(args.userId);
 
-  const { data: eq, error: eqErr } = await client
+  const { data: eq, error: eqErr } = await supabase
     .from("equipments")
     .select("id, hw_id, saida, farm_id, plc_group_id, last_outputs_state, type")
     .eq("id", args.equipmentId)
     .maybeSingle();
   if (eqErr) throw new Error(eqErr.message);
   if (!eq) throw new Error("Equipamento não encontrado");
-  // FAIL-CLOSED: o equipamento carregado precisa ser da fazenda da operação.
-  if ((eq as { farm_id: string }).farm_id !== args.farmId) {
-    throw new Error("Equipamento não pertence à fazenda da operação — comando recusado.");
-  }
 
   const equipment = eq as EquipmentRow;
   if (equipment.type === "nivel" || equipment.type === "repetidor") {
@@ -415,7 +382,7 @@ export async function enqueueManualStatusRead(args: {
   }
 
   // Resolve TSNN + total saídas (igual ao manual)
-  const { tsnn, total } = await resolvePlcContext(client, equipment);
+  const { tsnn, total } = await resolvePlcContext(equipment);
 
   const saidaIdx = Math.max(1, Math.min(6, equipment.saida ?? 1));
   const desiredRunning = typeof args.desiredRunning === "boolean"
@@ -435,7 +402,7 @@ export async function enqueueManualStatusRead(args: {
 
   // Insere como POLLING priority=1 — não dispara trigger de pending_command
   // (que é exclusivo de type=manual), apenas fura a fila.
-  const { data: inserted, error: insErr } = await client
+  const { data: inserted, error: insErr } = await supabase
     .from("commands")
     .insert({
       farm_id: equipment.farm_id,
@@ -480,34 +447,25 @@ export async function enqueueManualStatusRead(args: {
 //    e dispara apply_level_telemetry no Supabase, atualizando o card.
 // ─────────────────────────────────────────────────────────────────────────────
 export async function enqueueManualLevelRead(args: {
-  /** Fazenda dona da operação. Decide o backend — obrigatório. */
-  farmId: string;
   equipmentId: string;
   userId?: string | null;
 }): Promise<EnqueueStatusReadResult> {
-  // Cliente resolvido UMA ÚNICA VEZ e capturado por todo este fluxo:
-  // trocar de fazenda na UI depois daqui NÃO muda o destino desta operação.
-  const client: RenovSupabase = assertOperationalClient(args.farmId);
-  const commandUserId = await resolveCommandUserId(args.userId, client);
+  const commandUserId = await resolveCommandUserId(args.userId);
 
-  const { data: eq, error: eqErr } = await client
+  const { data: eq, error: eqErr } = await supabase
     .from("equipments")
     .select("id, hw_id, saida, farm_id, plc_group_id, last_outputs_state, type")
     .eq("id", args.equipmentId)
     .maybeSingle();
   if (eqErr) throw new Error(eqErr.message);
   if (!eq) throw new Error("Equipamento não encontrado");
-  // FAIL-CLOSED: o equipamento carregado precisa ser da fazenda da operação.
-  if ((eq as { farm_id: string }).farm_id !== args.farmId) {
-    throw new Error("Equipamento não pertence à fazenda da operação — comando recusado.");
-  }
 
   const equipment = eq as EquipmentRow;
   if (equipment.type !== "nivel") {
     throw new Error(`Equipamento do tipo '${equipment.type}' não é um sensor de nível.`);
   }
 
-  const { tsnn, total } = await resolvePlcContext(client, equipment);
+  const { tsnn, total } = await resolvePlcContext(equipment);
 
   const saidaIdx = Math.max(1, Math.min(6, equipment.saida ?? 1));
   // Payload OFF da saída do sensor — não controla relé, só força resposta de
@@ -521,7 +479,7 @@ export async function enqueueManualLevelRead(args: {
     ? buildViaRepetidorTx(routing.radio, lora)
     : buildDirectToServer(routing.radio, lora);
 
-  const { data: inserted, error: insErr } = await client
+  const { data: inserted, error: insErr } = await supabase
     .from("commands")
     .insert({
       farm_id: equipment.farm_id,
@@ -530,7 +488,11 @@ export async function enqueueManualLevelRead(args: {
       type: "polling",
       priority: 1,
       frame,
-      timeout_ms: 8000,
+      // 35s para dar tempo dos 3 envios (0s/15s/30s) + folga para RX
+      timeout_ms: 35000,
+      // Mesmo mecanismo de reforço dos poços: agente reenvia 3x e cancela
+      // os reenvios assim que chegar RX casando o TSNN.
+      reinforcement: true,
       created_by: commandUserId,
       source_device: "platform-scheduler",
       error_message: typeof navigator !== "undefined"

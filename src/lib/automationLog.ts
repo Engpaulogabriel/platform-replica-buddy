@@ -14,7 +14,9 @@ import type {
   Database,
 } from "@/integrations/supabase/types";
 
-export type AutomationOrigin = "Automático" | "Remoto" | "Manual" | "Sistema" | "WhatsApp";
+/** "Automático" = automação programada (ex.: desligamento 17h); "Modo Automático" =
+ *  motor de Modo Automático em nuvem (programação ON/OFF por poço). São origens distintas. */
+export type AutomationOrigin = "Automático" | "Modo Automático" | "Remoto" | "Manual" | "Sistema" | "WhatsApp";
 
 export type AutomationAction =
   | "Ligada"
@@ -36,6 +38,9 @@ export interface AutomationLogEntry {
   time: string;
   /** ISO timestamp para ordenação confiável */
   ts: string;
+  /** true quando o evento veio de uma automação PROGRAMADA (regra com horário).
+   *  Usado APENAS pelo mini relatório do card. */
+  scheduled?: boolean;
   /** UUID do equipamento (preferencial). Logs antigos podem não ter. */
   equipmentId?: string;
   /** Nome amigável — usado no relatório principal e como fallback de cruzamento */
@@ -45,10 +50,31 @@ export interface AutomationLogEntry {
    *  Atualização OTA) e leituras de status (Leitura OK, ruidosa, oculta por padrão). */
   action: AutomationAction;
   origin: AutomationOrigin;
+  /** `source_device` cru da linha do banco. Usado SÓ pela camada de
+   *  apresentação do Relatório (reportOrigin) para separar "Modo Automático"
+   *  (cloud-automation) de "Automação" genérica. Não classifica nada. */
+  sourceDevice?: string | null;
   user: string;
   /** Resultado do comando. Comandos "Manual" (acionamento físico no equipamento)
    *  nunca falham. Por padrão, sucesso. */
   result?: "success" | "fail";
+  /** Método de confirmação FÍSICA (ex.: "Confirmado por telemetria RF").
+   *  Detalhe técnico — vai em tooltip, NUNCA na coluna Usuário. */
+  confirmationMethod?: string | null;
+  /** HH:mm:ss — a tabela desktop precisa dos segundos para distinguir
+   *  mudança física rápida de duplicidade. */
+  timeSec?: string;
+  /** Detalhe técnico, visível só para platform_admin/owner. */
+  tech?: {
+    id: string;
+    occurredAtBrt: string;
+    origin: string;
+    confirmationMethod: string | null;
+    agentDeclaredOrigin: string | null;
+    authorshipSource: string | null;
+    authorshipConfidence: string | null;
+    attributionUnavailable: boolean;
+  };
   /** true = já confirmado pela nuvem (insert OK ou veio via Realtime). */
   synced?: boolean;
 }
@@ -78,6 +104,9 @@ const formatDate = (d: Date) =>
 
 const formatTime = (d: Date) =>
   `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
+const formatTimeSec = (d: Date) =>
+  `${formatTime(d)}:${String(d.getSeconds()).padStart(2, "0")}`;
 
 export const useAutomationLog = create<LogState>()(
   persist(
@@ -191,66 +220,28 @@ export function logEvent(entry: Omit<AutomationLogEntry, "id" | "date" | "time" 
   useAutomationLog.getState().add(entry);
 }
 
-/** "Manual" no relatório = acionamento físico (Local) no equipamento. */
-export const isLocalOrigin = (origin: AutomationOrigin) => origin === "Manual";
-
-/** Formata data+hora curta para o mini-relatório: "DD/MM HH:mm" */
-const shortTime = (e: AutomationLogEntry) => {
-  const [dd, mm] = e.date.split("/");
-  return `${dd}/${mm} ${e.time}`;
+/** A coluna `noise_reason` vem da Fase B. Enquanto a migration não estiver
+ *  aplicada, o Postgres devolve 42703 — e o relatório segue sem o filtro em
+ *  vez de quebrar. */
+export const isMissingNoiseColumn = (e: unknown): boolean => {
+  const err = e as { code?: string; message?: string } | null;
+  return err?.code === "42703" || /noise_reason/i.test(err?.message ?? "");
 };
 
-/** Filtra entradas por equipamento. Cruza por equipmentId quando presente,
- *  cai no nome para entradas antigas. */
-const matchEquipment = (e: AutomationLogEntry, equipmentId: string, pumpName: string) =>
-  e.equipmentId ? e.equipmentId === equipmentId : e.pump === pumpName;
+/** Rótulos técnicos que não podem ocupar a coluna Usuário nem a Origem do
+ *  Relatório oficial. Espelha a denylist do servidor. */
+const ROTULO_PROIBIDO_OFICIAL =
+  /^(sistema|system|telemetria(\s*rf)?|acionamento\s*rf|rf|bridge|serial(-bridge)?|comando\s*remoto|remoto|remote|agente?|agent|cloud|unknown|n\/a|desconhecido|origem em apura\u00e7\u00e3o|autoria hist\u00f3rica em revis\u00e3o)$/i;
 
-/** Só comandos reais entram no mini-relatório do card. Leitura OK / Sem
- *  resposta / eventos de sistema (OTA, reinício) são ruído e ficam de fora. */
-const isCommandAction = (a: AutomationAction) => a === "Ligada" || a === "Desligada";
+/** Higieniza um rótulo para a tela/CSV/PDF oficiais. Vazio > texto técnico. */
+export const sanitizeOfficialLabel = (v?: string | null): string => {
+  const t = (v ?? "").trim();
+  if (!t) return "";
+  if (ROTULO_PROIBIDO_OFICIAL.test(t)) return "";
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(t)) return "";   // UUID cru
+  return t;
+};
 
-export function buildCommandHistory(
-  equipmentId: string,
-  pumpName: string,
-  entries: AutomationLogEntry[],
-  limit = 3,
-): PumpCommandLog[] {
-  return entries
-    .filter((e) => isCommandAction(e.action) && matchEquipment(e, equipmentId, pumpName))
-    .slice(0, limit)
-    .map((e) => {
-      const isLocal = isLocalOrigin(e.origin);
-      const verb = e.action === "Ligada" ? "Ligar" : "Desligar";
-      const sourceLabel = isLocal ? "local" : "remoto";
-      const result: "success" | "fail" = isLocal ? "success" : (e.result ?? "success");
-      return {
-        action: `${verb} ${sourceLabel}`,
-        time: shortTime(e),
-        result,
-      };
-    });
-}
-
-export function buildStatusHistory(
-  equipmentId: string,
-  pumpName: string,
-  entries: AutomationLogEntry[],
-  limit = 3,
-): PumpStatusLog[] {
-  return entries
-    .filter(
-      (e) =>
-        isCommandAction(e.action) &&
-        matchEquipment(e, equipmentId, pumpName) &&
-        (e.result ?? "success") === "success",
-    )
-    .slice(0, limit)
-    .map((e) => ({
-      status: e.action === "Ligada" ? "Ligado" : "Desligado",
-      source: isLocalOrigin(e.origin) ? "local" : "remoto",
-      time: shortTime(e),
-    }));
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sincronização com o backend
@@ -270,7 +261,7 @@ let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 const originToDb = (o: AutomationOrigin): DbOrigin =>
   o === "Manual" ? "local"
-  : o === "Automático" ? "auto"
+  : o === "Automático" || o === "Modo Automático" ? "auto"
   : o === "Sistema" ? "system"
   : "remote";
 
@@ -285,8 +276,46 @@ const originFromDb = (o: DbOrigin): AutomationOrigin =>
 const actionToDb = (a: AutomationAction): DbAction =>
   a === "Ligada" ? "turn_on" : "turn_off";
 
+/** Texto único para evento remoto confirmado sem autoria humana identificada. */
+export const AUTHORSHIP_UNDER_REVIEW = "Autoria histórica em revisão";
+export const AUTHORSHIP_UNDER_REVIEW_TOOLTIP =
+  "Comando remoto confirmado. O histórico legado não preservou identidade suficiente para "
+  + "atribuição automática. O evento está na fila de revisão auditável.";
+
+/** Rótulos que descrevem o MÉTODO DE CONFIRMAÇÃO FÍSICA, não um ator humano.
+ *  "Telemetria RF" é como o servidor soube que a bomba mudou — nunca quem mandou.
+ *  Nenhum destes pode aparecer na coluna Usuário. */
+const TECHNICAL_ACTOR_PATTERNS = [
+  "telemetria rf", "telemetria", "rf", "agent", "agente", "serial", "serial-bridge",
+  "bridge", "system", "sistema", "cloud", "auto-trigger",
+  // rótulos que descrevem o CANAL/ORIGEM, não a pessoa
+  "comando remoto", "comando", "remoto", "remote", "unknown", "desconhecido", "n/a", "na",
+];
+
+/** true quando o texto é método técnico e não autoria humana. */
+export const isTechnicalActorLabel = (label?: string | null): boolean => {
+  const s = String(label ?? "").trim().toLowerCase();
+  if (!s) return false;
+  return TECHNICAL_ACTOR_PATTERNS.some((p) => s === p || s.startsWith(`${p} `) || s.startsWith(`${p}-`));
+};
+
+/** Método de confirmação física, para tooltip/detalhe — nunca para a coluna Usuário. */
+export const resolveConfirmationMethod = (r: DbRow): string | null => {
+  const label = (r as DbRow & { actor_label?: string | null }).actor_label;
+  if (isTechnicalActorLabel(label)) {
+    if (String(label).trim().toLowerCase().startsWith("telemetria")) return "Confirmado por telemetria RF";
+    return `Confirmado por ${String(label).trim()}`;
+  }
+  const src = (r.source_device ?? "").toLowerCase();
+  if (src === "serial-bridge") return "Confirmado por telemetria RF";
+  if (src === "auto-trigger") return "Confirmado por telemetria RF";
+  return null;
+};
+
+/** actor_label HUMANO. Rótulo técnico é descartado aqui, não na renderização. */
 const getActorLabel = (r: DbRow): string | null => {
   const actorLabel = (r as DbRow & { actor_label?: string | null }).actor_label;
+  if (isTechnicalActorLabel(actorLabel)) return null;
   return actorLabel && actorLabel.trim() ? actorLabel.trim() : null;
 };
 
@@ -326,8 +355,14 @@ const resolveUser = (r: DbRow): string => {
     return "Automação";
   }
   if (src === "agent-restart" || src === "ota-update") return "Agente";
+
+  // FASE B: não existe mais rótulo provisório. Um remoto sem autoria humana não
+  // chega ao relatório oficial — o guarda server-side o desvia para a fila
+  // administrativa. Se aparecer aqui, devolvemos vazio em vez de inventar texto.
+  if (r.origin === "remote") return "";
+
   if (r.origin === "local") return "Local (painel)";
-  return "Sistema";
+  return "";
 };
 
 /** Classifica a linha do banco em uma das ações apresentadas no Relatório.
@@ -356,11 +391,11 @@ const classifyAction = (r: DbRow): { action: AutomationAction; origin: Automatio
     return { action: "Equipamento religado", origin: "Sistema" };
   }
 
-  // Leituras periódicas — por AÇÃO (status_read) OU por ORIGEM (reading).
-  // BUG corrigido: linhas origin='reading' com action turn_on/turn_off são
-  // OBSERVAÇÕES de estado (o agente registrando que a bomba está ligada/desligada),
-  // NÃO comandos. Antes caíam no ramo de comando → originFromDb('reading')='Remoto'
-  // → apareciam no relatório como comando "Remoto" pelo actor_label 'Acionamento Local'.
+  // Leituras periódicas. A partir de 20260814200000 a FONTE garante que
+  // observação de telemetria nunca chega como turn_on/turn_off: o trigger
+  // rebaixa para status_read + noise_reason. O ramo `origin === 'reading'`
+  // continua aqui só para o histórico anterior à limpeza — não é mais o
+  // remendo visual que mascarava o defeito da fonte.
   if (r.action === "status_read" || r.origin === "reading") {
     if (r.result === "timeout" || r.result === "fail") {
       return { action: "Sem resposta", origin: "Sistema" };
@@ -373,6 +408,11 @@ const classifyAction = (r: DbRow): { action: AutomationAction; origin: Automatio
   // Origem WhatsApp: detectada via source_device ou details.tipo_evento
   if (src.startsWith("whatsapp") || tipo === "whatsapp") {
     return { action: isOff ? "Desligada" : "Ligada", origin: "WhatsApp" };
+  }
+  // Modo Automático (motor em nuvem) é origem própria, distinta da automação programada.
+  const authorship = (r.details as { authorship_source?: string } | null)?.authorship_source;
+  if (r.origin === "auto" && (src === "cloud-automation" || authorship === "cloud_automation")) {
+    return { action: isOff ? "Desligada" : "Ligada", origin: "Modo Automático" };
   }
   return { action: isOff ? "Desligada" : "Ligada", origin: originFromDb(r.origin) };
 };
@@ -391,11 +431,26 @@ const rowToEntry = (r: DbRow): AutomationLogEntry => {
     time: formatTime(d),
     ts: d.toISOString(),
     equipmentId: r.equipment_id ?? undefined,
+    scheduled: (r.details as Record<string, unknown> | null)?.scheduled_shutdown === true
+            || (r.details as Record<string, unknown> | null)?.scheduled_shutdown === "true",
     pump: r.equipment_name,
     action,
     origin,
+    sourceDevice: r.source_device ?? null,
     user: resolveUser(r),
     result: (["fail", "failed", "timeout", "error"].includes(String(r.result)) ? "fail" : "success"),
+    confirmationMethod: resolveConfirmationMethod(r),
+    timeSec: formatTimeSec(d),
+    tech: {
+      id: String(r.id),
+      occurredAtBrt: d.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }),
+      origin: String(r.origin ?? ""),
+      confirmationMethod: resolveConfirmationMethod(r),
+      agentDeclaredOrigin: ((r.details as any)?.origin ?? null),
+      authorshipSource: ((r.details as any)?.authorship_source ?? null),
+      authorshipConfidence: ((r.details as any)?.authorship_confidence ?? null),
+      attributionUnavailable: ((r.details as any)?.attribution_unavailable === true),
+    },
     synced: true,
   };
 };
@@ -495,13 +550,27 @@ export async function startAutomationLogSync(): Promise<void> {
   // equipamentos menos ativos ficam sem histórico no mini-relatório.
   // Comandos reais são ~2 ordens de grandeza mais raros, então 500 cobre
   // meses de operação por equipamento.
-  const { data: rows } = await supabase
+  // `noise_reason IS NULL` = só TRANSIÇÃO CONFIRMADA. Polling, eco, retry,
+  // reconexão e comando não confirmado ficam de fora — marcados na fonte, não
+  // escondidos aqui.
+  let { data: rows, error: errRows } = await supabase
     .from("automation_log")
     .select("*")
     .eq("farm_id", ctx.farmId)
     .in("action", ["turn_on", "turn_off", "pump_on", "pump_off"])
+    .is("noise_reason", null)
     .order("occurred_at", { ascending: false })
     .limit(500);
+  // Se a coluna da Fase B ainda não existir, refaz sem o filtro em vez de quebrar.
+  if (errRows && isMissingNoiseColumn(errRows)) {
+    ({ data: rows } = await supabase
+      .from("automation_log")
+      .select("*")
+      .eq("farm_id", ctx.farmId)
+      .in("action", ["turn_on", "turn_off", "pump_on", "pump_off"])
+      .order("occurred_at", { ascending: false })
+      .limit(500));
+  }
 
 
   if (rows) {
@@ -555,15 +624,27 @@ export async function loadAutomationLogRange(
     // e travava o período de 30+ dias. Comandos reais cobrem meses em poucas centenas.
     const collected: AutomationLogEntry[] = [];
     for (let page = 0; page < MAX_PAGES; page++) {
-      const { data: rows, error } = await supabase
+      let { data: rows, error } = await supabase
         .from("automation_log")
         .select("*")
         .eq("farm_id", farmId)
         .in("action", ["turn_on", "turn_off", "pump_on", "pump_off"])
+        .is("noise_reason", null)   // histórico OFICIAL: só transição confirmada
         .gte("occurred_at", fromIso)
         .lte("occurred_at", toIso)
         .order("occurred_at", { ascending: false })
         .range(page * PAGE, (page + 1) * PAGE - 1);
+      if (error && isMissingNoiseColumn(error)) {
+        ({ data: rows, error } = await supabase
+          .from("automation_log")
+          .select("*")
+          .eq("farm_id", farmId)
+          .in("action", ["turn_on", "turn_off", "pump_on", "pump_off"])
+          .gte("occurred_at", fromIso)
+          .lte("occurred_at", toIso)
+          .order("occurred_at", { ascending: false })
+          .range(page * PAGE, (page + 1) * PAGE - 1));
+      }
       if (error || !rows || rows.length === 0) break;
       for (const r of rows) collected.push(rowToEntry(r));
       if (rows.length < PAGE) break;
@@ -572,6 +653,78 @@ export async function loadAutomationLogRange(
     if (collected.length) useAutomationLog.getState().bulkUpsertRemote(collected);
   } catch (e) {
     console.warn("[automationLog] loadAutomationLogRange falhou:", e);
+  }
+}
+
+/** Rótulos legíveis dos tipos de exceção técnica. */
+const TECHNICAL_KIND_LABEL: Record<string, string> = {
+  command_timeout: "Comando expirou",
+  command_not_confirmed: "Comando não confirmado",
+  bridge_error: "Erro de bridge/serial",
+  comm_lost: "Perda de comunicação",
+  comm_restored: "Retorno de comunicação",
+  state_conflict: "Conflito de estado",
+  noise_threshold: "Ruído recorrente (investigar)",
+};
+
+/** Uma exceção técnica de diagnóstico. NÃO é evento operacional, NUNCA entra no
+ *  histórico oficial, no CSV nem no PDF. Retenção de 30 dias no servidor. */
+export interface TechnicalReading {
+  id: string;
+  ts: string;
+  date: string;
+  time: string;
+  pump: string;
+  equipmentId?: string;
+  kind: string;
+  kindLabel: string;
+  details: Record<string, unknown>;
+}
+
+/**
+ * Carrega o HISTÓRICO TÉCNICO (agent_technical_events) num conjunto SEPARADO.
+ *
+ * Deliberadamente NÃO lê automation_log: desde 20260814200200 o log oficial só
+ * contém transição confirmada — polling, eco, retry, startup e leitura de status
+ * são DESCARTADOS na origem, nunca persistidos. Aqui ficam apenas as exceções
+ * úteis ao diagnóstico (timeout, erro de bridge, perda/retorno de comunicação,
+ * conflito de estado, tentativa não confirmada).
+ */
+export async function loadTechnicalReadings(
+  farmId: string,
+  fromIso: string,
+  toIso: string,
+  limit = 1000,
+): Promise<TechnicalReading[]> {
+  if (!farmId || !fromIso || !toIso) return [];
+  try {
+    const { data: rows, error } = await supabase
+      .from("agent_technical_events" as any)
+      .select("id, equipment_id, equipment_name, occurred_at, kind, details")
+      .eq("farm_id", farmId)
+      .gte("occurred_at", fromIso)
+      .lte("occurred_at", toIso)
+      .order("occurred_at", { ascending: false })
+      .limit(limit);
+    if (error || !rows) return [];
+    return (rows as any[]).map((r) => {
+      const d = new Date(r.occurred_at);
+      const kind = String(r.kind ?? "");
+      return {
+        id: String(r.id),
+        ts: d.toISOString(),
+        date: formatDate(d),
+        time: formatTime(d),
+        pump: r.equipment_name ?? "—",
+        equipmentId: r.equipment_id ?? undefined,
+        kind,
+        kindLabel: TECHNICAL_KIND_LABEL[kind] ?? kind,
+        details: (r.details ?? {}) as Record<string, unknown>,
+      } as TechnicalReading;
+    });
+  } catch (e) {
+    console.warn("[automationLog] loadTechnicalReadings falhou:", e);
+    return [];
   }
 }
 

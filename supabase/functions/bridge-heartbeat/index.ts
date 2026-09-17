@@ -9,10 +9,26 @@ const corsHeaders = {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-  );
+  const authHeader = req.headers.get("Authorization") ?? "";
+  if (!authHeader.toLowerCase().startsWith("bearer ")) {
+    return new Response(JSON.stringify({ error: "missing_bearer" }), {
+      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  const url = Deno.env.get("SUPABASE_URL")!;
+  const anon = Deno.env.get("SUPABASE_ANON_KEY")!;
+  const service = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+  const userClient = createClient(url, anon, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: userRes, error: userErr } = await userClient.auth.getUser();
+  if (userErr || !userRes?.user) {
+    return new Response(JSON.stringify({ error: "invalid_or_expired_token" }), {
+      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
 
   let body: any = {};
   try { body = await req.json(); } catch { /* noop */ }
@@ -26,10 +42,22 @@ Deno.serve(async (req) => {
     });
   }
 
+  const supabase = createClient(url, service);
+
+  // Ownership check: caller must have farm access.
+  const { data: hasAccess, error: accessErr } = await supabase.rpc(
+    "has_farm_access",
+    { _user_id: userRes.user.id, _farm_id: farm_id },
+  );
+  if (accessErr || !hasAccess) {
+    return new Response(JSON.stringify({ error: "forbidden" }), {
+      status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
   const xff = req.headers.get("x-forwarded-for");
   const ip = ip_address || (xff ? xff.split(",")[0].trim() : null);
 
-  // Upsert heartbeat row
   const { error } = await supabase
     .from("bridge_heartbeat")
     .upsert(

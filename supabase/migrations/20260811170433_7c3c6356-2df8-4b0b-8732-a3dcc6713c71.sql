@@ -1,0 +1,1 @@
+DELETE FROM public.watchdog_alerts_state WHERE farm_id = (SELECT id FROM public.farms WHERE name ILIKE '%laborat%' LIMIT 1);

@@ -18,6 +18,7 @@ export interface FarmFeatures {
   energia: boolean;
   vazao_consumo: boolean;
   niveis: boolean;
+  inema: boolean;
   loading: boolean;
 }
 
@@ -25,6 +26,7 @@ const DEFAULT_OFF: FarmFeatures = {
   energia: false,
   vazao_consumo: false,
   niveis: false,
+  inema: false,
   loading: true,
 };
 
@@ -32,6 +34,7 @@ const ALL_ON: Omit<FarmFeatures, "loading"> = {
   energia: true,
   vazao_consumo: true,
   niveis: true,
+  inema: true,
 };
 
 export function useFarmFeatures(farmIdOverride?: string | null): FarmFeatures {
@@ -52,7 +55,8 @@ export function useFarmFeatures(farmIdOverride?: string | null): FarmFeatures {
     }
 
     if (!farmId) {
-      setState({ ...ALL_ON, loading: false }); // sem fazenda: não filtra (fail-open)
+      // sem fazenda: fail-open para módulos legados, mas INEMA é opt-in (sempre false)
+      setState({ ...ALL_ON, inema: false, loading: false });
       return;
     }
 
@@ -60,7 +64,7 @@ export function useFarmFeatures(farmIdOverride?: string | null): FarmFeatures {
 
     void supabase
       .from("farms")
-      .select("modules")
+      .select("modules, inema_enabled")
       .eq("id", farmId)
       .maybeSingle()
       .then(({ data }) => {
@@ -70,6 +74,7 @@ export function useFarmFeatures(farmIdOverride?: string | null): FarmFeatures {
           energia: mods.energia !== false,
           vazao_consumo: mods.vazao_consumo !== false,
           niveis: mods.niveis !== false,
+          inema: Boolean((data as any)?.inema_enabled),
           loading: false,
         });
       });

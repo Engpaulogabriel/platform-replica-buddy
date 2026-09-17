@@ -8,7 +8,7 @@ import { loadFazendaData } from "@/pages/Fazenda";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { NotificationCenter } from "@/components/NotificationCenter";
 import { BridgeStatusBadge } from "@/components/BridgeStatusBadge";
-import { CloudBridgeStatusBadge } from "@/components/CloudBridgeStatusBadge";
+
 
 
 import { PlatformAdminLink } from "@/components/PlatformAdminLink";
@@ -130,13 +130,6 @@ export function AppLayout() {
             {/* Desktop / Tablet: layout em 3 colunas */}
             <div className="hidden sm:flex relative h-full items-center px-4 z-10 gap-2">
               <div className="flex-1 flex items-center gap-2 min-w-0">
-                {/* Toggle da sidebar visível em tablet/iPad (sm–lg): em toque não há
-                    hover, então o auto-colapso do desktop não serve. Escondido no
-                    desktop (xl) onde o hover-mouse já expande/colapsa. */}
-                <SidebarTrigger
-                  className="shrink-0 h-8 w-8 xl:hidden"
-                  aria-label="Alternar menu"
-                />
                 <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-primary/10 border border-primary/15 shrink-0">
                   <Droplets className="w-3.5 h-3.5 text-primary" />
                 </div>
@@ -174,7 +167,6 @@ export function AppLayout() {
                 <div className="hidden md:flex items-center gap-2">
                   <PlatformAdminLink />
                   <div data-tour="bridge-status" className="flex items-center gap-1.5">
-                    <CloudBridgeStatusBadge />
                     <BridgeStatusBadge />
                   </div>
                 </div>

@@ -7,3 +7,4 @@ asar-hash.txt
 main.jsc
 main.original.cjs
 main.obf.tmp.cjs
+build-secrets.json

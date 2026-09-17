@@ -16,7 +16,7 @@ import { notify } from "@/lib/notify";
 import {
   Building2, Users, Cpu, Activity, Shield, Plus, RefreshCw, Search,
   CheckCircle2, XCircle, Eye, KeyRound, Pause, Play, Copy, ShieldCheck, Database, Bell, FileText, Power,
-  Download, FileJson, Rocket, Wrench, Timer, Plug, Crown, TerminalSquare, Radio,
+  Download, FileJson, Rocket, Wrench, Timer, Plug, Crown, Terminal,
 } from "lucide-react";
 import PlatformMasterManagers from "@/components/platform/PlatformMasterManagers";
 import PlatformDevices from "@/components/platform/PlatformDevices";
@@ -24,12 +24,8 @@ import PlatformBackups from "@/components/platform/PlatformBackups";
 import PlatformUsers from "@/components/platform/PlatformUsers";
 import PlatformTechnicians from "@/components/platform/PlatformTechnicians";
 import PlatformAlerts from "@/components/platform/PlatformAlerts";
-import PlatformAlertSettings from "@/components/platform/PlatformAlertSettings";
-import PlatformTecnico from "@/components/platform/PlatformTecnico";
 import PlatformReports from "@/components/platform/PlatformReports";
 import PlatformRemoteControl from "@/components/platform/PlatformRemoteControl";
-import PlatformSerialTerminal from "@/components/platform/PlatformSerialTerminal";
-import PlatformDiagTerminal from "@/components/platform/PlatformDiagTerminal";
 import PlatformDemoMenu from "@/components/platform/PlatformDemoMenu";
 import PlatformFarmSwitcher from "@/components/platform/PlatformFarmSwitcher";
 import PlatformUpdates from "@/components/platform/PlatformUpdates";
@@ -37,6 +33,7 @@ import PlatformServiceMode from "@/components/platform/PlatformServiceMode";
 import PlatformMaintenance from "@/components/platform/PlatformMaintenance";
 import PlatformTimings from "@/components/platform/PlatformTimings";
 import PlatformAgentConfig from "@/components/platform/PlatformAgentConfig";
+import PlatformSerialTerminal from "@/components/platform/PlatformSerialTerminal";
 
 interface FarmRow {
   farm_id: string;
@@ -90,7 +87,7 @@ function StatCard({ icon: Icon, label, value, hint, tone = "default" }: any) {
 }
 
 export default function PlatformAdmin() {
-  const { role, loading: roleLoading, isAdmin } = usePlatformAccess();
+  const { role, loading: roleLoading, isAdmin, isSuperAdmin } = usePlatformAccess();
   const [stats, setStats] = useState<Stats | null>(null);
   const [farms, setFarms] = useState<FarmRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -100,6 +97,10 @@ export default function PlatformAdmin() {
   const [detail, setDetail] = useState<any>(null);
   const [editFarm, setEditFarm] = useState<FarmRow | null>(null);
   const [provisionFarm, setProvisionFarm] = useState<{ farm_id: string; name: string } | null>(null);
+  // Aba ativa persistida — evita voltar para "Fazendas" em qualquer re-montagem
+  const [tab, setTab] = useState<string>(() => sessionStorage.getItem("platform_admin_tab") || "farms");
+  useEffect(() => { sessionStorage.setItem("platform_admin_tab", tab); }, [tab]);
+
 
   const refresh = async () => {
     setLoading(true);
@@ -136,7 +137,7 @@ export default function PlatformAdmin() {
   }, [farms, search]);
 
   if (roleLoading) return <div className="p-8 text-center text-muted-foreground">Verificando acesso…</div>;
-  if (!isAdmin) return <Navigate to="/" replace />;
+  if (!isSuperAdmin) return <Navigate to="/home" replace />;
 
   return (
     <div className="space-y-6">
@@ -166,16 +167,12 @@ export default function PlatformAdmin() {
         </div>
       </div>
 
-      <Tabs defaultValue="farms" className="w-full min-w-0">
+      <Tabs value={tab} onValueChange={setTab} className="w-full min-w-0">
         <TabsList className="!grid grid-cols-2 w-full !h-auto gap-1 sm:!inline-flex sm:w-auto sm:flex-wrap sm:justify-start [&>*]:min-w-0 [&>*]:whitespace-normal [&>*]:text-center">
           <TabsTrigger value="farms"><Building2 className="w-4 h-4 mr-1.5" />Fazendas</TabsTrigger>
           <TabsTrigger value="alerts"><Bell className="w-4 h-4 mr-1.5" />Alertas</TabsTrigger>
-          <TabsTrigger value="alert_cfg"><Bell className="w-4 h-4 mr-1.5" />Config. Alertas</TabsTrigger>
-          <TabsTrigger value="tecnico"><Wrench className="w-4 h-4 mr-1.5" />Setor Técnico</TabsTrigger>
           <TabsTrigger value="reports"><FileText className="w-4 h-4 mr-1.5" />Relatórios</TabsTrigger>
           <TabsTrigger value="remote"><Power className="w-4 h-4 mr-1.5" />Controle remoto</TabsTrigger>
-          <TabsTrigger value="serial"><TerminalSquare className="w-4 h-4 mr-1.5" />Terminal Serial</TabsTrigger>
-          <TabsTrigger value="diag"><Radio className="w-4 h-4 mr-1.5" />Diagnóstico Remoto</TabsTrigger>
           <TabsTrigger value="devices"><ShieldCheck className="w-4 h-4 mr-1.5" />Dispositivos &amp; Licenças</TabsTrigger>
           <TabsTrigger value="updates"><Rocket className="w-4 h-4 mr-1.5" />Atualizações</TabsTrigger>
           <TabsTrigger value="users"><Users className="w-4 h-4 mr-1.5" />Usuários</TabsTrigger>
@@ -184,6 +181,7 @@ export default function PlatformAdmin() {
           <TabsTrigger value="backups"><Database className="w-4 h-4 mr-1.5" />Backups</TabsTrigger>
           <TabsTrigger value="timings"><Timer className="w-4 h-4 mr-1.5" />Tempos</TabsTrigger>
           <TabsTrigger value="agent_cfg"><Plug className="w-4 h-4 mr-1.5" />Agente (porta/timers)</TabsTrigger>
+          <TabsTrigger value="serial_terminal"><Terminal className="w-4 h-4 mr-1.5" />Terminal Serial</TabsTrigger>
           {isAdmin && <TabsTrigger value="service"><Wrench className="w-4 h-4 mr-1.5" />Modo Serviço</TabsTrigger>}
           {isAdmin && <TabsTrigger value="maintenance"><Wrench className="w-4 h-4 mr-1.5" />Manutenção</TabsTrigger>}
         </TabsList>
@@ -191,6 +189,12 @@ export default function PlatformAdmin() {
         <TabsContent value="timings" className="mt-4">
           <PlatformTimings isAdmin={isAdmin} />
         </TabsContent>
+
+        {/* forceMount: mantém o terminal montado (log e estado preservados) */}
+        <TabsContent value="serial_terminal" className="mt-4 data-[state=inactive]:hidden" forceMount>
+          <PlatformSerialTerminal isAdmin={true} />
+        </TabsContent>
+
 
         <TabsContent value="agent_cfg" className="mt-4">
           <PlatformAgentConfig isAdmin={isAdmin} />
@@ -232,9 +236,8 @@ export default function PlatformAdmin() {
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          <p className="text-[10px] text-muted-foreground mb-1 sm:hidden px-3 pt-2">← deslize para ver todas as colunas →</p>
-          <div className="overflow-x-auto -mx-2 px-2">
-            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
+          <div className="overflow-x-auto">
+            <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Fazenda</TableHead>
@@ -359,27 +362,12 @@ export default function PlatformAdmin() {
           <PlatformAlerts isAdmin={isAdmin} />
         </TabsContent>
 
-        <TabsContent value="alert_cfg" className="mt-4">
-          <PlatformAlertSettings isAdmin={isAdmin} />
-        </TabsContent>
-
-        <TabsContent value="tecnico" className="mt-4">
-          <PlatformTecnico isAdmin={isAdmin} />
-        </TabsContent>
-
         <TabsContent value="reports" className="mt-4">
           <PlatformReports isAdmin={isAdmin} />
         </TabsContent>
 
         <TabsContent value="remote" className="mt-4">
           <PlatformRemoteControl isAdmin={isAdmin} />
-        </TabsContent>
-
-        <TabsContent value="diag" className="mt-4">
-          <PlatformDiagTerminal isAdmin={isAdmin} />
-        </TabsContent>
-        <TabsContent value="serial" className="mt-4">
-          <PlatformSerialTerminal isAdmin={isAdmin} />
         </TabsContent>
 
         <TabsContent value="devices" className="mt-4">
@@ -562,7 +550,7 @@ function CreateFarmDialog({ open, onClose, onCreated }: any) {
   if (created) {
     return (
       <Dialog open={open} onOpenChange={close}>
-        <DialogContent className="max-w-[95vw] sm:max-w-lg">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5 text-green-600" />
@@ -651,7 +639,7 @@ function CreateFarmDialog({ open, onClose, onCreated }: any) {
   // Tela 1: formulário
   return (
     <Dialog open={open} onOpenChange={close}>
-      <DialogContent className="max-w-[95vw] sm:max-w-lg">
+      <DialogContent>
         <DialogHeader><DialogTitle>Cadastrar nova fazenda</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div>
@@ -744,7 +732,7 @@ function EditFarmDialog({ farm, onClose, onSaved }: { farm: FarmRow | null; onCl
   const [subStatus, setSubStatus] = useState<string>("trial");
   // Módulos disponíveis (visibilidade por fazenda)
   const [modules, setModules] = useState<Record<string, boolean>>({
-    energia: false, vazao_consumo: false, niveis: false,
+    energia: false, vazao_consumo: false, niveis: false, inema: false,
   });
   const [moduleBusy, setModuleBusy] = useState<string | null>(null);
 
@@ -762,21 +750,30 @@ function EditFarmDialog({ farm, onClose, onSaved }: { farm: FarmRow | null; onCl
           }
         });
       // fetch módulos atuais
-      void supabase.from("farms").select("modules").eq("id", farm.farm_id).maybeSingle()
+      void supabase.from("farms").select("modules, inema_enabled").eq("id", farm.farm_id).maybeSingle()
         .then(({ data }) => {
           const m = ((data?.modules ?? {}) as Record<string, unknown>);
           setModules({
             energia: m.energia !== false,
             vazao_consumo: m.vazao_consumo !== false,
             niveis: m.niveis !== false,
+            inema: !!(data as any)?.inema_enabled,
           });
         });
     }
   }, [farm]);
 
-  const toggleModule = async (key: "energia" | "vazao_consumo" | "niveis", value: boolean) => {
+  const toggleModule = async (key: "energia" | "vazao_consumo" | "niveis" | "inema", value: boolean) => {
     if (!farm) return;
     setModuleBusy(key);
+    if (key === "inema") {
+      const { error } = await supabase.from("farms").update({ inema_enabled: value } as any).eq("id", farm.farm_id);
+      setModuleBusy(null);
+      if (error) return notify.fail("Plataforma", error.message);
+      setModules((prev) => ({ ...prev, inema: value }));
+      notify.ok("Plataforma", `Módulo ${value ? "ativado" : "desativado"}.`);
+      return;
+    }
     const { data, error } = await supabase.rpc("platform_set_farm_modules" as any, {
       _farm_id: farm.farm_id,
       _modules: { [key]: value },
@@ -840,7 +837,7 @@ function EditFarmDialog({ farm, onClose, onSaved }: { farm: FarmRow | null; onCl
 
   return (
     <Dialog open={!!farm} onOpenChange={onClose}>
-      <DialogContent className="max-w-[95vw] sm:max-w-lg max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-h-[90vh] overflow-y-auto">
 
         <DialogHeader><DialogTitle>Editar fazenda</DialogTitle></DialogHeader>
         <div className="space-y-3">
@@ -924,6 +921,7 @@ function EditFarmDialog({ farm, onClose, onSaved }: { farm: FarmRow | null; onCl
               { key: "energia" as const,       title: "Energia",          desc: "Demanda de energia, consumo, horários ponta/fora ponta" },
               { key: "vazao_consumo" as const, title: "Vazão e Consumo",  desc: "Relatório de vazão estimada e consumo de água (m³)" },
               { key: "niveis" as const,        title: "Níveis",           desc: "Monitoramento de nível dos reservatórios" },
+              { key: "inema" as const,         title: "INEMA / Compliance Hídrico", desc: "Monitoramento de outorgas e alertas de uso" },
             ].map(({ key, title, desc }) => (
               <div key={key} className="flex items-start justify-between gap-3 border-t pt-3 first:border-t-0 first:pt-0">
                 <div className="min-w-0">
@@ -955,7 +953,7 @@ function FarmDetailDialog({ farm, detail, onClose }: any) {
   if (!farm) return null;
   return (
     <Dialog open={!!farm} onOpenChange={onClose}>
-      <DialogContent className="max-w-[95vw] sm:max-w-3xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{farm.name}</DialogTitle>
           <p className="text-xs text-muted-foreground">{farm.city ?? "—"}{farm.state ? "/" + farm.state : ""} · Plano {farm.plan.toUpperCase()}</p>
@@ -971,7 +969,6 @@ function FarmDetailDialog({ farm, detail, onClose }: any) {
               <TabsTrigger value="health" className="flex-1">Agente</TabsTrigger>
             </TabsList>
             <TabsContent value="equipments">
-              <div className="overflow-x-auto -mx-2 px-2">
               <Table>
                 <TableHeader><TableRow><TableHead>Nome</TableHead><TableHead>Tipo</TableHead><TableHead>HW ID</TableHead><TableHead>Última com.</TableHead></TableRow></TableHeader>
                 <TableBody>
@@ -985,10 +982,8 @@ function FarmDetailDialog({ farm, detail, onClose }: any) {
                   ))}
                 </TableBody>
               </Table>
-              </div>
             </TabsContent>
             <TabsContent value="users">
-              <div className="overflow-x-auto -mx-2 px-2">
               <Table>
                 <TableHeader><TableRow><TableHead>Nome</TableHead><TableHead>Email</TableHead><TableHead>Papel</TableHead></TableRow></TableHeader>
                 <TableBody>
@@ -1001,7 +996,6 @@ function FarmDetailDialog({ farm, detail, onClose }: any) {
                   ))}
                 </TableBody>
               </Table>
-              </div>
             </TabsContent>
             <TabsContent value="logs">
               <div className="space-y-1 text-xs font-mono max-h-96 overflow-y-auto">
@@ -1074,7 +1068,7 @@ function ProvisioningDialog({ farm, onClose }: { farm: { farm_id: string; name: 
 
   return (
     <Dialog open={!!farm} onOpenChange={(o) => !o && reset()}>
-      <DialogContent className="max-w-[95vw] sm:max-w-2xl">
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FileJson className="w-5 h-5 text-emerald-500" />

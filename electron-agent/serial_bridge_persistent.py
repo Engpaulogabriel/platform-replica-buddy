@@ -22,8 +22,6 @@ import time
 import threading
 import queue
 import platform
-import atexit
-import signal
 
 if platform.system() != "Windows":
     print("ERROR:Este bridge so funciona no Windows", flush=True)
@@ -34,37 +32,6 @@ import ctypes.wintypes
 import serial  # pyserial
 
 kernel32 = ctypes.windll.kernel32
-
-# ── HEADLESS: handler GLOBAL de exceção — NUNCA mostra popup/janela ───────────
-# Qualquer exceção NÃO tratada (ex.: OSError [Errno 22] fora do out()/write()) é
-# logada no stderr e o processo encerra em SILÊNCIO. Sem isto, o bootloader do
-# PyInstaller (modo windowed) exibe "Unhandled exception in script" — o popup que
-# trava a fazenda. os._exit(1) mata na hora, sem dialog; o agente (main.cjs)
-# relança a bridge com backoff (3→5→10→15→30s). Cobre main thread e threads.
-def _global_excepthook(exc_type, exc_value, exc_tb):
-    try:
-        import traceback
-        sys.stderr.write("[PY][FATAL] excecao nao tratada: "
-                         + "".join(traceback.format_exception(exc_type, exc_value, exc_tb)) + "\n")
-        sys.stderr.flush()
-    except Exception:
-        pass
-    try:
-        os._exit(1)  # encerra sem dialog/atexit; o OS libera a COM e o agente relanca
-    except Exception:
-        pass
-
-sys.excepthook = _global_excepthook
-try:
-    def _thread_excepthook(args):
-        try:
-            sys.stderr.write(f"[PY][FATAL-thread] {getattr(args.exc_type,'__name__','?')}: {args.exc_value}\n")
-            sys.stderr.flush()
-        except Exception:
-            pass
-    threading.excepthook = _thread_excepthook  # Python 3.8+
-except Exception:
-    pass
 
 # DCB bit masks
 DCB_fAbortOnError = 0x4000  # bit 14
@@ -129,72 +96,8 @@ def log(msg):
 
 
 def out(msg):
-    # STDOUT (para o processo Electron), NAO a serial. No Windows, um flush do
-    # pipe stdout pode lancar OSError [Errno 22] Invalid argument transitoriamente
-    # (pai ocupado/reciclando o pipe). Antes isso derrubava o bridge inteiro na
-    # linha do flush. Agora: 1 retry curto; se persistir, loga e segue (nao morre).
-    for attempt in range(2):
-        try:
-            sys.stdout.write(f"{msg}\n")
-            sys.stdout.flush()
-            return
-        except Exception as e:
-            # Amplo (não só OSError): Errno 22, pipe fechado, encoding — NADA aqui
-            # pode derrubar a bridge. 1 retry curto; senão loga e segue.
-            if attempt == 0:
-                time.sleep(0.05)
-                continue
-            try: log(f"[PY] out() erro (stdout pipe): {e} — descartando '{str(msg)[:40]}'")
-            except Exception: pass
-            return
-
-
-# --- Cleanup de shutdown (item #3) ------------------------------------------
-# Referencia global da porta aberta para o cleanup poder fecha-la.
-# IMPORTANTE: taskkill /F (TerminateProcess, usado pelo INSTALAR.bat) NAO e
-# capturavel — nenhum handler roda nesse caso. O que salva o "COM travada apos
-# kill" e o RETRY na abertura (open_serial). Estes handlers cobrem o encerramento
-# CAPTURAVEL (Ctrl+C = SIGINT, Ctrl+Break = SIGBREAK, terminate gracioso, QUIT).
-_current_ser = None
-
-
-def _set_current_ser(ser):
-    """Atualiza a referencia global usada pelo cleanup de shutdown."""
-    global _current_ser
-    _current_ser = ser
-
-
-def _cleanup_serial():
-    global _current_ser
-    try:
-        if _current_ser is not None and getattr(_current_ser, "is_open", False):
-            try:
-                _current_ser.reset_output_buffer()
-            except Exception:
-                pass
-            _current_ser.close()
-            log("[PY] Porta fechada (cleanup)")
-    except Exception:
-        pass
-
-
-atexit.register(_cleanup_serial)
-
-
-def _signal_handler(signum, frame):
-    log(f"[PY] Sinal {signum} recebido — fechando porta e saindo")
-    _cleanup_serial()
-    # sys.exit dispara o atexit (idempotente) e encerra limpo.
-    sys.exit(0)
-
-
-for _sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
-    _sig = getattr(signal, _sig_name, None)
-    if _sig is not None:
-        try:
-            signal.signal(_sig, _signal_handler)
-        except Exception:
-            pass
+    sys.stdout.write(f"{msg}\n")
+    sys.stdout.flush()
 
 
 def get_win32_handle(ser):
@@ -292,24 +195,17 @@ def safe_write(ser, port_path, tx_bytes, max_retries=2):
             last_err = str(e)
             log(f"[PY TX] tentativa {attempt + 1} falhou: {last_err}")
 
-            # Reabrir a porta em erros de porta travada/invalida (item #2):
-            #  - PermissionError(13): bug PL2303 conhecido
-            #  - OSError [Errno 22] / Invalid argument: COM em estado invalido apos
-            #    kill abrupto — o mesmo sintoma que o tecnico resolvia trocando de COM
-            reopen_triggers = ("PermissionError", "Errno 13", "WriteFile",
-                               "Errno 22", "Invalid argument", "OSError", "ClearCommError")
-            if any(tok in last_err for tok in reopen_triggers):
+            # Se for PermissionError(13) ou similar, reabrir porta
+            if "PermissionError" in last_err or "13" in last_err or "WriteFile" in last_err:
                 if attempt < max_retries:
-                    log("[PY TX] Porta invalida/travada — fechando, aguardando 1s e reabrindo...")
+                    log("[PY TX] Reabrindo porta apos PermissionError...")
                     try:
                         ser.close()
                     except Exception:
                         pass
-                    # Item #2: espera 1s antes de reabrir (o Windows precisa liberar a COM).
-                    time.sleep(1.0)
+                    time.sleep(0.15)
                     try:
                         ser = open_serial(port_path)
-                        _set_current_ser(ser)
                         log("[PY TX] Porta reaberta para retry")
                     except Exception as reopen_err:
                         log(f"[PY TX] Falha ao reabrir: {reopen_err}")
@@ -320,8 +216,8 @@ def safe_write(ser, port_path, tx_bytes, max_retries=2):
     return False, ser, last_err
 
 
-def _configure_serial(port_path):
-    """Cria e configura o objeto pyserial (sem abrir)."""
+def open_serial(port_path):
+    """Abre a porta COM com pyserial e aplica fix PL2303."""
     ser = serial.Serial()
     ser.port = port_path
     ser.baudrate = 9600
@@ -335,64 +231,23 @@ def _configure_serial(port_path):
     ser.dsrdtr = False
     ser.dtr = False
     ser.rts = False
+    ser.open()
+
+    log(f"[PY] Porta {port_path} aberta: 9600 8N1 dtr=False rts=False")
+
+    # Aplicar fix PL2303 via Win32 API
+    try:
+        handle = get_win32_handle(ser)
+        log(f"[PY] Win32 handle = {handle}")
+        fix_pl2303_dcb(handle)
+    except Exception as e:
+        log(f"[PY] AVISO: fix PL2303 falhou: {e}")
+
+    # Limpar buffers
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+
     return ser
-
-
-def open_serial(port_path, max_attempts=5, retry_delay=2.0):
-    """Abre a porta COM com pyserial e aplica fix PL2303.
-
-    RETRY (item #1): apos um encerramento abrupto (taskkill /F, crash), o Windows
-    pode demorar a liberar a COM e ela fica em estado invalido — a abertura lanca
-    OSError [Errno 22] Invalid argument / PermissionError(13). Em vez de falhar de
-    cara (o tecnico tinha que trocar COM2->COM1 na mao), tentamos ate max_attempts
-    fechando qualquer handle semi-aberto e esperando retry_delay entre tentativas.
-    """
-    last_err = None
-    for attempt in range(1, max_attempts + 1):
-        ser = _configure_serial(port_path)
-        try:
-            ser.open()
-        except (OSError, serial.SerialException) as e:
-            last_err = e
-            log(f"[PY] Abertura de {port_path} FALHOU (tentativa {attempt}/{max_attempts}): {e}")
-            # Fecha handle semi-aberto antes do proximo retry (item #1).
-            try:
-                if getattr(ser, "is_open", False):
-                    ser.close()
-            except Exception:
-                pass
-            if attempt < max_attempts:
-                time.sleep(retry_delay)
-                continue
-            raise  # esgotou as tentativas — propaga o ultimo erro
-
-        # --- Aberto com sucesso ---
-        log(f"[PY] Porta {port_path} aberta: 9600 8N1 dtr=False rts=False (tentativa {attempt})")
-
-        # Aplicar fix PL2303 via Win32 API
-        try:
-            handle = get_win32_handle(ser)
-            log(f"[PY] Win32 handle = {handle}")
-            fix_pl2303_dcb(handle)
-        except Exception as e:
-            log(f"[PY] AVISO: fix PL2303 falhou: {e}")
-
-        # Limpar buffers (item #4): remove lixo deixado pelo processo anterior.
-        try:
-            ser.reset_input_buffer()
-            ser.reset_output_buffer()
-        except Exception as e:
-            log(f"[PY] AVISO: reset de buffers falhou: {e}")
-        # Reforco via driver: PurgeComm TX+RX (limpa filas do driver, nao so do OS).
-        try:
-            purge_comm(get_win32_handle(ser), PURGE_TXCLEAR | PURGE_RXCLEAR)
-        except Exception:
-            pass
-
-        return ser
-
-    # Nao deveria chegar aqui (o raise acima cobre), mas por seguranca:
-    raise last_err if last_err else RuntimeError(f"open_serial({port_path}) falhou")
 
 
 def main():
@@ -410,7 +265,6 @@ def main():
 
     try:
         ser = open_serial(port_path)
-        _set_current_ser(ser)  # cleanup de shutdown fecha esta porta
     except Exception as e:
         out(f"ERROR:Nao conseguiu abrir {port_path}: {e}")
         sys.exit(1)
@@ -507,34 +361,6 @@ def main():
                 log(f"[PY FRAME] {frame_str} (montado em {chunk_count_this_frame} chunk(s))")
                 chunk_count_this_frame = 0  # reset para próximo frame
 
-            # v3.25.47: respostas NAO-frame (PING/STATUS do ESP: "OK:...", "PONG",
-            # "ESP...") NAO terminam em _ETX_] e eram descartadas pelo timeout de 8s,
-            # entao PING/STATUS davam timeout no Terminal Serial. Emite qualquer LINHA
-            # COMPLETA (terminada em \r ou \n) que NAO contenha '[' (nao e frame nem
-            # frame parcial) como RXRAW: — o agente entrega isso SO ao Terminal/sniff,
-            # sem passar pelo pipeline de telemetria. Roda DEPOIS da extracao de frames.
-            while True:
-                nl = -1
-                for _i in range(len(rx_buf)):
-                    if rx_buf[_i] == "\r" or rx_buf[_i] == "\n":
-                        nl = _i
-                        break
-                if nl == -1:
-                    break
-                _line = rx_buf[:nl].strip()
-                if "[" in _line:
-                    # a linha contem inicio de frame — NAO consome (poderia corromper
-                    # um frame parcial com ruido). Para; o _ETX_]/timeout cuidam.
-                    break
-                # linha nao-frame completa: consome o terminador (\r/\n seguidos)
-                _consume = nl + 1
-                while _consume < len(rx_buf) and rx_buf[_consume] in ("\r", "\n"):
-                    _consume += 1
-                rx_buf = rx_buf[_consume:]
-                if _line:
-                    out(f"RXRAW:{_line}")
-                    log(f"[PY RESP] linha nao-frame -> RXRAW: {_line}")
-
         # Timeout de buffer parcial: se ficou dado preso > 8s sem completar, descarta
         # (segurança — o timeout de polling de 13s no main.cjs cuida do retry)
         if rx_buf and rx_last_data_time > 0 and (time.time() - rx_last_data_time) > RX_BUFFER_TIMEOUT:
@@ -557,7 +383,6 @@ def main():
                 ser.close()
                 time.sleep(0.1)
                 ser = open_serial(port_path)
-                _set_current_ser(ser)
                 reopen_count += 1
                 consecutive_empty_reads = 0
                 last_tx_time = 0
@@ -605,16 +430,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # Rede de segurança final: se main() abortar por qualquer motivo, encerra em
-    # SILÊNCIO (sem popup). O agente relança a bridge. NUNCA propaga p/ o bootloader.
-    try:
-        main()
-    except SystemExit:
-        raise
-    except BaseException as _e:
-        try:
-            sys.stderr.write(f"[PY][FATAL] main() abortou: {_e}\n")
-            sys.stderr.flush()
-        except Exception:
-            pass
-        os._exit(1)
+    main()

@@ -1,0 +1,2 @@
+ALTER TABLE public.farms ADD COLUMN IF NOT EXISTS cnpj TEXT;
+ALTER TABLE public.farms ADD COLUMN IF NOT EXISTS proprietario TEXT;

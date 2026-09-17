@@ -1,0 +1,1 @@
+ALTER TABLE public.site_health ADD COLUMN IF NOT EXISTS disk_free_mb integer;

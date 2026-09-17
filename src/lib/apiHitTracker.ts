@@ -1,13 +1,7 @@
 // F2 — Rate limit comportamental (client-side).
 // Registra "hits" agrupados (rota, evento) na tabela api_hits e chama
-// periodicamente check_scraping_pattern. Padrão abusivo → registra alerta em
-// security_alerts.
-//
-// v(fix login): NÃO DESLOGA MAIS por este guard. O polling do dashboard em redes
-// rurais (Starlink, com retries) podia bater o limiar de "scraping" e derrubar a
-// sessão do operador — falso-positivo inaceitável. Mantemos a DETECÇÃO + o alerta
-// (o admin revisa e revoga manualmente se for abuso real), mas a sessão do usuário
-// NUNCA é encerrada automaticamente aqui.
+// periodicamente check_scraping_pattern. Padrão abusivo apenas gera alerta
+// em security_alerts — NÃO desloga mais o usuário.
 
 import { supabase } from "@/integrations/supabase/client";
 
@@ -68,9 +62,7 @@ export function startBehavioralGuard(onAbusive: (reason: string) => void) {
             } as any,
           } as any);
         } catch { /* noop */ }
-        // NÃO desloga: apenas registra o alerta. onAbusive fica sem uso de propósito.
         console.warn("[AUTH] padrão comportamental suspeito registrado (sem logout)", row.reason);
-        void onAbusive; // evita unused sem alterar a assinatura pública
       }
     } catch { /* noop */ }
   }, 60_000);

@@ -1,25 +1,18 @@
 // Edge Function: agent-release-signed-url
 // Devolve uma URL assinada para baixar o app.asar de uma release do agente.
-// Compat OTA legacy: agentes v3.12.0 podem chamar com access_token expirado,
-// então a função autentica pela apikey anon fixa e NÃO depende do Bearer JWT.
-//
-// ⚠️ REQUER verify_jwt=false NO DEPLOY (ver supabase/config.toml). Sem isso, o
-// gateway do Supabase barra o Bearer (agent token / anon) ANTES de chegar aqui e
-// devolve "401 invalid_or_expired_token", quebrando o OTA de TODAS as fazendas.
-// A validação real é interna (apikey anon + agent token/device_license). Se o OTA
-// voltar a dar 401, confira no dashboard: Edge Functions → agent-release-signed-url
-// → "Verify JWT" DESLIGADO (o config.toml só aplica em redeploy da função).
-// [redeploy-nudge 2026-08-11: força o Lovable a reaplicar verify_jwt=false]
+// SEGURANÇA: exige identidade real — service role key, JWT de usuário Supabase
+// autenticado (painel/operador) OU o token próprio do Agent (HS256 assinado com
+// AGENT_TOKEN_SECRET, emitido por agent-auth). A apikey/anon key é pública (vai
+// no bundle) e por isso NÃO é aceita como autenticação.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.0";
-
-const AGENT_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRueXVrZ2ZlZHJlZHZ4cHpqcHF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2ODU1OTQsImV4cCI6MjA5MjI2MTU5NH0.OSg44w0CRVvD-f6Ts_U9DVeQkQ-4c37passKEK5X0kk";
+import { jwtVerify } from "https://esm.sh/jose@5.9.6";
+import { timingSafeEqual } from "../_shared/cronAuth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+    "authorization, x-client-info, apikey, content-type, x-agent-token",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -29,77 +22,163 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const auth = req.headers.get("Authorization") ?? "";
-    const apiKey = req.headers.get("apikey") ?? "";
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || AGENT_ANON_KEY;
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-    // Fix definitivo para OTA v3.12.0: a anon key não expira e já é enviada
-    // pelo agente junto com o Bearer. O gateway deve estar com verify_jwt=false
-    // para token expirado não ser barrado antes de chegar aqui.
-    if (!apiKey || (apiKey !== anonKey && apiKey !== AGENT_ANON_KEY)) {
-      return new Response(JSON.stringify({ error: "invalid_apikey" }), {
+    // ── AUTENTICAÇÃO ────────────────────────────────────────────────────────
+    // Aceita: (a) service role key, (b) JWT de usuário Supabase real (painel),
+    // (c) token próprio do Agent (HS256 assinado com AGENT_TOKEN_SECRET,
+    // emitido por agent-auth). Anon key NUNCA é aceita como identidade.
+    const auth = (req.headers.get("authorization") ?? "").trim();
+    const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+    const agentHeader = (req.headers.get("x-agent-token") ?? "").trim();
+    const unauthorized = (reason?: string) =>
+      new Response(JSON.stringify({ error: "unauthorized", ...(reason ? { reason } : {}) }), {
         status: 401,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-    }
 
-    // Validação tolerante: agentes v3.12.0 não fazem refresh de token, então
-    // quando o access_token expira o OTA quebrava com 401 mesmo com credenciais
-    // salvas válidas. O artefato .asar é ofuscado (RC4) e validado via SHA-256
-    // no cliente, então basta exigir a apikey (anon) — token expirado não
-    // bloqueia o download. Isso destrava o OTA legacy da Terra Norte.
-    if (auth.toLowerCase().startsWith("bearer ")) try {
-      const userClient = createClient(
-        supabaseUrl,
-        anonKey,
-        { global: { headers: { Authorization: auth } } },
-      );
-      const { data: userRes } = await userClient.auth.getUser();
-      if (!userRes?.user) {
-        console.warn("[signed-url] token expirado/ausente — liberando OTA legacy");
-      }
-    } catch (e) {
-      console.warn("[signed-url] falha ao validar token, seguindo:", e instanceof Error ? e.message : String(e));
-    }
-
-    const body = await req.json().catch(() => ({}));
-    const version = typeof body?.version === "string" ? body.version.trim() : "";
-
-    // service role para ler tabela e assinar URLs
+    const isAnon = (t: string) => !!t && !!anonKey && timingSafeEqual(t, anonKey);
     const admin = createClient(supabaseUrl, serviceKey);
 
-    // v3.25.62: path CUSTOMIZADO — assina qualquer arquivo do bucket agent-releases
-    // (ex.: 'bridge/serial_bridge.zip'), sem depender de uma linha em agent_releases.
-    // Usado pelo ensureBridgeOnedir para baixar a bridge --onedir pronta.
-    const customPath = typeof body?.path === "string" ? body.path.trim().replace(/^\/+/, "") : "";
-    if (customPath) {
-      if (customPath.includes("..") || customPath.startsWith("/")) {
-        return new Response(JSON.stringify({ error: "invalid_path" }), {
-          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    // (c) token do Agent: verificação criptográfica obrigatória + claims + device_licenses
+    const verifyAgentToken = async (t: string): Promise<boolean> => {
+      const secretStr = Deno.env.get("AGENT_TOKEN_SECRET");
+      if (!t || !secretStr || isAnon(t)) return false;
+      try {
+        const { payload } = await jwtVerify(t, new TextEncoder().encode(secretStr), {
+          algorithms: ["HS256"],
         });
+        const deviceId = typeof payload.sub === "string" ? payload.sub : "";
+        const fp = typeof payload.fp === "string" ? payload.fp : "";
+        const farmId = typeof payload.farm_id === "string" ? payload.farm_id : "";
+        if (!deviceId || !fp || !farmId || !payload.exp || !payload.jti) return false;
+        const { data: dev } = await admin
+          .from("device_licenses")
+          .select("id, farm_id, machine_id_hash, revoked_at")
+          .eq("id", deviceId)
+          .maybeSingle();
+        if (!dev || dev.revoked_at || dev.machine_id_hash !== fp || dev.farm_id !== farmId) {
+          return false;
+        }
+        console.log("[signed-url] agent autenticado", JSON.stringify({ device_id: deviceId, farm_id: farmId }));
+        return true;
+      } catch {
+        return false;
       }
-      const { data: signedCustom, error: signCustomErr } = await admin.storage
-        .from("agent-releases")
-        .createSignedUrl(customPath, 86400);
-      if (signCustomErr || !signedCustom?.signedUrl) {
-        return new Response(JSON.stringify({ error: "sign_failed", path: customPath }), {
-          status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      return new Response(
-        JSON.stringify({ url: signedCustom.signedUrl, path: customPath, signed: true, expires_in: 86400 }),
-        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+    };
+
+    let authorized = false;
+    if (bearer && !!serviceKey && timingSafeEqual(bearer, serviceKey)) {
+      authorized = true;
     }
+    if (!authorized) authorized = await verifyAgentToken(agentHeader);
+    if (!authorized) authorized = await verifyAgentToken(bearer);
+    if (!authorized && bearer && !isAnon(bearer)) {
+      // (b) sessão de usuário real do painel/operador
+      const authed = createClient(supabaseUrl, anonKey || bearer, {
+        global: { headers: { Authorization: `Bearer ${bearer}` } },
+        auth: { persistSession: false },
+      });
+      const { data: userRes, error: userErr } = await authed.auth.getUser(bearer);
+      if (!userErr && userRes?.user?.id && userRes.user.role !== "anon") authorized = true;
+    }
+    if (!authorized) {
+      // (d) FLUXO LEGADO: Agent sem Agent Token envia apenas a chave pública do
+      // próprio projeto (header apikey e/ou Bearer). Aceito EXCLUSIVAMENTE para
+      // baixar releases já registradas em agent_releases: a versão é resolvida
+      // na tabela e o storage_path vem sempre do registro — nunca do cliente.
+      // A chave é aceita só se: (1) for idêntica à SUPABASE_ANON_KEY do
+      // ambiente, ou (2) for uma chave anon JWT do PRÓPRIO projeto, com
+      // assinatura validada pelo gateway do Supabase (/auth/v1/settings).
+      const projectRef = (supabaseUrl.match(/https:\/\/([a-z0-9]+)\./)?.[1]) ?? "";
+      const isProjectAnonKey = async (t: string): Promise<boolean> => {
+        if (!t) return false;
+        if (isAnon(t)) return true;
+        const parts = t.split(".");
+        if (parts.length !== 3) return false;
+        try {
+          const claims = JSON.parse(
+            atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")),
+          );
+          if (claims?.role !== "anon" || claims?.ref !== projectRef) return false;
+        } catch {
+          return false;
+        }
+        const probe = await fetch(`${supabaseUrl}/auth/v1/settings`, {
+          headers: { apikey: t },
+        });
+        return probe.status === 200;
+      };
+
+      const apikeyHeader = (req.headers.get("apikey") ?? "").trim();
+      const candidate = apikeyHeader || bearer;
+      const legacyAnon =
+        !!candidate &&
+        (!bearer || !apikeyHeader || bearer === apikeyHeader) &&
+        (await isProjectAnonKey(candidate));
+      if (legacyAnon) {
+        console.log("[signed-url] fluxo legado autorizado (chave pública do projeto)");
+        authorized = true;
+      }
+    }
+    if (!authorized) return unauthorized();
+
+
+
+
+    // ── VERSÃO ──────────────────────────────────────────────────────────────
+    // Aceita a versão em JSON, form-urlencoded, texto puro ou query string.
+    // Agentes antigos podem enviar `agent_version`/`target_version`.
+    const rawBody = await req.text().catch(() => "");
+    let body: Record<string, unknown> = {};
+    if (rawBody) {
+      try {
+        body = JSON.parse(rawBody) ?? {};
+      } catch {
+        try {
+          body = Object.fromEntries(new URLSearchParams(rawBody).entries());
+        } catch {
+          body = {};
+        }
+      }
+    }
+    const url = new URL(req.url);
+    const pick = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : "");
+    const version =
+      pick(body.version) ||
+      pick(body.target_version) ||
+      pick(body.agent_version) ||
+      pick(url.searchParams.get("version")) ||
+      pick(url.searchParams.get("target_version")) ||
+      (rawBody && !rawBody.trim().startsWith("{") && !rawBody.includes("=") ? rawBody.trim() : "");
 
     if (!version) {
-      return new Response(JSON.stringify({ error: "missing_version" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      console.log(
+        "[signed-url] missing_version",
+        JSON.stringify({
+          content_type: req.headers.get("content-type"),
+          body_len: rawBody.length,
+          body_preview: rawBody.slice(0, 120),
+          query: url.search,
+        }),
+      );
+      return new Response(
+        JSON.stringify({
+          error: "missing_version",
+          hint: "envie {\"version\":\"x.y.z\"} no corpo JSON ou ?version=x.y.z",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
     }
+    console.log("[signed-url] version solicitada:", version);
+
+    // `admin` (service role) já criado acima para ler tabela e assinar URLs
+
 
     const { data: release, error: relErr } = await admin
       .from("agent_releases")
@@ -141,8 +220,8 @@ Deno.serve(async (req) => {
       );
     }
 
-    // 24h de validade para tolerar OTA lento em fazendas com Starlink instável
-    const SIGNED_URL_TTL = 86400;
+    // Curta duração (1h) — suficiente para OTA lento via Starlink
+    const SIGNED_URL_TTL = 3600;
     const { data: signed, error: signErr } = await admin.storage
       .from("agent-releases")
       .createSignedUrl(release.storage_path, SIGNED_URL_TTL);

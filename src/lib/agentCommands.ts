@@ -6,7 +6,6 @@
 // pausar polling, etc. Aqui criamos os helpers de TX + espera de resposta.
 
 import { supabase } from "@/integrations/supabase/client";
-import { assertOperationalClient, getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 export type AgentCmdKind =
   | "open_port"
@@ -30,8 +29,7 @@ export type AgentCmdKind =
   | "stop_log_stream"
   // v3.25.43 — Terminal Serial Remoto (substitui o Hércules)
   | "serial_terminal"
-  | "serial_sniff"
-  | "update_bridge";
+  | "serial_sniff";
 
 /** Frame capturado da serial (terminal/sniff): frame + timestamp epoch (ms). */
 export interface SerialCapturedFrame {
@@ -81,16 +79,12 @@ export async function enqueueAgentCommand({
   payload = {},
   expiresInSec = 60,
 }: EnqueueArgs): Promise<string> {
-  // ESCRITA OPERACIONAL: fail-closed. Fazenda migrada sem sessão no backend
-  // novo lança erro explícito — nunca redireciona o comando para o antigo.
-  const client = assertOperationalClient(farmId);
-
-  const { data: userData } = await client.auth.getUser();
+  const { data: userData } = await supabase.auth.getUser();
   const userId = userData?.user?.id ?? null;
 
   const expiresAt = new Date(Date.now() + expiresInSec * 1000).toISOString();
 
-  const { data, error } = await client
+  const { data, error } = await supabase
     .from("agent_commands")
     .insert([
       {
@@ -114,15 +108,12 @@ export async function enqueueAgentCommand({
 export async function waitForAgentCommand(
   commandId: string,
   timeoutMs = 15_000,
-  farmId?: string | null,
 ): Promise<AgentCmdResult> {
-  // Acompanhar no MESMO backend em que o comando foi criado. Resolvido uma vez.
-  const client = getSupabaseForFarm(farmId ?? null);
   const startedAt = Date.now();
   const deadline = startedAt + timeoutMs;
 
   while (Date.now() < deadline) {
-    const { data, error } = await client
+    const { data, error } = await supabase
       .from("agent_commands")
       .select("status, result, error_message, duration_ms")
       .eq("id", commandId)
@@ -155,7 +146,7 @@ export async function runAgentCommand(
   args: EnqueueArgs & { timeoutMs?: number },
 ): Promise<{ commandId: string; result: AgentCmdResult }> {
   const commandId = await enqueueAgentCommand(args);
-  const result = await waitForAgentCommand(commandId, args.timeoutMs ?? 15_000, args.farmId);
+  const result = await waitForAgentCommand(commandId, args.timeoutMs ?? 15_000);
   return { commandId, result };
 }
 
@@ -167,12 +158,11 @@ export async function runAgentCommand(
 export async function watchAgentCommand(
   commandId: string,
   onUpdate: (partial: AgentCmdResult) => void,
-  { pollMs = 2_000, timeoutMs = 40_000, farmId }: { pollMs?: number; timeoutMs?: number; farmId?: string | null } = {},
+  { pollMs = 2_000, timeoutMs = 40_000 }: { pollMs?: number; timeoutMs?: number } = {},
 ): Promise<AgentCmdResult> {
-  const client = getSupabaseForFarm(farmId ?? null);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const { data, error } = await client
+    const { data, error } = await supabase
       .from("agent_commands")
       .select("status, result, error_message, duration_ms")
       .eq("id", commandId)

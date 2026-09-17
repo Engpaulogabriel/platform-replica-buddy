@@ -47,20 +47,13 @@ function fmtTime(iso: string | null): string {
   return new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
 }
 
-/**
- * Formata pump-minutes (min-bomba) de forma HONESTA.
- * min-bomba = soma dos minutos perdidos somando TODAS as bombas × TODOS os dias
- * do período — NÃO é tempo de relógio. Por isso não disfarçamos de "hh:mm":
- * a unidade primária é sempre "min-bomba" e, para totais grandes, exibimos
- * também o equivalente aproximado em "h-bomba" (min-bomba ÷ 60).
- * Ex.: 340 → "340 min-bomba" · 5861 → "5.861 min-bomba (≈ 98 h-bomba)".
- */
+/** "340 min-bomba" / "11h 40min-bomba" */
 function fmtPumpMin(total: number): string {
   if (total < 0) total = 0;
-  const min = Math.round(total);
-  if (min < 60) return `${min} min-bomba`;
-  const hBomba = Math.round(min / 60);
-  return `${min.toLocaleString("pt-BR")} min-bomba (≈ ${hBomba.toLocaleString("pt-BR")} h-bomba)`;
+  if (total < 60) return `${total} min-bomba`;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return m > 0 ? `${h}h ${m}min-bomba` : `${h}h-bomba`;
 }
 
 /** Cor do total perdido: <100 verde · 100-500 amarelo · >500 vermelho */
@@ -159,9 +152,9 @@ interface HistoricEff {
 }
 
 interface HeroPeriodStats {
-  avgEff: number | null;         // score_final × 10 (4 sub-indicadores históricos: post/pre/peak/mode)
-  score: number | null;          // 0-10 (uptime é snapshot "agora" e NÃO entra neste score)
-  subScores: { post: number; pre: number; peak: number; mode: number; uptime: number } | null; // uptime = snapshot informativo
+  avgEff: number | null;         // score_final × 10 (nova fórmula 5 sub-indicadores)
+  score: number | null;          // 0-10
+  subScores: { post: number; pre: number; peak: number; mode: number; uptime: number } | null;
   avgFirstLate: number;          // média do atraso da PRIMEIRA bomba de cada dia (min)
   avgLastAntic: number;          // média da antecipação da ÚLTIMA bomba pré-ponta (min)
   totalLostPumpMin: number;      // soma de lost_pump_minutes (dias úteis)
@@ -260,17 +253,15 @@ function EnergyEfficiencyCardInner({ farmId, customPeriod }: InnerProps) {
       const sevenAgoIso = new Date(Date.now() - 7 * 86400_000).toISOString().slice(0, 10);
       const { data: rows } = await supabase
         .from("energy_efficiency_daily")
-        .select("date, efficiency_percent, updated_at, is_free_demand")
+        .select("date, efficiency_percent, updated_at")
         .eq("farm_id", farmId)
         .gte("date", sevenAgoIso)
         .order("date", { ascending: false })
         .limit(30);
       if (cancelled) return;
-      const arr = (rows ?? []) as Array<{ date: string; efficiency_percent: number; updated_at: string; is_free_demand: boolean | null }>;
+      const arr = (rows ?? []) as Array<{ date: string; efficiency_percent: number; updated_at: string }>;
       const last = arr[0] ?? null;
-      // Exclui dias livres (sáb/dom/feriado gravados como 100%) para a média não inflar —
-      // mesmo critério do HERO. Mantém "last" como o último registro processado (livre ou não).
-      const valid = arr.filter(r => r.efficiency_percent != null && r.is_free_demand !== true);
+      const valid = arr.filter(r => r.efficiency_percent != null);
       const avg7d = valid.length > 0 ? valid.reduce((s, r) => s + Number(r.efficiency_percent), 0) / valid.length : null;
       setHistoric({
         lastDate: last?.date ?? null,
@@ -348,8 +339,7 @@ function EnergyEfficiencyCardInner({ farmId, customPeriod }: InnerProps) {
       const eqs = ((eqRes.data ?? []) as { last_communication: string | null }[]);
       const activePumps = eqs.length;
 
-      // Uptime é snapshot instantâneo (mesmo valor para 7d e 30d) — calculado
-      // aqui apenas para exibição "agora"; NÃO entra na composição do score histórico.
+      // Uptime é snapshot — mesmo valor para 7d e 30d
       let uptimePct = 100;
       if (eqs.length > 0) {
         const online = eqs.filter(e => e.last_communication && new Date(e.last_communication).toISOString() >= fiveMinAgo).length;
@@ -409,12 +399,7 @@ function EnergyEfficiencyCardInner({ farmId, customPeriod }: InnerProps) {
         const pctRemote = totalOps > 0 ? (remoteN / totalOps) * 100 : 100;
         const modeScore = scoreLinear10(pctRemote);
 
-        // Score HISTÓRICO (7d/30d) = média dos 4 sub-scores realmente históricos:
-        // post-ponta, pré-ponta, ponta e modo (remoto/local). O UPTIME é um snapshot
-        // instantâneo (janela de 5 min) e NÃO deve pesar num agregado de dias — por isso
-        // foi removido da composição. Ele segue disponível em subScores.uptime para
-        // exibição separada como indicador "agora".
-        const score = +((post + pre + peakScore + modeScore) / 4).toFixed(1);
+        const score = +((post + pre + peakScore + modeScore + uptimeScore) / 5).toFixed(1);
         const avgEff = +(score * 10).toFixed(1);
 
         const latePumps = pumpsSubset.filter(p => Number(p.late_min ?? 0) > 0);
@@ -664,7 +649,7 @@ function EnergyEfficiencyCardInner({ farmId, customPeriod }: InnerProps) {
           <span className={`text-[10px] font-semibold uppercase ${tone.text}`}>{tone.label}</span>
         </div>
         {stats.workingDays === 0 ? (
-          <div className="text-xs text-muted-foreground py-2" title="Nenhuma linha processada em energy_efficiency_daily para dias úteis deste período. Isso indica ausência de DADOS PROCESSADOS (o cálculo diário pode ainda não ter rodado, ou o dia atual ainda não fechou) — não necessariamente que a fazenda deixou de operar.">Sem dados de dias úteis processados neste período (o cálculo diário pode ainda não ter rodado).</div>
+          <div className="text-xs text-muted-foreground py-2">Sem dias úteis registrados.</div>
         ) : (
           <>
             <div className="flex items-baseline gap-1 mb-1.5">
@@ -680,7 +665,7 @@ function EnergyEfficiencyCardInner({ farmId, customPeriod }: InnerProps) {
             <div className="text-[11px] text-muted-foreground space-y-0.5">
               <div>Atraso 1ª bomba: <span className="font-semibold text-foreground tabular-nums">{stats.avgFirstLate} min</span></div>
               <div>Antecipação última bomba: <span className="font-semibold text-foreground tabular-nums">{stats.avgLastAntic} min</span></div>
-              <div title="Soma de minutos perdidos somando TODAS as bombas e TODOS os dias do período — não é tempo de relógio (min-bomba).">Tempo perdido <span className="text-[9px] uppercase tracking-wide opacity-70">(min-bomba)</span>: <span className="font-semibold text-foreground tabular-nums">{fmtPumpMin(stats.totalLostPumpMin)}</span></div>
+              <div>Tempo perdido: <span className="font-semibold text-foreground tabular-nums">{fmtPumpMin(stats.totalLostPumpMin)}</span></div>
               <div>Bombas atrasadas/dia: <span className="font-semibold text-foreground tabular-nums">{stats.avgPumpsLate.toFixed(1)}{hero.activePumps > 0 ? `/${hero.activePumps}` : ""}</span></div>
               {stats.infractionDays > 0 && (
                 <div className="text-destructive">Infrações na ponta: <span className="font-semibold tabular-nums">{stats.infractionDays} dia(s)</span></div>

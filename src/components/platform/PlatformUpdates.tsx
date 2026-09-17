@@ -87,7 +87,8 @@ export default function PlatformUpdates() {
     version: "",
     download_url: "",
     release_notes: "",
-    is_latest: true,
+    // Publicar NÃO marca a release como atual: o operador decide depois.
+    is_latest: false,
     mandatory: false,
     file_hash: "",
     file_size_bytes: "",
@@ -131,7 +132,7 @@ export default function PlatformUpdates() {
   useEffect(() => { load(); }, []);
 
   const resetForm = () => {
-    setForm({ version: "", download_url: "", release_notes: "", is_latest: true, mandatory: false, file_hash: "", file_size_bytes: "" });
+    setForm({ version: "", download_url: "", release_notes: "", is_latest: false, mandatory: false, file_hash: "", file_size_bytes: "" });
     setAsarFile(null);
     setUploadProgress(0);
   };
@@ -185,8 +186,8 @@ export default function PlatformUpdates() {
       notify.fail("Atualizações", "Versão é obrigatória");
       return;
     }
-    if (!/^\d+\.\d+\.\d+/.test(form.version.trim())) {
-      notify.fail("Atualizações", "Versão deve seguir o padrão semver (ex: 1.5.0)");
+    if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(form.version.trim())) {
+      notify.fail("Atualizações", "Versão deve seguir o padrão semver (ex: 1.5.0 ou 3.26.0-migration)");
       return;
     }
     if (!asarFile && !form.download_url.trim()) {
@@ -205,15 +206,21 @@ export default function PlatformUpdates() {
     setUploading(true);
     setUploadProgress(0);
     try {
+      const version = form.version.trim();
       let storage_path: string | null = null;
       let artifact_type: "asar" | "exe" = "exe";
+      let file_hash = form.file_hash.trim() || null;
+      let file_size_bytes = form.file_size_bytes ? Number(form.file_size_bytes) : null;
 
       if (asarFile) {
         const isExe = /\.exe$/i.test(asarFile.name);
         artifact_type = isExe ? "exe" : "asar";
-        const version = form.version.trim();
         const fileName = isExe ? `GestorDeBombasKey-Setup-${version}.exe` : "app.asar";
-        storage_path = `releases/${version}/${fileName}`;
+        // Mesmo layout usado pelo publish-release.cjs e lido por agent-release-signed-url
+        storage_path = `${version}/${fileName}`;
+        // Garante hash/tamanho mesmo se o cálculo no picker não rodou
+        if (!file_hash) file_hash = await computeSha256(asarFile);
+        if (!file_size_bytes) file_size_bytes = asarFile.size;
         setUploadProgress(10);
         const { error: upErr } = await supabaseClient.storage
           .from("agent-releases")
@@ -226,29 +233,36 @@ export default function PlatformUpdates() {
       }
 
 
-      const { error } = await supabase.from("agent_releases").insert({
-        version: form.version.trim(),
-        download_url: form.download_url.trim() || null,
-        storage_path,
-        artifact_type,
-        release_notes: form.release_notes.trim() || null,
-        is_latest: form.is_latest,
-        mandatory: form.mandatory,
-        file_hash: form.file_hash.trim() || null,
-        file_size_bytes: form.file_size_bytes ? Number(form.file_size_bytes) : null,
-      } as any);
+      const { error } = await supabase.from("agent_releases").upsert(
+        {
+          version,
+          download_url: form.download_url.trim() || null,
+          storage_path,
+          artifact_type,
+          release_notes: form.release_notes.trim() || null,
+          is_latest: form.is_latest,
+          mandatory: form.mandatory,
+          file_hash,
+          file_size_bytes,
+          published_at: new Date().toISOString(),
+        } as any,
+        { onConflict: "version" } as any,
+      );
       if (error) {
-        // Se o insert falhou, tenta limpar o arquivo do storage
+        // Se o registro falhou, tenta limpar o arquivo do storage
         if (storage_path) {
           await supabaseClient.storage.from("agent-releases").remove([storage_path]).catch(() => {});
         }
         throw new Error(error.message);
       }
       setUploadProgress(100);
-      notify.ok("Atualizações", `Release ${form.version} publicada`);
+      notify.ok(
+        "Atualizações",
+        `Release ${version} registrada em agent-releases/${storage_path ?? "url externa"} — nenhuma fazenda atualizada`,
+      );
       setDialogOpen(false);
       resetForm();
-      load();
+      await load();
     } catch (e: any) {
       notify.fail("Atualizações", e.message ?? "Falha ao publicar release");
     } finally {
@@ -401,7 +415,7 @@ export default function PlatformUpdates() {
   return (
     <div className="space-y-6">
       {/* Header KPIs */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <Card>
           <CardContent className="p-4">
             <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Versão atual</div>
@@ -436,12 +450,12 @@ export default function PlatformUpdates() {
 
       {/* Releases */}
       <Card>
-        <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="flex items-center gap-2">
             <Rocket className="w-5 h-5 text-primary" />
             Versões publicadas
           </CardTitle>
-          <div className="flex gap-2 flex-wrap">
+          <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={load}>
               <RefreshCw className="w-4 h-4 mr-1.5" />Atualizar
             </Button>
@@ -451,7 +465,7 @@ export default function PlatformUpdates() {
                   <Plus className="w-4 h-4 mr-1.5" />Nova release
                 </Button>
               </DialogTrigger>
-              <DialogContent className="max-w-[95vw] sm:max-w-xl max-h-[90vh] overflow-y-auto">
+              <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
                 <DialogHeader>
                   <DialogTitle>Publicar nova versão do agente</DialogTitle>
                   <DialogDescription>
@@ -583,10 +597,7 @@ export default function PlatformUpdates() {
               Nenhuma release publicada ainda. Crie a primeira após gerar o .exe no GitHub.
             </div>
           ) : (
-            <>
-            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-            <div className="overflow-x-auto -mx-2 px-2">
-            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
+            <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Versão</TableHead>
@@ -717,15 +728,13 @@ export default function PlatformUpdates() {
                 ))}
               </TableBody>
             </Table>
-            </div>
-            </>
           )}
         </CardContent>
       </Card>
 
       {/* Agents per farm */}
       <Card>
-        <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="flex items-center gap-2">
             <Download className="w-5 h-5 text-primary" />
             Versão instalada por fazenda
@@ -765,10 +774,7 @@ export default function PlatformUpdates() {
           {agents.length === 0 ? (
             <div className="text-sm text-muted-foreground py-6 text-center">Nenhuma fazenda encontrada.</div>
           ) : (
-            <>
-            <p className="text-[10px] text-muted-foreground mb-1 sm:hidden">← deslize para ver todas as colunas →</p>
-            <div className="overflow-x-auto -mx-2 px-2">
-            <Table className="md:text-xs [&_th]:md:h-9 [&_th]:md:px-2 [&_td]:md:px-2 [&_td]:md:py-1.5 xl:text-sm [&_th]:xl:h-12 [&_th]:xl:px-4 [&_td]:xl:p-4">
+            <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Fazenda</TableHead>
@@ -821,7 +827,7 @@ export default function PlatformUpdates() {
                               handlePinVersion(a.farm_id, v === "__latest__" ? null : v)
                             }
                           >
-                            <SelectTrigger className="h-8 w-full sm:w-[180px] text-xs">
+                            <SelectTrigger className="h-8 w-[180px] text-xs">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -958,8 +964,6 @@ export default function PlatformUpdates() {
                 })}
               </TableBody>
             </Table>
-            </div>
-            </>
           )}
         </CardContent>
       </Card>

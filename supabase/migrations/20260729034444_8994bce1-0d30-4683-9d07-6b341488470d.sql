@@ -1,0 +1,1 @@
+ALTER TABLE public.farms ADD COLUMN IF NOT EXISTS inema_enabled boolean NOT NULL DEFAULT false;

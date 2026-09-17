@@ -1,0 +1,7 @@
+CREATE OR REPLACE FUNCTION public.is_workday(d date)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT EXTRACT(DOW FROM d) NOT IN (0, 6);
+$$;
