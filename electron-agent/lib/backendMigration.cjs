@@ -200,7 +200,14 @@ function isCommitted(cfg, nowMs) {
   const t = Date.parse(b.lastSwitchAt || "");
   if (!Number.isFinite(t)) return false;
   const agora = Number.isFinite(nowMs) ? nowMs : Date.now();
-  return (agora - t) >= PADROES.validationWindowMs;
+  const decorrido = agora - t;
+  // RELÓGIO PARA TRÁS: `decorrido` negativo significa que a promoção está no
+  // "futuro" — impossível. O PC corrigiu o relógio (NTP, RTC descarregada,
+  // fuso mal configurado no boot). As duas leituras possíveis são "reabrir a
+  // janela" ou "considerar cumprida"; reabrir rearmaria o rollback automático
+  // numa fazenda em produção por causa de um relógio errado. Fica a segura.
+  if (decorrido < 0) return true;
+  return decorrido >= PADROES.validationWindowMs;
 }
 
 /**

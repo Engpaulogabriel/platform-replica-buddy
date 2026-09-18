@@ -280,6 +280,60 @@ describe("reinício e configs existentes", () => {
   });
 });
 
+// ── restart e relógio ───────────────────────────────────────────────────────
+describe("janela é imune a restart e a relógio errado", () => {
+  it("restart depois de 30 min NÃO rearma o rollback", () => {
+    // O restart zera qualquer contador em memória; o que sobrevive é o config.
+    const c = configPromovido(T0);
+    const { ultimo, config } = falhas(c, 5, T0 + 31 * MIN);
+    expect(ultimo.rollback).toBe(false);
+    expect(config.supabaseUrl).toBe(NEW_URL);
+  });
+
+  it("restart com healthySuccesses perdido ainda fica protegido pelo tempo", () => {
+    // Simula config persistido SEM os campos novos (wiring que não os gravou).
+    const c = configPromovido(T0);
+    const semContador = { ...c, backendConfig: {
+      ...c.backendConfig, healthySuccesses: 0, committedAt: null } };
+    const { ultimo } = falhas(semContador, 50, T0 + 12 * HORA);
+    expect(ultimo.rollback).toBe(false);
+  });
+
+  it("12 h + restart + 5 cloud_network permanece no novo", () => {
+    const c = configPromovido(T0);
+    const boot = reconcileOnBoot(c, iso(T0 + 12 * HORA));
+    const { ultimo, config } = falhas(boot.config, 5, T0 + 12 * HORA + MIN);
+    expect(ultimo.rollback).toBe(false);
+    expect(config.supabaseUrl).toBe(NEW_URL);
+  });
+
+  it("relógio ANDANDO PARA TRÁS não reabre a janela", () => {
+    const c = configPromovido(T0);
+    // promoção às 12:00; relógio volta para 11:00 (NTP/RTC errada no boot)
+    expect(isCommitted(c, T0 - 1 * HORA)).toBe(true);
+    const { ultimo } = falhas(c, 50, T0 - 1 * HORA);
+    expect(ultimo.rollback).toBe(false);
+  });
+
+  it("mas uma promoção genuinamente recente continua em validação", () => {
+    const c = configPromovido(T0);
+    expect(isCommitted(c, T0)).toBe(false);
+    expect(isCommitted(c, T0 + 5 * MIN)).toBe(false);
+    const { ultimo } = falhas(c, 5, T0 + 5 * MIN);
+    expect(ultimo.rollback).toBe(true);   // a janela ainda protege a promoção
+  });
+
+  it("timestamps são ISO/epoch — fuso não interfere", () => {
+    const utc = configPromovido(T0);
+    const mesmoInstanteOutroFuso = {
+      ...utc,
+      backendConfig: { ...utc.backendConfig,
+        lastSwitchAt: new Date(T0).toISOString().replace("Z", "+00:00") },
+    };
+    expect(isCommitted(mesmoInstanteOutroFuso, T0 + 31 * MIN)).toBe(true);
+  });
+});
+
 // ── 13 — observabilidade sem vazar segredo ──────────────────────────────────
 describe("diagnóstico", () => {
   it("safeSummary expõe estado e host, nunca chave", () => {
