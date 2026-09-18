@@ -1,5 +1,7 @@
 import AgentUpdateStatusPanel from "./AgentUpdateStatusPanel";
 import { useEffect, useState, useMemo } from "react";
+import { tryGetSupabaseForFarm, assertOperationalClient } from "@/lib/supabaseRouter";
+import { isFarmMigrated } from "@/lib/migrationRegistry";
 import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -107,8 +109,30 @@ export default function PlatformUpdates() {
           .order("name"),
       ]);
       setReleases((rel as Release[]) ?? []);
+      // OVERLAY OPERACIONAL — mesmo padrão do PlatformAdmin.
+      // A base (farms, versão alvo, versão anterior) é CADASTRAL e continua no
+      // backend antigo. Já agent_version/agent_status/last_heartbeat vêm de
+      // site_health, que é OPERACIONAL: para fazenda migrada o antigo guarda um
+      // retrato congelado no cutover. Sem fallback: se o backend da fazenda não
+      // responder, os campos ficam nulos e a linha mostra indisponível.
+      const shByFarm = new Map<string, any>();
+      await Promise.all(((farms ?? []) as any[])
+        .filter((f) => isFarmMigrated(f.id))
+        .map(async (f) => {
+          const routed = tryGetSupabaseForFarm(f.id);
+          if (!routed.client) { shByFarm.set(f.id, null); return; }
+          const { data, error } = await routed.client
+            .from("site_health")
+            .select("agent_version, agent_status, last_heartbeat")
+            .eq("farm_id", f.id)
+            .maybeSingle();
+          shByFarm.set(f.id, error ? null : data);
+        }));
+
       const mapped: FarmAgent[] = (farms ?? []).map((f: any) => {
-        const sh = Array.isArray(f.site_health) ? f.site_health[0] : f.site_health;
+        const shOld = Array.isArray(f.site_health) ? f.site_health[0] : f.site_health;
+        // Fazenda migrada NUNCA usa o site_health do backend antigo.
+        const sh = shByFarm.has(f.id) ? shByFarm.get(f.id) : shOld;
         return {
           farm_id: f.id,
           name: f.name,
@@ -315,7 +339,9 @@ export default function PlatformUpdates() {
     const newlyBlocked: string[] = [];
     const newlyOk: string[] = [];
     for (const fid of targets) {
-      const { data, error } = await supabase.rpc("request_agent_update" as any, {
+      // OTA é operacional POR FAZENDA: o agente lê a ordem no backend dele.
+      // Pedir no antigo para uma fazenda migrada seria um update que nunca chega.
+      const { data, error } = await assertOperationalClient(fid).rpc("request_agent_update" as any, {
         _farm_id: fid, _version: version, _force: force,
       });
       if (error) { failed++; continue; }
@@ -347,7 +373,7 @@ export default function PlatformUpdates() {
         expiresInSec: 120,
       });
       // Atualiza target_version do agent_update_status pra refletir o alvo do rollback
-      await supabase.from("agent_update_status").upsert(
+      await assertOperationalClient(farmId).from("agent_update_status").upsert(
         {
           farm_id: farmId,
           target_version: targetVersion,
@@ -393,7 +419,10 @@ export default function PlatformUpdates() {
    * Passa `version=null` para limpar o pin (a fazenda volta a seguir is_latest).
    */
   const handlePinVersion = async (farmId: string, version: string | null) => {
-    const { error } = await supabase
+    // `farms.target_agent_version` é lido pelo AGENTE, no backend dele — logo é
+    // operacional, não cadastral. Fixar a versão no antigo não teria efeito
+    // algum numa fazenda migrada.
+    const { error } = await assertOperationalClient(farmId)
       .from("farms")
       .update({ target_agent_version: version })
       .eq("id", farmId);

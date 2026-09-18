@@ -5,6 +5,8 @@
 // Renderizado no AppLayout para aparecer em todas as páginas autenticadas.
 import { useEffect, useState } from "react";
 import { AlertTriangle, Zap } from "lucide-react";
+import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
 import { supabase } from "@/integrations/supabase/client";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { useNationalHolidaysSet, DEFAULT_PROD_CFG } from "@/hooks/useProductivityData";
@@ -22,6 +24,10 @@ interface EqRow {
 }
 
 const ONLINE_WINDOW_MS = 60_000; // 60s sem RX = offline para alerta de custo
+// Fazenda migrada não tem Realtime utilizável (backend novo sem publication).
+// Metade da janela acima: o dado nunca fica mais velho que a própria regra —
+// sem isso o banner desligaria sozinho por dado parado, não por bomba parada.
+const MIGRATED_REFRESH_MS = 30_000;
 
 function isCommunicating(eq: EqRow): boolean {
   if (eq.communication_status === "offline") return false;
@@ -58,18 +64,31 @@ export function PeakHourBanner() {
   useEffect(() => {
     if (!farmId) return;
     let cancelled = false;
+    // Cliente resolvido UMA VEZ a partir do farm_id desta carga. Fazenda
+    // migrada sem backend disponível NÃO cai para o antigo: sem dado, sem
+    // banner — melhor calar que alarmar com estado congelado.
+    const routed = tryGetSupabaseForFarm(farmId);
+    if (!routed.client) { setEquipments([]); return; }
+    const db = routed.client;
     const refresh = async () => {
       const [eqRes, cfgRes] = await Promise.all([
-        supabase.from("equipments")
+        db.from("equipments")
           .select("id, name, power_kw, saida, last_outputs_state, last_communication, communication_status")
           .eq("farm_id", farmId).in("type", ["poco", "bombeamento"] as any),
-        supabase.from("farm_productivity_config" as any).select("contracted_demand_kw").eq("farm_id", farmId).maybeSingle(),
+        db.from("farm_productivity_config" as any).select("contracted_demand_kw").eq("farm_id", farmId).maybeSingle(),
       ]);
       if (cancelled) return;
       setEquipments((eqRes.data as any) ?? []);
       setContractedKw(Number((cfgRes.data as any)?.contracted_demand_kw ?? DEFAULT_PROD_CFG.contracted_demand_kw));
     };
     void refresh();
+
+    // Fazenda migrada: nada de assinar o backend antigo. Atualização por relógio.
+    if (!isRealtimeAvailableForFarm(farmId)) {
+      const id = setInterval(() => { if (!cancelled) void refresh(); }, MIGRATED_REFRESH_MS);
+      return () => { cancelled = true; clearInterval(id); };
+    }
+
     const ch = supabase.channel(`peak-${farmId}`)
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "equipments", filter: `farm_id=eq.${farmId}` }, () => void refresh())
       .subscribe();

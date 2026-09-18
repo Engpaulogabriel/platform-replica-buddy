@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { WifiOff, Wifi, Radio, Download, Loader2 } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
 import { guardExport } from "@/lib/securityClient";
 
 type Cycle = {
@@ -82,8 +82,14 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
     (async () => {
       const fromIso = new Date(`${fromDate}T00:00:00`).toISOString();
       const toIso = new Date(`${toDate}T23:59:59.999`).toISOString();
+      // Cliente único da fazenda do relatório: automation_log e equipments são
+      // operacionais e precisam vir do MESMO backend, senão o relatório cruza
+      // eventos de um servidor com o estado atual de outro.
+      const routed = tryGetSupabaseForFarm(farmId);
+      if (!routed.client) { setRawCycles([]); setLoading(false); return; }
+      const db = routed.client;
       const [logRes, equipRes] = await Promise.all([
-        supabase
+        db
           .from("automation_log")
           .select("id, equipment_name, occurred_at, details")
           .eq("farm_id", farmId)
@@ -92,7 +98,7 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
           .in("action", ["status_read"])
           .order("occurred_at", { ascending: true })
           .limit(2000),
-        supabase
+        db
           .from("equipments")
           .select("name, communication_status, last_communication")
           .eq("farm_id", farmId),

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { tryGetSupabaseForFarm, assertOperationalClient } from "@/lib/supabaseRouter";
+import { isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -62,7 +64,9 @@ export default function PlatformServiceMode() {
   const [farmId, setFarmId] = useState<string>("");
   const [equipId, setEquipId] = useState<string>("");
   const [history, setHistory] = useState<TestEntry[]>([]);
-  const [activeTest, setActiveTest] = useState<{ commandId: string; tx: string; sentAt: number; equipName: string } | null>(null);
+  // `farmId` viaja junto: o acompanhamento do comando precisa ler no MESMO
+  // backend em que ele foi enfileirado, mesmo que a seleção da tela mude.
+  const [activeTest, setActiveTest] = useState<{ commandId: string; tx: string; sentAt: number; equipName: string; farmId: string } | null>(null);
   const [customFrame, setCustomFrame] = useState("");
   const [serviceModeActive, setServiceModeActive] = useState(false);
   const inactivityRef = useRef<number>(0);
@@ -77,7 +81,9 @@ export default function PlatformServiceMode() {
 
   useEffect(() => {
     if (!farmId) { setEquipments([]); return; }
-    void supabase.from("equipments")
+    const routed = tryGetSupabaseForFarm(farmId);
+    if (!routed.client) { setEquipments([]); return; }
+    void routed.client.from("equipments")
       .select("id,name,hw_id,saida,farm_id,last_outputs_state,last_communication,last_polling_at")
       .eq("farm_id", farmId)
       .in("type", ["poco", "bombeamento"])
@@ -96,7 +102,7 @@ export default function PlatformServiceMode() {
         setServiceModeActive(false);
         return;
       }
-      await supabase.from("service_mode_locks").upsert({
+      await assertOperationalClient(farmId).from("service_mode_locks").upsert({
         farm_id: farmId, tsnn,
         locked_by: user?.id ?? null,
         locked_at: new Date().toISOString(),
@@ -110,7 +116,12 @@ export default function PlatformServiceMode() {
 
   useEffect(() => {
     if (!activeTest) return;
-    const channel = supabase.channel(`svc_cmd_${activeTest.commandId}`)
+    // Acompanha o comando no backend em que ele foi criado (activeTest.farmId),
+    // não no da seleção atual da tela. Cliente capturado uma vez.
+    const trackRouted = tryGetSupabaseForFarm(activeTest.farmId);
+    const trackDb = trackRouted.client;
+    if (!trackDb) return;
+    const channel = !isRealtimeAvailableForFarm(activeTest.farmId) ? null : supabase.channel(`svc_cmd_${activeTest.commandId}`)
       .on("postgres_changes", {
         event: "UPDATE", schema: "public", table: "commands",
         filter: `id=eq.${activeTest.commandId}`,
@@ -136,7 +147,7 @@ export default function PlatformServiceMode() {
       })
       .subscribe();
     const poll = window.setInterval(async () => {
-      const { data } = (await supabase.rpc("get_command_result", { p_command_id: activeTest.commandId }).maybeSingle()) as any;
+      const { data } = (await trackDb.rpc("get_command_result", { p_command_id: activeTest.commandId }).maybeSingle()) as any;
       if (data && ["executed", "timeout", "error", "cancelled"].includes(data.status)) {
         const latencyMs = data.responded_at ? new Date(data.responded_at).getTime() - activeTest.sentAt : null;
         const status: TestEntry["status"] =
@@ -148,12 +159,15 @@ export default function PlatformServiceMode() {
         setActiveTest(null);
       }
     }, 2000);
-    return () => { void supabase.removeChannel(channel); window.clearInterval(poll); };
-  }, [activeTest?.commandId]);
+    return () => {
+      if (channel) void supabase.removeChannel(channel);
+      window.clearInterval(poll);
+    };
+  }, [activeTest?.commandId, activeTest?.farmId]);
 
   const releaseLock = async () => {
     if (!eq || !farmId) return;
-    await supabase.from("service_mode_locks").delete()
+    await assertOperationalClient(farmId).from("service_mode_locks").delete()
       .eq("farm_id", farmId).eq("tsnn", tsnnOf(eq));
   };
 
@@ -201,7 +215,9 @@ export default function PlatformServiceMode() {
       frame = buildTestFrame(tsnn, saida, payload);
     }
     const sentAt = Date.now();
-    const { data, error } = await supabase.from("commands").insert({
+    // Escrita operacional (frame serial real). Fail-closed pelo farm_id.
+    const db = assertOperationalClient(farmId);
+    const { data, error } = await db.from("commands").insert({
       farm_id: farmId,
       equipment_id: eq.id,
       plc_hw_id: tsnn,
@@ -213,7 +229,7 @@ export default function PlatformServiceMode() {
       created_by: user?.id ?? null,
     } as any).select("id").single();
     if (error) { notify.fail("Modo Serviço", "Erro ao enfileirar teste: " + error.message); return; }
-    setActiveTest({ commandId: data.id, tx: frame, sentAt, equipName: eq.name });
+    setActiveTest({ commandId: data.id, tx: frame, sentAt, equipName: eq.name, farmId });
     setHistory((prev) => [{
       at: sentAt, equipName: eq.name, tx: frame, rx: "(aguardando…)", latencyMs: null, status: "pending" as const,
     }, ...prev].slice(0, 50));

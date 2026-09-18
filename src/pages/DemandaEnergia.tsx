@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import { tryGetSupabaseForFarm, assertOperationalClient } from "@/lib/supabaseRouter";
+import { isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
 import { supabase } from "@/integrations/supabase/client";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { usePlatformAdmin } from "@/hooks/usePlatformAdmin";
@@ -67,6 +69,9 @@ interface Config {
 }
 
 const ONLINE_WINDOW_MS = 60_000;
+// Fazenda migrada não tem Realtime utilizável: recarrega por relógio, em
+// metade da janela acima, para o dado nunca ficar mais velho que a regra.
+const MIGRATED_REFRESH_MS = 30_000;
 
 function isCommunicating(eq: Equipment): boolean {
   if (eq.communication_status === "offline") return false;
@@ -149,15 +154,19 @@ export default function DemandaEnergia() {
 
   const load = useCallback(async () => {
     if (!farmId) return;
+    // Cliente resolvido UMA VEZ pelo farm_id desta carga; sem fallback ao antigo.
+    const routed = tryGetSupabaseForFarm(farmId);
+    if (!routed.client) { setEquipments([]); setLoading(false); return; }
+    const db = routed.client;
     const [eqRes, cfgRes] = await Promise.all([
-      supabase
+      db
         .from("equipments")
         .select("id, name, type, power_kw, power_cv, demanda_kw, saida, last_outputs_state, last_communication, desired_running, communication_status")
         .eq("farm_id", farmId)
         .eq("active", true)
         .in("type", ["poco", "bombeamento"] as any)
         .order("name", { ascending: true }),
-      supabase
+      db
         .from("farm_productivity_config" as any)
         .select("contracted_demand_kw, demand_cost_per_kw, utility_name")
         .eq("farm_id", farmId)
@@ -193,6 +202,11 @@ export default function DemandaEnergia() {
   useEffect(() => {
     void load();
     if (!farmId) return;
+    // Fazenda migrada: não assina o backend antigo — atualiza por relógio.
+    if (!isRealtimeAvailableForFarm(farmId)) {
+      const id = setInterval(() => { void load(); }, MIGRATED_REFRESH_MS);
+      return () => clearInterval(id);
+    }
     const ch = supabase
       .channel(`demanda-${farmId}`)
       .on(
@@ -228,7 +242,9 @@ export default function DemandaEnergia() {
     }
     setSavingDemand(true);
     try {
-      const { error } = await supabase
+      const routedD = tryGetSupabaseForFarm(farmId);
+      if (!routedD.client) throw new Error("Servidor desta fazenda indisponível.");
+      const { error } = await routedD.client
         .from("farm_productivity_config" as any)
         .upsert({ farm_id: farmId, contracted_demand_kw: value } as any, { onConflict: "farm_id" });
       if (error) throw error;
@@ -281,7 +297,9 @@ export default function DemandaEnergia() {
 
     setSavingSettings(true);
     try {
-      const { error } = await supabase
+      const routedCfg = tryGetSupabaseForFarm(farmId);
+      if (!routedCfg.client) throw new Error("Servidor desta fazenda indisponível.");
+      const { error } = await routedCfg.client
         .from("farm_productivity_config" as any)
         .upsert(payload as any, { onConflict: "farm_id" });
       if (error) throw error;
@@ -317,7 +335,10 @@ export default function DemandaEnergia() {
     // Desliga a bomba de maior impacto primeiro
     const target = sortedByImpact[0];
     try {
-      const { error } = await supabase.from("commands").insert({
+      // COMANDO FÍSICO (corte de carga). Escrita operacional: fail-closed pelo
+      // farm_id — enfileirar no backend antigo o desligamento de uma bomba cujo
+      // Agent escuta o novo significaria um comando que nunca é executado.
+      const { error } = await assertOperationalClient(farmId).from("commands").insert({
         farm_id: farmId,
         equipment_id: target.id,
         type: "manual",

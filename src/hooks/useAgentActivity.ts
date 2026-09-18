@@ -8,6 +8,8 @@
 // Custo: ~3 requests/sessão em vez de ~26 mil/dia.
 
 import { useEffect, useState } from "react";
+import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
 import { supabase } from "@/integrations/supabase/client";
 
 const TICK_MS = 30_000; // recalcula isLive (passagem do tempo) a cada 30s — state only, sem fetch
@@ -40,21 +42,26 @@ export function useAgentActivity(farmId: string | null): AgentActivity {
     // 1. Fetch inicial (1x). Depois disso, atividade só via Realtime.
     const fetchInitial = async () => {
       try {
+        // agent_logs e commands são operacionais: seguem o backend da fazenda.
+        // Cliente resolvido UMA VEZ e usado nas três consultas.
+        const routed = tryGetSupabaseForFarm(farmId);
+        if (!routed.client) { if (mounted) setLoading(false); return; }
+        const db = routed.client;
         const [logRes, sentRes, respRes] = await Promise.all([
-          supabase
+          db
             .from("agent_logs")
             .select("created_at")
             .eq("farm_id", farmId)
             .order("created_at", { ascending: false })
             .limit(1),
-          supabase
+          db
             .from("commands")
             .select("sent_at")
             .eq("farm_id", farmId)
             .not("sent_at", "is", null)
             .order("sent_at", { ascending: false })
             .limit(1),
-          supabase
+          db
             .from("commands")
             .select("responded_at")
             .eq("farm_id", farmId)
@@ -76,8 +83,12 @@ export function useAgentActivity(farmId: string | null): AgentActivity {
     void fetchInitial();
 
     // 2. Realtime: dispara em qualquer atividade do agente.
+    // Fazenda migrada: o canal disponível é o do backend ANTIGO e não representa
+    // esta fazenda — não assina. Sem Realtime aqui, `isLive` passa a depender só
+    // do fetch inicial e do tick, exatamente como quando o canal não conecta.
+    const canSubscribe = isRealtimeAvailableForFarm(farmId);
     const channelName = `agent-activity-${farmId}-${Math.random().toString(36).slice(2, 8)}`;
-    const channel = supabase
+    const channel = !canSubscribe ? null : supabase
       .channel(channelName)
       .on(
         "postgres_changes",
@@ -101,7 +112,7 @@ export function useAgentActivity(farmId: string | null): AgentActivity {
     return () => {
       mounted = false;
       clearInterval(tickId);
-      try { supabase.removeChannel(channel); } catch { /* ignore */ }
+      if (channel) { try { supabase.removeChannel(channel); } catch { /* ignore */ } }
     };
   }, [farmId]);
 
