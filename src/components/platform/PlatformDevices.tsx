@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { assertOperationalClient, tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
 import { isFarmMigrated, MIGRATED_FARMS } from "@/lib/migrationRegistry";
+
+// Painel de inventário: 60 s basta para eventos de adulteração da fazenda migrada.
+const DEVICES_POLL_MS = 60_000;
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -158,7 +161,14 @@ export default function PlatformDevices({ isAdmin }: Props) {
           void refresh();
         })
       .subscribe();
-    return () => { void supabase.removeChannel(ch); };
+    // O canal acima é do backend ANTIGO e serve só de GATILHO: quem monta a
+    // lista é refresh(), que já lê a fazenda migrada no backend dela. Falta
+    // apenas o gatilho para os eventos da migrada — daí o relógio.
+    const poll = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void refresh();
+    }, DEVICES_POLL_MS);
+    return () => { void supabase.removeChannel(ch); clearInterval(poll); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

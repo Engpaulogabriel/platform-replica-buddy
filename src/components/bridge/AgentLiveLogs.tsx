@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getFarmBroadcastChannel, removeFarmBroadcastChannel } from "@/lib/realtimeKillSwitch";
 import { enqueueAgentCommand, type AgentCmdKind } from "@/lib/agentCommands";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -119,7 +120,11 @@ export default function AgentLiveLogs({ farmId }: Props) {
     setStreamStatus("starting");
     setLogs([]);
 
-    const channel = supabase.channel(`agent-logs-${farmId}`, {
+    // O Agent publica o stream de log por BROADCAST no backend em que está
+    // conectado. Para a Pérola isso é o projeto NOVO — assinar o antigo aqui
+    // seria escutar uma sala vazia. Broadcast não depende de publication, então
+    // não há nada a habilitar no Supabase.
+    const channel = getFarmBroadcastChannel(`agent-logs-${farmId}`, farmId, {
       config: { broadcast: { self: false } },
     });
 
@@ -162,7 +167,7 @@ export default function AgentLiveLogs({ farmId }: Props) {
         renewTimerRef.current = null;
       }
       void sendAgentCmd("stop_log_stream");
-      try { void supabase.removeChannel(channel); } catch { /* ignore */ }
+      try { void removeFarmBroadcastChannel(farmId, channel); } catch { /* ignore */ }
     };
   }, [farmId, sendAgentCmd]);
 

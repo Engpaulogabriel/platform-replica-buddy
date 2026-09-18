@@ -2,6 +2,9 @@ import { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
 import { isFarmMigrated, MIGRATED_FARMS } from "@/lib/migrationRegistry";
+
+// OTA em andamento muda em segundos; 20 s acompanha sem inundar o backend.
+const OTA_POLL_MS = 20_000;
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -96,6 +99,10 @@ export default function AgentUpdateStatusPanel() {
           const next = [...prev];
           const row = (payload.new ?? payload.old) as UpdateStatusRow;
           if (!row?.farm_id) return prev;
+          // O canal é do backend ANTIGO. Um evento dele sobre fazenda MIGRADA
+          // seria um retrato congelado sobrescrevendo o estado real lido do
+          // backend dela — ignora. Quem atualiza a migrada é o poll abaixo.
+          if (isFarmMigrated(row.farm_id)) return prev;
           const idx = next.findIndex((r) => r.farm_id === row.farm_id);
           if (payload.eventType === "DELETE") {
             return idx >= 0 ? next.filter((r) => r.farm_id !== row.farm_id) : prev;
@@ -106,7 +113,13 @@ export default function AgentUpdateStatusPanel() {
         });
       })
       .subscribe();
-    return () => { void supabase.removeChannel(ch); };
+    // Fazenda migrada não tem canal utilizável: refresco por relógio cobre o
+    // acompanhamento de um update em andamento enquanto a tela está aberta.
+    const poll = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void load();
+    }, OTA_POLL_MS);
+    return () => { void supabase.removeChannel(ch); clearInterval(poll); };
   }, []);
 
   const clearStatus = async (farmId: string) => {

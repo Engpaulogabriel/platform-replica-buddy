@@ -11,6 +11,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from "@/integrations/supabase/client";
 import { isFarmMigrated } from "@/lib/migrationRegistry";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 // ATIVO POR PADRÃO — decisão deliberada. O kill switch derrubava TODO o Realtime
 // do app (o stub responde `CLOSED` no subscribe), o que era a causa global do
@@ -33,8 +34,19 @@ export const REALTIME_DISABLED =
 type ChannelFn = typeof supabase.channel;
 type RemoveChannelFn = typeof supabase.removeChannel;
 
-const originalChannel: ChannelFn = supabase.channel.bind(supabase);
-const originalRemoveChannel: RemoveChannelFn = supabase.removeChannel.bind(supabase);
+// Bind defensivo: este módulo é importado por libs de baixo nível (automationLog,
+// commandWorker) que aparecem em suítes onde o cliente é mockado parcialmente.
+// Um `.bind` direto quebrava o CARREGAMENTO desses testes por um detalhe que não
+// tem nada a ver com o que eles verificam.
+const noChannel = ((topic: string) => {
+  throw new Error(`[realtime] cliente sem suporte a channel() — topic "${topic}"`);
+}) as unknown as ChannelFn;
+const originalChannel: ChannelFn =
+  typeof supabase?.channel === "function" ? supabase.channel.bind(supabase) : noChannel;
+const originalRemoveChannel: RemoveChannelFn =
+  typeof supabase?.removeChannel === "function"
+    ? supabase.removeChannel.bind(supabase)
+    : (async () => "ok") as unknown as RemoveChannelFn;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DUAL-BACKEND — Realtime NÃO é fonte válida para fazenda migrada
@@ -94,6 +106,35 @@ export function getRealtimeChannel(
     return makeInertChannel(topic);
   }
   return originalChannel(topic, opts as any);
+}
+
+/**
+ * Canal de BROADCAST da fazenda — no cliente DELA.
+ *
+ * Diferença essencial para `getRealtimeChannel`: broadcast NÃO depende de
+ * `supabase_realtime` publication. É mensagem ponto-a-ponto por WebSocket entre
+ * quem publica (o Agent) e quem escuta (esta tela). Portanto, para uma fazenda
+ * migrada, o canal correto é o do backend NOVO — que é onde o Agent dela está
+ * conectado e publicando. Assinar o antigo aqui seria escutar uma sala vazia.
+ *
+ * Isto NÃO habilita Realtime no projeto novo: nenhuma publication é criada nem
+ * alterada. Só abre a conexão de cliente no projeto certo.
+ */
+export function getFarmBroadcastChannel(
+  topic: string,
+  farmId: string | null | undefined,
+  opts?: Parameters<ChannelFn>[1],
+) {
+  const client = getSupabaseForFarm(farmId);
+  return client.channel(topic, opts as any);
+}
+
+export async function removeFarmBroadcastChannel(
+  farmId: string | null | undefined,
+  channel: Parameters<RemoveChannelFn>[0],
+) {
+  if (channel && (channel as any)[INERT]) return "ok";
+  return getSupabaseForFarm(farmId).removeChannel(channel as any);
 }
 
 export async function removeRealtimeChannel(channel: Parameters<RemoveChannelFn>[0]) {

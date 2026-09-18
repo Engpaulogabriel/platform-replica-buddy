@@ -3,6 +3,11 @@
 // daquele lote com auditoria. Sem revisar evento por evento.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
+
+// Fila de reconciliação é de baixa cadência — 30 s cobre o backfill sem ruído.
+const RECONCILE_POLL_MS = 30_000;
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,7 +60,7 @@ export default function AuthorshipReconciliationQueue() {
     if (!farmId || !canView) { setLoading(false); return; }
     setLoading(true);
     const [{ data: q }, { data: p }] = await Promise.all([
-      supabase.from("remote_reconciliation_queue" as any)
+      getSupabaseForFarm(farmId).from("remote_reconciliation_queue" as any)
         .select("*").eq("farm_id", farmId).eq("status", "pending")
         .order("started_at", { ascending: false }).limit(200),
       supabase.from("profiles").select("id, full_name, email").order("full_name").limit(500),
@@ -71,6 +76,16 @@ export default function AuthorshipReconciliationQueue() {
   // Realtime: a fila reflete o backfill sem polling do browser.
   useEffect(() => {
     if (!farmId || !canView) return;
+    // Fazenda migrada: o canal do backend antigo não representa esta fila.
+    // Sem Realtime utilizável, um refresh por relógio mantém a fila viva
+    // enquanto a tela está aberta (pausa em segundo plano).
+    if (!isRealtimeAvailableForFarm(farmId)) {
+      const id = setInterval(() => {
+        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+        void load();
+      }, RECONCILE_POLL_MS);
+      return () => clearInterval(id);
+    }
     const ch = supabase.channel(`rrq:${farmId}`)
       .on("postgres_changes",
         { event: "*", schema: "public", table: "remote_reconciliation_queue", filter: `farm_id=eq.${farmId}` },

@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isFarmMigrated, MIGRATED_FARMS } from "@/lib/migrationRegistry";
+
+// Alertas não são tempo real crítico; 60 s cobre a fazenda migrada sem ruído.
+const ALERTS_POLL_MS = 60_000;
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -57,19 +62,38 @@ export default function PlatformAlerts({ isAdmin: _isAdmin }: { isAdmin: boolean
   const refresh = useCallback(async () => {
     setLoading(true);
     const since = new Date(Date.now() - Number(periodDays) * 86400_000).toISOString();
+    const args = {
+      p_severity: severity === "all" ? null : severity,
+      p_category: category === "all" ? null : category,
+      p_unread_only: unreadOnly,
+      p_since: since,
+      p_limit: 300,
+    };
     const [feedRes, statsRes] = await Promise.all([
       supabase.rpc("platform_alerts_feed" as any, {
         p_farm_id: farmId === "all" ? null : farmId,
-        p_severity: severity === "all" ? null : severity,
-        p_category: category === "all" ? null : category,
-        p_unread_only: unreadOnly,
-        p_since: since,
-        p_limit: 300,
+        ...args,
       }),
       supabase.rpc("platform_alerts_stats" as any),
     ]);
+    // O feed acima agrega agent_logs/automation_log do backend ANTIGO. Para uma
+    // fazenda MIGRADA esses logs pararam no cutover: sem este merge, os alertas
+    // dela sumiriam da tela sem nenhum erro aparente.
+    const migradas = farmId === "all"
+      ? [...MIGRATED_FARMS]
+      : (isFarmMigrated(farmId) ? [farmId] : []);
+    const extras: any[] = [];
+    await Promise.all(migradas.map(async (fid) => {
+      const routed = tryGetSupabaseForFarm(fid);
+      if (!routed.client) return;
+      const { data } = await routed.client.rpc("platform_alerts_feed" as any, { p_farm_id: fid, ...args });
+      extras.push(...(((data as any) ?? [])));
+    }));
     if (feedRes.error) notify.fail("Alertas", "Erro ao carregar alertas: " + feedRes.error.message);
-    else setRows((feedRes.data as any) ?? []);
+    else {
+      const base = (((feedRes.data as any) ?? []) as any[]).filter((r) => !isFarmMigrated(r.farm_id));
+      setRows([...base, ...extras] as any);
+    }
     if (!statsRes.error) setStats(statsRes.data as any);
     setLoading(false);
   }, [farmId, severity, category, unreadOnly, periodDays]);
@@ -84,7 +108,13 @@ export default function PlatformAlerts({ isAdmin: _isAdmin }: { isAdmin: boolean
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "agent_logs" }, () => void refresh())
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "automation_log" }, () => void refresh())
       .subscribe();
-    return () => { void supabase.removeChannel(ch); };
+    // Canal do antigo = gatilho para as 9 fazendas não migradas. A migrada é
+    // coberta pelo relógio, já que não há canal utilizável para ela.
+    const poll = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void refresh();
+    }, ALERTS_POLL_MS);
+    return () => { void supabase.removeChannel(ch); clearInterval(poll); };
   }, [refresh]);
 
   const filtered = useMemo(() => {

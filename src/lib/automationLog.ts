@@ -11,6 +11,7 @@ import { persist, createJSONStorage } from "zustand/middleware";
 import type { PumpCommandLog, PumpStatusLog } from "@/components/dashboard/PumpTable";
 import { supabase } from "@/integrations/supabase/client";
 import { getSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
 import type {
   Database,
 } from "@/integrations/supabase/types";
@@ -580,6 +581,10 @@ export async function startAutomationLogSync(): Promise<void> {
     for (const r of rows) upsert(rowToEntry(r));
   }
 
+  // Fazenda migrada: o canal do backend ANTIGO não traz eventos desta fazenda e
+  // ainda injetaria linhas congeladas direto no store. O histórico dela já vem
+  // das leituras paginadas (roteadas) e do refresh das telas que o consomem.
+  if (!isRealtimeAvailableForFarm(ctx.farmId)) return;
   try {
     supabase
       .channel(`automation_log:${ctx.farmId}:${Math.random().toString(36).slice(2, 8)}`)

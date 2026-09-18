@@ -292,6 +292,10 @@ const Dashboard = () => {
       }));
       try { localStorage.setItem("dashboard_layout", JSON.stringify(cloud)); } catch {}
     })();
+    // CLASSIFICAÇÃO: `dashboard_layouts` é PREFERÊNCIA DE UI (ordem dos cards por
+    // fazenda+usuário). Não é lido pelo Agent, não descreve estado físico e não
+    // participa de nenhuma decisão operacional — é cadastral. Leitura e escrita
+    // permanecem no backend antigo, juntas e coerentes, exatamente como hoje.
     const channel = supabase
       .channel(`dashboard_layouts:${farmId}`)
       .on(
