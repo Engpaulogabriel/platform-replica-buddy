@@ -7,7 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MapPin, Tractor, CheckCircle2, XCircle, Loader2, ArrowRight, Crown } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { tryGetSupabaseForFarm, type RenovSupabase } from "@/lib/supabaseRouter";
 import { useUserFarms } from "@/hooks/useUserFarms";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -23,7 +23,13 @@ const ROLE_COLOR: Record<string, string> = {
   viewer: "bg-muted text-muted-foreground border-border",
 };
 
-interface FarmStat { farmId: string; equipments: number; agentOnline: boolean }
+interface FarmStat { farmId: string; equipments: number; agentOnline: boolean; unavailable?: boolean }
+
+// A LISTA de fazendas é global e continua vindo do backend antigo (useUserFarms).
+// Mas `equipments` e `site_health` são OPERACIONAIS: pertencem ao backend da
+// própria fazenda. Agrupamos os ids por cliente resolvido e fazemos UMA consulta
+// por backend — sem fallback para o antigo quando o da fazenda migrada falha.
+const AGENT_FRESH_MS = 90_000; // regra existente desta tela — inalterada
 
 export default function MinhasFazendas() {
   const { farms, activeFarmId, loading, setActiveFarm } = useUserFarms();
@@ -35,21 +41,39 @@ export default function MinhasFazendas() {
     if (farms.length === 0) return;
     const ids = farms.map(f => f.id);
     void (async () => {
-      const [{ data: equips }, { data: health }] = await Promise.all([
-        supabase.from("equipments").select("id, farm_id").in("farm_id", ids),
-        supabase.from("site_health").select("farm_id, last_heartbeat, com_connected").in("farm_id", ids),
-      ]);
       const map: Record<string, FarmStat> = {};
       for (const id of ids) map[id] = { farmId: id, equipments: 0, agentOnline: false };
-      for (const e of equips ?? []) {
-        if (map[e.farm_id]) map[e.farm_id].equipments++;
+
+      // Agrupa por backend de destino. Fazenda migrada sem cliente disponível
+      // fica marcada como indisponível — nunca lida do backend antigo.
+      const groups = new Map<RenovSupabase, string[]>();
+      for (const id of ids) {
+        const routed = tryGetSupabaseForFarm(id);
+        if (!routed.client) { map[id].unavailable = true; continue; }
+        const arr = groups.get(routed.client) ?? [];
+        arr.push(id);
+        groups.set(routed.client, arr);
       }
+
       const now = Date.now();
-      for (const h of health ?? []) {
-        const last = h.last_heartbeat ? new Date(h.last_heartbeat).getTime() : 0;
-        const fresh = now - last < 90_000;
-        if (map[h.farm_id]) map[h.farm_id].agentOnline = !!h.com_connected && fresh;
-      }
+      await Promise.all([...groups.entries()].map(async ([client, groupIds]) => {
+        const [{ data: equips, error: eqErr }, { data: health, error: shErr }] = await Promise.all([
+          client.from("equipments").select("id, farm_id").in("farm_id", groupIds),
+          client.from("site_health").select("farm_id, last_heartbeat, com_connected").in("farm_id", groupIds),
+        ]);
+        if (eqErr || shErr) {
+          for (const id of groupIds) map[id].unavailable = true;
+          return;
+        }
+        for (const e of equips ?? []) {
+          if (map[e.farm_id]) map[e.farm_id].equipments++;
+        }
+        for (const h of health ?? []) {
+          const last = h.last_heartbeat ? new Date(h.last_heartbeat).getTime() : 0;
+          const fresh = now - last < AGENT_FRESH_MS;
+          if (map[h.farm_id]) map[h.farm_id].agentOnline = !!h.com_connected && fresh;
+        }
+      }));
       setStats(map);
     })();
   }, [farms]);
@@ -124,10 +148,19 @@ export default function MinhasFazendas() {
                     <span className="text-muted-foreground">
                       <strong className="text-foreground">{st?.equipments ?? "…"}</strong> equipamentos
                     </span>
-                    <span className={`flex items-center gap-1 ${st?.agentOnline ? "text-success" : "text-muted-foreground"}`}>
-                      {st?.agentOnline ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
-                      Agente {st?.agentOnline ? "online" : "offline"}
-                    </span>
+                    {st?.unavailable ? (
+                      // Indisponível ≠ offline: o agente pode estar vivo e só
+                      // inacessível a partir daqui.
+                      <span className="flex items-center gap-1 text-warning" title="Servidor desta fazenda inacessível">
+                        <XCircle className="w-3 h-3" />
+                        Agente indisponível
+                      </span>
+                    ) : (
+                      <span className={`flex items-center gap-1 ${st?.agentOnline ? "text-success" : "text-muted-foreground"}`}>
+                        {st?.agentOnline ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                        Agente {st?.agentOnline ? "online" : "offline"}
+                      </span>
+                    )}
                   </div>
 
                   <Button

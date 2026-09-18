@@ -17,7 +17,7 @@ import { isFarmMigrated } from "@/lib/migrationRegistry";
 // BYPASS EXPLÍCITO do kill switch global: o dashboard de bombas PRECISA de
 // Realtime real em `public.equipments` — é onde apply_pump_telemetry grava
 // last_outputs_state a cada RX físico. Os demais módulos seguem bloqueados.
-import { getRealtimeChannel, removeRealtimeChannel } from "@/lib/realtimeKillSwitch";
+import { getRealtimeChannel, removeRealtimeChannel, isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
 import { useAuth } from "@/contexts/AuthContext";
 import { notifyRegistry } from "@/lib/notify";
 import { enqueue, isOnline } from "@/lib/offlineQueue";
@@ -133,6 +133,11 @@ interface State {
 }
 
 const MAX_SAIDAS = 6;
+
+// Intervalo do polling da fazenda migrada. Mantido em 15 s — o mesmo valor já
+// destinado a essas fazendas; o que muda é ele passar a ser realmente periódico
+// e preso ao ciclo de vida da fazenda ativa.
+const MIGRATED_POLL_MS = 15_000;
 
 // Lista explícita de colunas do equipments — evita .select("*") que traz
 // campos não usados pelo cliente (firmware_version, created_at, updated_at,
@@ -286,7 +291,19 @@ export function useCadastrosCloud() {
     const subscribePostgresChanges = (farmId: string) => {
       if (cancelled) return;
       if (channel) { try { void removeRealtimeChannel(channel); } catch { /* ignore */ } channel = null; }
-      const ch = getRealtimeChannel(`cadastros-${farmId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`)
+      // Fazenda migrada: não existe Realtime utilizável (o projeto novo não
+      // publica tabelas e o canal do projeto antigo não representa esta
+      // fazenda). Declarar "degradado" é a verdade — e evita que a tela
+      // acredite estar recebendo eventos. Quem atualiza aqui é o polling
+      // dedicado abaixo; por isso NÃO ligamos também a rede de segurança,
+      // que duplicaria requisições no mesmo backend.
+      if (!isRealtimeAvailableForFarm(farmId)) {
+        setState((s) => (s.realtimeConnected === false && s.realtimeHealth === "degraded"
+          ? s
+          : { ...s, realtimeConnected: false, realtimeHealth: "degraded" }));
+        return;
+      }
+      const ch = getRealtimeChannel(`cadastros-${farmId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, undefined, farmId)
         .on("postgres_changes", { event: "*", schema: "public", table: "plc_groups", filter: `farm_id=eq.${farmId}` }, scheduleReload)
         .on("postgres_changes", { event: "*", schema: "public", table: "equipments", filter: `farm_id=eq.${farmId}` }, handleEquipmentChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "sectors", filter: `farm_id=eq.${farmId}` }, scheduleReload)
@@ -407,7 +424,7 @@ export function useCadastrosCloud() {
           if (cancelled) return;
           // Também pelo bypass: este canal entrega estado de equipamento por
           // broadcast (sem passar pelo banco) e alimenta os mesmos cards.
-          const bch = getRealtimeChannel(`farm-${farmId}`)
+          const bch = getRealtimeChannel(`farm-${farmId}`, undefined, farmId)
             .on("broadcast", { event: "equipment_state" }, (msg: any) => {
               if (cancelled) return;
               const p = msg?.payload;
@@ -464,23 +481,14 @@ export function useCadastrosCloud() {
         if (!cancelled) setState((s) => ({ ...s, loading: false, error: e instanceof Error ? e.message : String(e) }));
       }
     };
-    // Fazenda migrada: backend novo com Realtime publication=0 — sem refresh
-    // por relógio os cards congelariam após a carga inicial.
-    let migratedPollTimer: ReturnType<typeof setInterval> | null = null;
-    const startMigratedPoll = (fid: string | null) => {
-      if (!fid || !isFarmMigrated(fid) || migratedPollTimer) return;
-      migratedPollTimer = setInterval(() => {
-        if (cancelled) return;
-        if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
-        void refresh();
-      }, 15_000);
-    };
-    void (async () => { await new Promise((r) => setTimeout(r, 3000)); startMigratedPoll(farmIdRef.current); })();
+    // NOTA: o polling da fazenda migrada NÃO vive aqui. Ele é um efeito próprio,
+    // ancorado em state.farmId (ver MIGRATED_POLL_MS abaixo) — o timer antigo
+    // era um one-shot 3s após a montagem e simplesmente não nascia quando o
+    // farmId ainda não havia sido resolvido nesse instante.
 
     void boot();
     return () => {
       cancelled = true;
-      if (migratedPollTimer) clearInterval(migratedPollTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       stopDegradedSafetyNet();
       if (visibilityHandler && typeof document !== "undefined") {
@@ -493,6 +501,28 @@ export function useCadastrosCloud() {
       if (reloadDebounceRef.current) clearTimeout(reloadDebounceRef.current);
     };
   }, [user, loadAll, scheduleReload, refresh]);
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // POLLING DA FAZENDA MIGRADA — única fonte periódica enquanto o backend novo
+  // não tiver publication de Realtime.
+  // ───────────────────────────────────────────────────────────────────────────
+  // Ancorado em `state.farmId`: nasce quando existe uma fazenda migrada ativa,
+  // é recriado ao TROCAR de fazenda e é destruído na desmontagem. Um efeito só,
+  // um timer só — o React garante a limpeza antes de rodar de novo, então não
+  // há timers duplicados. `refresh()` resolve o cliente pelo farm_id, logo os
+  // dados vêm do backend da própria fazenda, nunca do antigo.
+  //
+  // Pausa com a aba em segundo plano; o retorno de foco já dispara um refresh
+  // próprio (mecanismo ADICIONAL, não a fonte principal).
+  useEffect(() => {
+    const fid = state.farmId;
+    if (!fid || !isFarmMigrated(fid)) return;
+    const id = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void refresh();
+    }, MIGRATED_POLL_MS);
+    return () => clearInterval(id);
+  }, [state.farmId, refresh]);
 
   // ───────── Validações ─────────
   const guardAdmin = (): boolean => {

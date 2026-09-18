@@ -10,6 +10,7 @@
 // originais do Supabase — bypass explícito do kill switch, sem polling.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from "@/integrations/supabase/client";
+import { isFarmMigrated } from "@/lib/migrationRegistry";
 
 // ATIVO POR PADRÃO — decisão deliberada. O kill switch derrubava TODO o Realtime
 // do app (o stub responde `CLOSED` no subscribe), o que era a causa global do
@@ -35,11 +36,69 @@ type RemoveChannelFn = typeof supabase.removeChannel;
 const originalChannel: ChannelFn = supabase.channel.bind(supabase);
 const originalRemoveChannel: RemoveChannelFn = supabase.removeChannel.bind(supabase);
 
-export function getRealtimeChannel(topic: string, opts?: Parameters<ChannelFn>[1]) {
+// ─────────────────────────────────────────────────────────────────────────────
+// DUAL-BACKEND — Realtime NÃO é fonte válida para fazenda migrada
+// ─────────────────────────────────────────────────────────────────────────────
+// `originalChannel` está amarrado ao singleton do backend ANTIGO. Para uma
+// fazenda já promovida ao backend novo isso é duplamente errado:
+//
+//   1. o canal assina `farm_id=eq.<fazenda>` no projeto ANTIGO, cujas linhas
+//      estão congeladas desde o cutover — nenhum evento chegará;
+//   2. o subscribe responde SUBSCRIBED assim mesmo, e a tela conclui
+//      "Realtime conectado" — o que DESLIGA a rede de segurança e congela os
+//      dados. Com a regra de offline comparando contra Date.now(), o card
+//      acaba declarando OFFLINE sem o banco sustentar essa conclusão.
+//
+// O backend novo, por sua vez, não publica tabelas em `supabase_realtime`
+// (publication vazia). Então, hoje, a resposta honesta para uma fazenda
+// migrada é: Realtime INDISPONÍVEL. Quem atualiza é o polling dedicado.
+//
+// Fazendas NÃO migradas seguem exatamente o caminho de sempre.
+const INERT = Symbol.for("renov.realtime.inert");
+
+/** Há Realtime operacional utilizável para esta fazenda? */
+export function isRealtimeAvailableForFarm(farmId: string | null | undefined): boolean {
+  return !isFarmMigrated(farmId);
+}
+
+/** Canal que nunca conecta e se declara CLOSED — sem WebSocket, sem mentira. */
+function makeInertChannel(topic: string) {
+  const inert: any = {
+    topic,
+    state: "closed",
+    [INERT]: true,
+    on: () => inert,
+    subscribe: (cb?: (status: string) => void) => {
+      try { cb?.("CLOSED"); } catch { /* ignore */ }
+      return inert;
+    },
+    unsubscribe: async () => "ok",
+    send: async () => "ok",
+    track: async () => "ok",
+    untrack: async () => "ok",
+  };
+  return inert;
+}
+
+/**
+ * `farmId` é OPCIONAL de propósito: chamadas globais (sem fazenda) e todos os
+ * consumidores existentes mantêm o comportamento atual, byte por byte. Quem
+ * assina dados FARM-SCOPED deve informar a fazenda.
+ */
+export function getRealtimeChannel(
+  topic: string,
+  opts?: Parameters<ChannelFn>[1],
+  farmId?: string | null,
+) {
+  if (farmId !== undefined && !isRealtimeAvailableForFarm(farmId)) {
+    return makeInertChannel(topic);
+  }
   return originalChannel(topic, opts as any);
 }
 
 export async function removeRealtimeChannel(channel: Parameters<RemoveChannelFn>[0]) {
+  // Canal inerte nunca chegou ao cliente real — removê-lo por lá lançaria.
+  if (channel && (channel as any)[INERT]) return "ok";
   return originalRemoveChannel(channel);
 }
 

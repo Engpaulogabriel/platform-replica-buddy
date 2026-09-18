@@ -1,6 +1,8 @@
 import { useEffect, useState, useMemo } from "react";
 import { Navigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isFarmMigrated } from "@/lib/migrationRegistry";
 import { usePlatformAccess } from "@/hooks/usePlatformAccess";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -49,6 +51,54 @@ interface FarmRow {
   last_heartbeat: string | null;
   com_connected: boolean;
   pending_commands: number;
+  /** true = fazenda migrada cujo status operacional não pôde ser lido no backend dela. */
+  operational_unavailable?: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DUAL-BACKEND — cadastro global no ANTIGO, status operacional no backend da fazenda
+// ─────────────────────────────────────────────────────────────────────────────
+// `platform_farms_overview` agrega, no projeto ANTIGO, dados cadastrais (nome,
+// plano, licença, contagens) E status do agente (site_health). O cadastro segue
+// correto ali — é global e é onde as 9 fazendas não migradas vivem.
+//
+// Já o status do agente de uma fazenda MIGRADA está congelado no antigo desde o
+// cutover: o agente dela escreve no projeto novo. Por isso sobrepomos APENAS os
+// campos vindos de site_health, e só para as fazendas migradas.
+//
+// Sem fallback silencioso: se o backend da fazenda migrada não responder,
+// marcamos indisponível — melhor um "—" honesto que um heartbeat velho de horas
+// exibido como se fosse o estado atual.
+async function overlayMigratedAgentStatus(rows: FarmRow[]): Promise<FarmRow[]> {
+  const migrated = rows.filter((r) => isFarmMigrated(r.farm_id));
+  if (migrated.length === 0) return rows;
+
+  const patch = new Map<string, Partial<FarmRow>>();
+  await Promise.all(
+    migrated.map(async (r) => {
+      const routed = tryGetSupabaseForFarm(r.farm_id);
+      if (!routed.client) {
+        patch.set(r.farm_id, { operational_unavailable: true, last_heartbeat: null });
+        return;
+      }
+      const { data, error } = await routed.client
+        .from("site_health")
+        .select("agent_status, agent_version, last_heartbeat, com_connected")
+        .eq("farm_id", r.farm_id)
+        .maybeSingle();
+      if (error) {
+        patch.set(r.farm_id, { operational_unavailable: true, last_heartbeat: null });
+        return;
+      }
+      patch.set(r.farm_id, {
+        agent_status: data?.agent_status ?? "offline",
+        last_heartbeat: data?.last_heartbeat ?? null,
+        com_connected: data?.com_connected ?? false,
+        operational_unavailable: false,
+      });
+    }),
+  );
+  return rows.map((r) => (patch.has(r.farm_id) ? { ...r, ...patch.get(r.farm_id) } : r));
 }
 
 interface Stats {
@@ -111,7 +161,7 @@ export default function PlatformAdmin() {
     if (statsRes.error) notify.fail("Plataforma", "Erro ao carregar métricas: " + statsRes.error.message);
     else setStats(statsRes.data as any);
     if (farmsRes.error) notify.fail("Plataforma", "Erro ao carregar fazendas: " + farmsRes.error.message);
-    else setFarms((farmsRes.data as any) ?? []);
+    else setFarms(await overlayMigratedAgentStatus(((farmsRes.data as any) ?? []) as FarmRow[]));
     setLoading(false);
   };
 
@@ -119,11 +169,42 @@ export default function PlatformAdmin() {
 
   useEffect(() => {
     if (!detailFarm) { setDetail(null); return; }
-    void supabase.rpc("platform_farm_detail" as any, { _farm_id: detailFarm.farm_id })
-      .then(({ data, error }) => {
-        if (error) notify.fail("Plataforma", error.message);
-        else setDetail(data);
+    const farmId = detailFarm.farm_id;
+    let cancelled = false;
+    void (async () => {
+      const { data, error } = await supabase.rpc("platform_farm_detail" as any, { _farm_id: farmId });
+      if (cancelled) return;
+      if (error) { notify.fail("Plataforma", error.message); return; }
+      // Mesmo princípio da lista: o bloco de saúde do agente de uma fazenda
+      // migrada precisa vir do backend dela, não do antigo.
+      if (!isFarmMigrated(farmId)) { setDetail(data); return; }
+      const routed = tryGetSupabaseForFarm(farmId);
+      if (!routed.client) {
+        setDetail({ ...(data as any), site_health: null, site_health_unavailable: true });
+        return;
+      }
+      // O detalhe traz TRÊS blocos farm-scoped operacionais: site_health,
+      // equipments e recent_logs (agent_logs). Todos vêm congelados do antigo
+      // para uma fazenda migrada — sobrepõe os três de uma vez.
+      const [shRes, eqRes, logRes] = await Promise.all([
+        routed.client.from("site_health").select("*").eq("farm_id", farmId).maybeSingle(),
+        routed.client.from("equipments").select("*").eq("farm_id", farmId).order("name"),
+        routed.client.from("agent_logs").select("*").eq("farm_id", farmId)
+          .order("created_at", { ascending: false }).limit(50),
+      ]);
+      if (cancelled) return;
+      if (shRes.error) {
+        setDetail({ ...(data as any), site_health: null, site_health_unavailable: true });
+        return;
+      }
+      setDetail({
+        ...(data as any),
+        site_health: shRes.data ?? null,
+        equipments: eqRes.error ? [] : (eqRes.data ?? []),
+        recent_logs: logRes.error ? [] : (logRes.data ?? []),
       });
+    })();
+    return () => { cancelled = true; };
   }, [detailFarm]);
 
   const filtered = useMemo(() => {
@@ -258,7 +339,10 @@ export default function PlatformAdmin() {
                   </TableCell></TableRow>
                 )}
                 {filtered.map(f => {
-                  const online = f.last_heartbeat && (Date.now() - new Date(f.last_heartbeat).getTime() < 5 * 60_000);
+                  // Threshold INALTERADO (5 min). Só a origem do heartbeat mudou.
+                  const statusUnavailable = f.operational_unavailable === true;
+                  const online = !statusUnavailable && f.last_heartbeat
+                    && (Date.now() - new Date(f.last_heartbeat).getTime() < 5 * 60_000);
                   const suspended = !f.license_key;
                   return (
                     <TableRow key={f.farm_id} className={suspended ? "opacity-60" : ""}>
@@ -309,7 +393,14 @@ export default function PlatformAdmin() {
                         )}
                       </TableCell>
                       <TableCell>
-                        {online ? (
+                        {statusUnavailable ? (
+                          // "Sem dado" NÃO é offline: o agente pode estar vivo e
+                          // apenas inacessível a partir daqui.
+                          <span className="inline-flex items-center gap-1.5 text-xs text-warning" title="Status operacional indisponível — servidor da fazenda inacessível">
+                            <span className="w-2 h-2 rounded-full bg-warning/60" />
+                            Indisponível
+                          </span>
+                        ) : online ? (
                           <span className="inline-flex items-center gap-1.5 text-xs">
                             <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                             Online
@@ -1019,6 +1110,10 @@ function FarmDetailDialog({ farm, detail, onClose }: any) {
                   <div><strong>Versão agente:</strong> {detail.site_health.agent_version ?? "—"}</div>
                   <div><strong>Uptime:</strong> {detail.site_health.uptime_seconds ?? 0}s</div>
                   {detail.site_health.last_error && <div className="text-destructive"><strong>Último erro:</strong> {detail.site_health.last_error}</div>}
+                </div>
+              ) : detail.site_health_unavailable ? (
+                <div className="text-warning text-center py-4">
+                  Status operacional indisponível — servidor desta fazenda inacessível.
                 </div>
               ) : <div className="text-muted-foreground text-center py-4">Agente nunca enviou heartbeat.</div>}
             </TabsContent>
