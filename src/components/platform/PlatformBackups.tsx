@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -64,7 +65,8 @@ export default function PlatformBackups({ isAdmin }: { isAdmin: boolean }) {
   const createBackup = async () => {
     if (!farmId) return;
     setCreating(true);
-    const { data, error } = await supabase.rpc("farm_backup_create" as any, {
+    // Backup é da BASE da fazenda: precisa correr no backend em que ela vive.
+    const { data, error } = await assertOperationalClient(farmId).rpc("farm_backup_create" as any, {
       _farm_id: farmId, _trigger_kind: "manual", _label: "Backup manual via painel",
     });
     setCreating(false);

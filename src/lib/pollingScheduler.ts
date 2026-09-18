@@ -12,6 +12,7 @@
 //   }, [farmId]);
 
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { getSystemTimingConfig, onSystemTimersUpdated } from "@/lib/systemTimers";
 
 let activeFarmId: string | null = null;
@@ -21,7 +22,9 @@ let stopTimersSubscription: (() => void) | null = null;
 
 async function tickEnqueue(farmId: string) {
   try {
-    const { data, error } = await supabase.rpc("enqueue_polling_for_due_equipments", {
+    // Esta RPC CRIA COMANDOS de polling. Fail-closed pelo farm_id: no backend
+    // errado eles nunca chegariam ao Agent daquela fazenda.
+    const { data, error } = await assertOperationalClient(farmId).rpc("enqueue_polling_for_due_equipments", {
       _farm_id: farmId,
     });
     if (error) {
@@ -37,7 +40,7 @@ async function tickEnqueue(farmId: string) {
 
 async function tickTimeout(farmId: string) {
   try {
-    await supabase.rpc("mark_commands_timeout", { _farm_id: farmId });
+    await assertOperationalClient(farmId).rpc("mark_commands_timeout", { _farm_id: farmId });
   } catch {
     /* silencioso */
   }

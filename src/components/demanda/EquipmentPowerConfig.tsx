@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -148,11 +149,13 @@ export default function EquipmentPowerConfig({ farmId, canEdit }: Props) {
     }
     setSaving(true);
     try {
+      // Cliente resolvido UMA VEZ para todo o lote de gravações.
+      const db = assertOperationalClient(farmId);
       for (const r of dirty) {
         const cvNum = r.power_cv === "" ? null : Number(r.power_cv);
         const flowNum = r.estimated_flow_m3h === "" ? null : Number(r.estimated_flow_m3h);
         const kwNum = cvNum != null ? Number((cvNum * CV_TO_KW).toFixed(2)) : null;
-        const { error } = await supabase
+        const { error } = await db
           .from("equipments")
           .update({
             power_cv: cvNum,

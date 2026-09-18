@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -99,7 +100,7 @@ export default function AgentUpdateStatusPanel() {
   }, []);
 
   const clearStatus = async (farmId: string) => {
-    const { error } = await supabase.rpc("clear_agent_update" as any, { _farm_id: farmId });
+    const { error } = await assertOperationalClient(farmId).rpc("clear_agent_update" as any, { _farm_id: farmId });
     if (error) notify.fail("Atualização do Agente", error.message);
     else notify.ok("Atualização do Agente", "Status reiniciado");
   };

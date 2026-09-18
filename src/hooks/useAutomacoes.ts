@@ -1,6 +1,7 @@
 // useAutomacoes — CRUD para automações independentes (Fase 1)
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { toast } from "sonner";
 import { notifyWhatsAppImmediate } from "@/lib/whatsappNotify";
 
@@ -170,7 +171,7 @@ export function useAutomacoes(farmId: string | null) {
       notes?: string | null;
     }) => {
       if (!farmId) return;
-      await supabase.from("automation_audit_log").insert({
+      await assertOperationalClient(farmId).from("automation_audit_log").insert({
         ...row,
         farm_id: farmId,
         performed_via: "frontend",
@@ -214,7 +215,7 @@ export function useAutomacoes(farmId: string | null) {
             ? "one_time"
             : "scheduled";
 
-        const { data: auto, error: e1 } = await supabase
+        const { data: auto, error: e1 } = await assertOperationalClient(farmId)
           .from("automations")
           .insert({
             farm_id: farmId,
@@ -308,7 +309,7 @@ export function useAutomacoes(farmId: string | null) {
   const toggleActive = useCallback(
     async (id: string, active: boolean, actor: string | null) => {
       const target = items.find((a) => a.id === id);
-      const { error } = await supabase
+      const { error } = await assertOperationalClient(farmId)
         .from("automations")
         .update({ is_active: active })
         .eq("id", id);

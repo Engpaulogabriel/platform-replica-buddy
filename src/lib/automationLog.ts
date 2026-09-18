@@ -10,6 +10,7 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { PumpCommandLog, PumpStatusLog } from "@/components/dashboard/PumpTable";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import type {
   Database,
 } from "@/integrations/supabase/types";
@@ -504,7 +505,8 @@ async function pushEntryToCloud(entry: AutomationLogEntry): Promise<void> {
       source_device: typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 80) : null,
       details: isRemote && ctx.name ? { user_name: ctx.name } : null,
     };
-    const { error } = await supabase
+    // Log operacional pertence ao backend da fazenda do evento.
+    const { error } = await getSupabaseForFarm(ctx.farmId)
       .from("automation_log")
       .upsert(payload, { onConflict: "farm_id,client_event_id", ignoreDuplicates: true });
     if (!error) {

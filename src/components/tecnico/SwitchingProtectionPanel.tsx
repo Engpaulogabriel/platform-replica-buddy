@@ -9,6 +9,7 @@
 // física. Desligar volta ao comportamento normal na hora.
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { useCanViewTechnicalTelemetry } from "@/hooks/useTechnicalTelemetry";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { Switch } from "@/components/ui/switch";
@@ -48,7 +49,7 @@ export function SwitchingProtectionPanel() {
 
   const toggle = async (row: Row, next: boolean) => {
     setSaving(row.equipment_id);
-    const { error } = await supabase.rpc("set_switching_protection", {
+    const { error } = await assertOperationalClient(farmId).rpc("set_switching_protection", {
       _equipment_id: row.equipment_id,
       _enabled: next,
       _seconds: row.seconds ?? 30,
@@ -66,7 +67,7 @@ export function SwitchingProtectionPanel() {
       notify.fail("Proteções", "Use um valor entre 1 e 600 segundos."); return;
     }
     setSaving(row.equipment_id);
-    const { error } = await supabase.rpc("set_switching_protection", {
+    const { error } = await assertOperationalClient(farmId).rpc("set_switching_protection", {
       _equipment_id: row.equipment_id, _enabled: row.enabled, _seconds: secs,
     });
     setSaving(null);

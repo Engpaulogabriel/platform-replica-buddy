@@ -13,7 +13,10 @@
 // Modo COM bridge (Electron .exe): envia frame real e cronometra resposta.
 
 import { useCallback, useRef } from "react";
+// `profiles` continua no backend antigo (IDENTIDADE). Só os dados
+// operacionais do equipamento seguem a fazenda.
 import { supabase } from "@/integrations/supabase/client";
+import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   measureSignalBars,
@@ -56,8 +59,14 @@ async function persistMeasurement(args: {
   // 1. Atualiza equipments com nova leitura de sinal + last_communication
   //    (Quando timed out, mantemos last_communication antigo? Não — o usuário
   //    quis tentar; salvamos a tentativa mas com bars=0 para refletir falha.)
+  // Sem farmId não há decisão de roteamento possível: tryGet devolve o backend
+  // histórico (comportamento idêntico ao de antes) e, com fazenda conhecida,
+  // roteia corretamente. Escrita best-effort — nunca derruba a medição.
+  const routed = tryGetSupabaseForFarm(farmId);
+  const db = routed.client;
   try {
-    await supabase
+    if (!db) throw new Error("backend da fazenda indisponível");
+    await db
       .from("equipments")
       .update({
         last_signal_bars: result.bars,
@@ -76,7 +85,8 @@ async function persistMeasurement(args: {
   return;
   /* eslint-disable no-unreachable */
   try {
-    await supabase.from("automation_log").insert({
+    if (!db) return;
+    await db.from("automation_log").insert({
       client_event_id: crypto.randomUUID(),
       farm_id: farmId,
       user_id: userId,

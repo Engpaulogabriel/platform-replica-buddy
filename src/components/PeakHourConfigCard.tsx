@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Zap } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { toast } from "sonner";
 
@@ -83,7 +84,8 @@ export default function PeakHourConfigCard() {
       auto_restart: cfg.auto_restart,
       excluded_equipment_ids: cfg.excluded_equipment_ids,
     };
-    const { error } = await supabase
+    // Configuração operacional de ponta: é a automação da fazenda que a lê.
+    const { error } = await assertOperationalClient(farmId)
       .from("peak_hour_config" as any)
       .upsert(payload, { onConflict: "farm_id" });
     setSaving(false);

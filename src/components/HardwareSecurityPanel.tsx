@@ -4,6 +4,7 @@ import { notify } from "@/lib/notify";
 // e permite que platform_admin reautorize o hardware.
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -65,7 +66,7 @@ export default function HardwareSecurityPanel() {
   async function reauthorize(farmId: string, farmName?: string) {
     if (!confirm(`Reautorizar hardware da fazenda "${farmName ?? farmId}"?\n\nNo próximo boot, o agente vai gravar o fingerprint atual como o novo registro.`)) return;
     setResetting(farmId);
-    const { error } = await supabase.rpc("reset_agent_hardware", { _farm_id: farmId });
+    const { error } = await assertOperationalClient(farmId).rpc("reset_agent_hardware", { _farm_id: farmId });
     setResetting(null);
     if (error) { notify.fail("Segurança de Hardware", "Falha ao reautorizar" + " — " + (error.message)); return; }
     notify.ok("Segurança de Hardware", "Hardware reautorizado" + " — " + ("O agente vai re-registrar no próximo boot."));

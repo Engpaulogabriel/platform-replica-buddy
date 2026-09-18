@@ -17,6 +17,7 @@ import { useProductivityData, useInemaConfig, DEFAULT_PROD_CFG, type Productivit
 import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -295,7 +296,7 @@ function ConfigForm({ cfg, onSaved, canEdit, farmId }: { cfg: ProductivityConfig
   const save = async () => {
     if (!farmId) return;
     setSaving(true);
-    const { error } = await supabase.from("farm_productivity_config" as any)
+    const { error } = await assertOperationalClient(farmId).from("farm_productivity_config" as any)
       .upsert({ farm_id: farmId, ...v, updated_at: new Date().toISOString() } as any);
     setSaving(false);
     if (error) { notify.fail("Produtividade", "Erro: " + error.message); return; }
@@ -370,7 +371,7 @@ function InemaForm({ value, onSaved, canEdit, farmId }: { value: any; onSaved: (
       observacoes: v.observacoes || null,
       updated_at: new Date().toISOString(),
     };
-    const { error } = await supabase.from("farm_inema_config" as any).upsert(payload);
+    const { error } = await assertOperationalClient(farmId).from("farm_inema_config" as any).upsert(payload);
     setSaving(false);
     if (error) { notify.fail("Produtividade", "Erro: " + error.message); return; }
     notify.ok("Produtividade", "Dados INEMA salvos.");
@@ -414,7 +415,7 @@ function EquipmentParamsForm({ canEdit, farmId }: { canEdit: boolean; farmId: st
 
   const saveOne = async (eq: any) => {
     setSaving(eq.id);
-    const { error } = await supabase.from("equipments")
+    const { error } = await assertOperationalClient(farmId).from("equipments")
       .update({ estimated_flow_m3h: eq.estimated_flow_m3h, power_kw: eq.power_kw } as any)
       .eq("id", eq.id);
     setSaving(null);

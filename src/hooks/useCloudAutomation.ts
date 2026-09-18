@@ -4,6 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { STAGGER_DEFAULTS, validateStaggerConfig } from "@/lib/automaticPumpState";
 
 /** Configuração de partida escalonada da fazenda (tabela `farms`). */
@@ -307,7 +308,7 @@ export function useCloudAutomation(): UseCloudAutomationResult {
     // não havia completado) e revertia o estado local para false. Resultado:
     // o primeiro clique mostrava "Ativado" mas o switch voltava para off.
     // Agora aguardamos a confirmação do upsert antes de atualizar a UI.
-    const { error } = await supabase
+    const { error } = await assertOperationalClient(farmId)
       .from("automation_engine")
       .upsert(
         { farm_id: farmId, enabled: active, last_changed_by: performerName, last_changed_via: "frontend" },
@@ -346,7 +347,8 @@ export function useCloudAutomation(): UseCloudAutomationResult {
     const erro = validateStaggerConfig(next.batchSize, next.staggerSeconds);
     if (erro) throw new Error(erro);
 
-    const { error } = await supabase
+    // Escalonamento de partida é lido pela AUTOMAÇÃO da fazenda: operacional.
+    const { error } = await assertOperationalClient(farmId)
       .from("farms")
       .update({
         automatic_start_stagger_enabled: next.enabled,
@@ -382,7 +384,7 @@ export function useCloudAutomation(): UseCloudAutomationResult {
 
     console.log("[useCloudAutomation] createSchedule insert", insertBody);
 
-    const { data, error } = await supabase
+    const { data, error } = await assertOperationalClient(farmId)
       .from("automation_schedules")
       .insert(insertBody)
       .select("id")
@@ -441,7 +443,8 @@ export function useCloudAutomation(): UseCloudAutomationResult {
     if (patch.timeOff !== undefined) updateBody.time_off = patch.timeOff;
     if (patch.equipmentId !== undefined) updateBody.equipment_id = patch.equipmentId;
 
-    const { error } = await supabase.from("automation_schedules").update(updateBody).eq("id", id);
+    // Automação é operacional: escreve no backend da própria fazenda.
+    const { error } = await assertOperationalClient(farmId).from("automation_schedules").update(updateBody).eq("id", id);
     if (error) throw new Error(error.message);
 
     if (patch.active !== undefined) {
@@ -464,17 +467,19 @@ export function useCloudAutomation(): UseCloudAutomationResult {
   }, [farmId, performerName, refresh, schedules]);
 
   const deleteSchedule = useCallback(async (id: string) => {
+    // Carimbo + DELETE são a MESMA operação: um cliente só, resolvido aqui.
+    const db = assertOperationalClient(farmId);
     // Stamp who is deleting (audit trigger reads OLD row)
-    await supabase
+    await db
       .from("automation_schedules")
       .update({ last_modified_by_name: performerName, last_modified_by_via: "frontend" })
       .eq("id", id);
-    const { error } = await supabase.from("automation_schedules").delete().eq("id", id);
+    const { error } = await db.from("automation_schedules").delete().eq("id", id);
     if (error) throw new Error(error.message);
 
     emitAutomationUpdated();
     await refresh();
-  }, [performerName, refresh]);
+  }, [farmId, performerName, refresh]);
 
 
 
@@ -495,7 +500,7 @@ export function useCloudAutomation(): UseCloudAutomationResult {
     };
     const merged = { ...current, ...patch };
 
-    const { error } = await supabase
+    const { error } = await assertOperationalClient(farmId)
       .from("automation_holiday_configs")
       .upsert({
         farm_id: farmId,

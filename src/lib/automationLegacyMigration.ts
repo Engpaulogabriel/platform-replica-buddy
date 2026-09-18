@@ -5,6 +5,7 @@
 // fazenda para nunca mais rodar.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { loadCloudIdMap } from "@/lib/cadastrosCloud";
 
 const LEGACY_SCHEDULES_KEY = "automation_schedules_v1";
@@ -175,7 +176,7 @@ export async function migrateLegacyAutomationToCloud(farmId: string): Promise<{
         }));
 
       if (rows.length > 0) {
-        const { error } = await supabase
+        const { error } = await assertOperationalClient(farmId)
           .from("automation_holiday_configs")
           .upsert(rows, { onConflict: "farm_id,equipment_id" });
         if (error) return { status: "error", error: error.message };
@@ -184,7 +185,7 @@ export async function migrateLegacyAutomationToCloud(farmId: string): Promise<{
     }
 
     if (engineEnabled !== null) {
-      const { error } = await supabase
+      const { error } = await assertOperationalClient(farmId)
         .from("automation_engine")
         .upsert({ farm_id: farmId, enabled: engineEnabled }, { onConflict: "farm_id" });
       if (error) return { status: "error", error: error.message };

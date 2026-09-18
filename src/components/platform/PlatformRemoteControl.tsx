@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -85,14 +86,14 @@ export default function PlatformRemoteControl({ isAdmin }: { isAdmin: boolean })
 
   const reboot = guard("reboot", async () => {
     if (!confirm("Forçar reboot do agente Electron desta fazenda?")) return;
-    const { data, error } = await supabase.rpc("platform_send_agent_reboot" as any, { _farm_id: farmId });
+    const { data, error } = await assertOperationalClient(farmId).rpc("platform_send_agent_reboot" as any, { _farm_id: farmId });
     if (error) return notify.fail("Controle Remoto", error.message);
     notify.ok("Controle Remoto", "Reboot enfileirado · cmd " + String(data).slice(0, 8));
   });
 
   const clearQueue = guard("clear", async () => {
     if (!confirm("Limpar TODA a fila pendente desta fazenda? (commands + agent_commands)")) return;
-    const { data, error } = await supabase.rpc("platform_clear_pending_commands" as any, { _farm_id: farmId });
+    const { data, error } = await assertOperationalClient(farmId).rpc("platform_clear_pending_commands" as any, { _farm_id: farmId });
     if (error) return notify.fail("Controle Remoto", error.message);
     const r = data as any;
     notify.ok("Controle Remoto", `Limpos: ${r?.commands_cleared ?? 0} comandos · ${r?.agent_commands_cleared ?? 0} comandos do agente`);
@@ -172,9 +173,9 @@ export default function PlatformRemoteControl({ isAdmin }: { isAdmin: boolean })
     } catch (e: any) {
       notify.fail("Licença", `Falha ao enviar unblock: ${e?.message ?? String(e)}`);
     }
-    const dev = await supabase.from("device_licenses")
+    const dev = await assertOperationalClient(farmId).from("device_licenses")
       .update({ fingerprint_mismatch_count: 0, revoked_at: null }).eq("farm_id", farmId);
-    const hw = await supabase.from("agent_hardware")
+    const hw = await assertOperationalClient(farmId).from("agent_hardware")
       .update({ reset_requested: true, alert_level: "ok", changed_components: [] }).eq("farm_id", farmId);
     if (dev.error || hw.error) {
       notify.fail("Licença", `Unblock enviado${cmdId ? ` (cmd ${cmdId.slice(0, 8)})` : ""}, mas o reset das tabelas exige permissão: ${dev.error?.message ?? hw.error?.message ?? ""}. Rode o SQL de reset se necessário.`);

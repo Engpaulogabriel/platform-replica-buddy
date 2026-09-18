@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -162,7 +163,8 @@ export default function PlatformDevices({ isAdmin }: Props) {
       `O Electron vai parar de funcionar nesse computador. ` +
       `O cliente poderá reativar a licença em outro PC depois.`
     )) return;
-    const { error } = await supabase.rpc("platform_unbind_device" as any, {
+    // Desvincular o PC atinge a licença do Agent daquela fazenda: operacional.
+    const { error } = await assertOperationalClient(d.farm_id).rpc("platform_unbind_device" as any, {
       _device_id: d.device_id, _reason: "admin_unbind",
     });
     if (error) return notify.fail("Dispositivos", error.message);
@@ -178,7 +180,8 @@ export default function PlatformDevices({ isAdmin }: Props) {
       return notify.fail("Limite por fazenda", "Informe um número inteiro ≥ 0 ou deixe vazio.");
     }
     setSavingFarmId(farmId);
-    const { error } = await supabase
+    // `farms.max_devices` é validado no licenciamento do Agent daquela fazenda.
+    const { error } = await assertOperationalClient(farmId)
       .from("farms")
       .update({ max_devices: parsed } as any)
       .eq("id", farmId);

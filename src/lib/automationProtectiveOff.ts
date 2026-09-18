@@ -8,6 +8,7 @@
 // e ao desativar o automático nada é enviado — deixando o estado físico ambíguo.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import type { CloudPlc, CloudEquipamento } from "@/hooks/useCadastrosCloud";
 import type { CloudSchedule, CloudHolidayConfig } from "@/hooks/useCloudAutomation";
 import { buildPositionalPayload } from "@/lib/rfRouting";
@@ -145,7 +146,9 @@ export async function enqueueProtectiveOffOnDisable(params: EnqueueParams): Prom
     };
   });
 
-  const { error } = await supabase.from("commands").insert(inserts);
+  // COMANDOS FÍSICOS (desligamento protetivo). Fail-closed pelo farm_id: no
+  // backend errado eles jamais seriam executados pelo Agent daquela fazenda.
+  const { error } = await assertOperationalClient(farmId).from("commands").insert(inserts);
   if (error) {
     console.error("[protective-off] insert error", error);
     throw new Error(error.message);

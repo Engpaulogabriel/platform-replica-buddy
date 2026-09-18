@@ -8,6 +8,7 @@
 // navegador for fechado.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 
 export interface GuardEntry {
   equipmentId: string;
@@ -79,7 +80,7 @@ export async function clearAutomationGuard(
   equipmentId: string,
 ): Promise<number> {
   try {
-    await supabase
+    await assertOperationalClient(farmId)
       .from("automation_guards")
       .delete()
       .eq("farm_id", farmId)

@@ -35,6 +35,7 @@ import { notify } from "@/lib/notify";
 import { enqueuePumpCfg, type PumpCfgCommand } from "@/lib/cfgQueue";
 import { waitForCommand, type CommandResult } from "@/hooks/useCommandTracker";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { buildEquipHwId } from "@/lib/cadastrosCloud";
 
 interface Props {
@@ -140,7 +141,11 @@ const PumpCfgDialog = ({ open, onOpenChange, farmId, tsnn, plcId, equipmentId, e
 
   const syncConfirmedIdChange = async (newTsnn: string) => {
     if (!plcId || newTsnn === tsnn) return;
-    const { data: equipments, error: loadError } = await supabase
+    // Operação multi-etapa (ler vínculos → atualizar PLC → atualizar bombas):
+    // cliente resolvido UMA VEZ e usado até o fim. Trocar de backend no meio
+    // renomearia a PLC num servidor e as bombas noutro.
+    const db = assertOperationalClient(farmId);
+    const { data: equipments, error: loadError } = await db
       .from("equipments")
       .select("id, saida")
       .eq("farm_id", farmId)
@@ -150,14 +155,14 @@ const PumpCfgDialog = ({ open, onOpenChange, farmId, tsnn, plcId, equipmentId, e
       return;
     }
 
-    const plcResult = await supabase.from("plc_groups").update({ hw_id: newTsnn }).eq("id", plcId).eq("farm_id", farmId);
+    const plcResult = await db.from("plc_groups").update({ hw_id: newTsnn }).eq("id", plcId).eq("farm_id", farmId);
     if (plcResult.error) {
       notify.fail("Configuração de Bomba", `ID confirmado, mas falhou ao atualizar PLC: ${plcResult.error.message}`);
       return;
     }
 
     await Promise.all((equipments ?? []).map((equipment) =>
-      supabase
+      db
         .from("equipments")
         .update({ hw_id: buildEquipHwId(newTsnn, Number(equipment.saida ?? 1)) })
         .eq("id", equipment.id)

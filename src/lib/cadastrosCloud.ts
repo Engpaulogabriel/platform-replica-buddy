@@ -19,6 +19,7 @@
 // Próxima fase: refatorar `Cadastros.tsx` para ler/escrever direto na nuvem.
 
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import type { Database } from "@/integrations/supabase/types";
 
 // ───────── Tipos locais (formato no localStorage hoje) ─────────
@@ -203,11 +204,17 @@ export async function migrateLocalCadastrosToCloud(): Promise<MigrationResult> {
     return { status: "skipped", reason: "not_admin" };
   }
 
+  // Migração local→nuvem é UMA operação multi-etapa (checar vazio → inserir PLCs
+  // → setores → equipamentos → rollback em caso de erro). Cliente resolvido UMA
+  // VEZ aqui e usado até o fim: metade no servidor novo e metade no antigo
+  // deixaria o cadastro da fazenda partido ao meio.
+  const db = assertOperationalClient(farmId);
+
   // 5) Nuvem precisa estar vazia
   const [eqHead, plcHead, secHead] = await Promise.all([
-    supabase.from("equipments").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
-    supabase.from("plc_groups").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
-    supabase.from("sectors").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
+    db.from("equipments").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
+    db.from("plc_groups").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
+    db.from("sectors").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
   ]);
   const cloudEmpty = (eqHead.count ?? 0) === 0 && (plcHead.count ?? 0) === 0 && (secHead.count ?? 0) === 0;
   if (!cloudEmpty) return { status: "skipped", reason: "cloud_not_empty" };
@@ -230,7 +237,7 @@ export async function migrateLocalCadastrosToCloud(): Promise<MigrationResult> {
     const plcMap: Record<number, string> = {};
     for (const p of localPlcs) {
       const hw = plcHwIdFromLocal(p);
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from("plc_groups")
         .insert({ farm_id: farmId, name: p.nome, hw_id: hw })
         .select("id")
@@ -243,7 +250,7 @@ export async function migrateLocalCadastrosToCloud(): Promise<MigrationResult> {
     // ───── 2) Setores ─────
     const sectorMap: Record<string, string> = {};
     for (const s of localSectors) {
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from("sectors")
         .insert({ farm_id: farmId, name: s.nome })
         .select("id")
@@ -268,7 +275,7 @@ export async function migrateLocalCadastrosToCloud(): Promise<MigrationResult> {
       const sectorLocal = equipToSector.get(e.id);
       const sectorUuid = sectorLocal ? sectorMap[sectorLocal] ?? null : null;
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from("equipments")
         .insert({
           farm_id: farmId,
@@ -301,7 +308,7 @@ export async function migrateLocalCadastrosToCloud(): Promise<MigrationResult> {
       if (!e.alimentaId) continue;
       const target = equipMap[e.alimentaId];
       if (!target) continue;
-      const { error } = await supabase
+      const { error } = await db
         .from("equipments")
         .update({ alimenta_id: target })
         .eq("id", equipMap[e.id]);
@@ -334,13 +341,13 @@ export async function migrateLocalCadastrosToCloud(): Promise<MigrationResult> {
     try {
       // Ordem reversa por causa das FKs
       if (insertedEquipIds.length) {
-        await supabase.from("equipments").delete().in("id", insertedEquipIds);
+        await db.from("equipments").delete().in("id", insertedEquipIds);
       }
       if (insertedSectorIds.length) {
-        await supabase.from("sectors").delete().in("id", insertedSectorIds);
+        await db.from("sectors").delete().in("id", insertedSectorIds);
       }
       if (insertedPlcIds.length) {
-        await supabase.from("plc_groups").delete().in("id", insertedPlcIds);
+        await db.from("plc_groups").delete().in("id", insertedPlcIds);
       }
     } catch {
       // best-effort: se rollback falhar, ainda assim sinalizamos erro

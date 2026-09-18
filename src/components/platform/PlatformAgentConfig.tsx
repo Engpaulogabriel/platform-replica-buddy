@@ -5,6 +5,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -82,7 +83,7 @@ export default function PlatformAgentConfig({ isAdmin }: Props) {
       tx_gap_ms: config.tx_gap_ms,
       updated_at: new Date().toISOString(),
     };
-    const { error } = await supabase
+    const { error } = await assertOperationalClient(farmId)
       .from("agent_config")
       .upsert(payload, { onConflict: "farm_id" });
     setSaving(false);

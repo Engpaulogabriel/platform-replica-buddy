@@ -14,6 +14,8 @@
 // e porta COM aberta. Em modo web, este worker fica idle.
 
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient, type RenovSupabase } from "@/lib/supabaseRouter";
+import { isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
 import { measureSignalBars } from "@/lib/rfSignal";
 
 const MIN_INTERVAL_BETWEEN_TX_MS = 3_000; // limitação física do ESP_A — NÃO REDUZIR
@@ -28,12 +30,22 @@ const SUPABASE_UPDATE_TIMEOUT_MS = 30_000;
 const SUPABASE_UPDATE_RETRIES = [5_000, 10_000, 30_000];
 
 interface PendingConfirmation {
+  db: RenovSupabase;
   commandId: string;
   patch: Record<string, unknown>;
   guard?: { column: string; values: string[] };
   queuedAt: number;
 }
 const pendingConfirmations: PendingConfirmation[] = [];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIENTE DO WORKER — resolvido UMA VEZ em startCommandWorker(farmId).
+// O worker é o pipeline de comando físico: TX, reserva (pending→sent), timeout,
+// confirmação e telemetria precisam acontecer TODOS no mesmo backend em que o
+// comando nasceu. Cada confirmação pendente carrega o próprio cliente para que
+// uma troca de fazenda no meio do caminho não drene no servidor errado.
+// ─────────────────────────────────────────────────────────────────────────────
+let activeDb: RenovSupabase | null = null;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -42,13 +54,14 @@ function sleep(ms: number): Promise<void> {
 /** Executa UPDATE em commands com timeout local + retry/backoff.
  *  Em caso de falha total, enfileira para drenar depois. NÃO lança. */
 async function updateCommandWithRetry(
+  db: RenovSupabase,
   commandId: string,
   patch: Record<string, unknown>,
   guard?: { column: string; values: string[] },
 ): Promise<boolean> {
   for (let attempt = 0; attempt <= SUPABASE_UPDATE_RETRIES.length; attempt++) {
     try {
-      let q: any = supabase.from("commands").update(patch as any).eq("id", commandId);
+      let q: any = db.from("commands").update(patch as any).eq("id", commandId);
       if (guard) q = q.in(guard.column as any, guard.values);
       const result = await Promise.race([
         q.then((r) => r),
@@ -66,7 +79,7 @@ async function updateCommandWithRetry(
       }
     }
   }
-  pendingConfirmations.push({ commandId, patch, guard, queuedAt: Date.now() });
+  pendingConfirmations.push({ db, commandId, patch, guard, queuedAt: Date.now() });
   console.error(`[commandWorker] comando ${commandId} executado mas não confirmado no banco — adicionado à fila (${pendingConfirmations.length} pendentes)`);
   return false;
 }
@@ -77,7 +90,7 @@ async function drainPendingConfirmations() {
   const batch = pendingConfirmations.splice(0, pendingConfirmations.length);
   for (const item of batch) {
     try {
-      let q: any = supabase.from("commands").update(item.patch as any).eq("id", item.commandId);
+      let q: any = item.db.from("commands").update(item.patch as any).eq("id", item.commandId);
       if (item.guard) q = q.in(item.guard.column as any, item.guard.values);
       const result = await Promise.race([
         q.then((r) => r),
@@ -110,6 +123,7 @@ interface PendingCommand {
 }
 
 interface InflightCommand {
+  db: RenovSupabase;
   id: string;
   sentAt: number;
   timeoutMs: number;
@@ -165,8 +179,8 @@ function isUnsafePollingActuation(cmd: PendingCommand): boolean {
   return cmd.source_device !== "platform-scheduler";
 }
 
-async function fetchNextPending(farmId: string): Promise<PendingCommand | null> {
-  const { data, error } = await supabase
+async function fetchNextPending(db: RenovSupabase, farmId: string): Promise<PendingCommand | null> {
+  const { data, error } = await db
     .from("commands")
     .select("id,farm_id,equipment_id,plc_hw_id,type,priority,frame,timeout_ms,created_at,source_device")
     .eq("farm_id", farmId)
@@ -182,8 +196,8 @@ async function fetchNextPending(farmId: string): Promise<PendingCommand | null> 
   return data as PendingCommand | null;
 }
 
-async function markSent(commandId: string): Promise<boolean> {
-  const { error } = await supabase
+async function markSent(db: RenovSupabase, commandId: string): Promise<boolean> {
+  const { error } = await db
     .from("commands")
     .update({ status: "sent", sent_at: new Date().toISOString() })
     .eq("id", commandId)
@@ -191,8 +205,8 @@ async function markSent(commandId: string): Promise<boolean> {
   return !error;
 }
 
-async function markError(commandId: string, message: string) {
-  await supabase
+async function markError(db: RenovSupabase, commandId: string, message: string) {
+  await db
     .from("commands")
     .update({
       status: "error",
@@ -209,7 +223,7 @@ async function processNext() {
     import.meta.env.DEV && console.debug("[commandWorker] drain falhou:", e),
   );
   if (processing) return;
-  if (!activeFarmId) return;
+  if (!activeFarmId || !activeDb) return;
   if (!isBridgePresent() || !isPortOpen()) return;
 
   const sinceLastTx = Date.now() - lastTxAt;
@@ -220,11 +234,12 @@ async function processNext() {
 
   processing = true;
   try {
-    const cmd = await fetchNextPending(activeFarmId);
+    const db = activeDb;
+    const cmd = await fetchNextPending(db, activeFarmId);
     if (!cmd) return;
 
     if (isUnsafePollingActuation(cmd)) {
-      await supabase
+      await db
         .from("commands")
         .update({
           status: "cancelled",
@@ -242,7 +257,7 @@ async function processNext() {
     }
 
     // Reserva (status pending → sent) atomicamente
-    const claimed = await markSent(cmd.id);
+    const claimed = await markSent(db, cmd.id);
     if (!claimed) return;
 
     const api = (window as any).serialAPI;
@@ -251,6 +266,7 @@ async function processNext() {
       lastTxAt = Date.now();
       const tsnn = cmd.plc_hw_id ?? extractTsnnFromFrame(cmd.frame);
       inflight.set(cmd.id, {
+        db,
         id: cmd.id,
         sentAt: lastTxAt,
         timeoutMs: cmd.timeout_ms ?? 10_000,
@@ -265,7 +281,7 @@ async function processNext() {
       setTimeout(() => { void timeoutInflight(cmd.id); }, timeoutMs + 200);
       if (import.meta.env.DEV) console.info("[commandWorker] TX", cmd.type, cmd.frame.replace("\r", "\\r"));
     } catch (e: any) {
-      await markError(cmd.id, e?.message ?? String(e));
+      await markError(db, cmd.id, e?.message ?? String(e));
     }
   } finally {
     processing = false;
@@ -280,6 +296,7 @@ async function timeoutInflight(commandId: string) {
   if (!info) return; // já respondeu
   inflight.delete(commandId);
   await updateCommandWithRetry(
+    info.db,
     commandId,
     {
       status: "timeout",
@@ -309,7 +326,7 @@ async function finalizeInflight(
   inflight.delete(cmd.id);
   cmd.responseLines.push(responseLine);
   // PLC já confirmou — nunca reenviar. Se Supabase falhar, vai para fila pendente.
-  await updateCommandWithRetry(cmd.id, {
+  await updateCommandWithRetry(cmd.db, cmd.id, {
     status,
     responded_at: new Date().toISOString(),
     response: cmd.responseLines.join("\n"),
@@ -358,7 +375,7 @@ async function handleSerialLine(rawLine: string) {
     }
 
     try {
-      await supabase.rpc("apply_pump_telemetry", {
+      await assertOperationalClient(farmId).rpc("apply_pump_telemetry", {
         _farm_id: farmId,
         _tsnn: tsnn,
         _payload: payload,
@@ -471,11 +488,22 @@ export function startCommandWorker(farmId: string): () => void {
     return () => stopCommandWorker();
   }
   stopCommandWorker();
+  // FAIL-CLOSED: sem cliente operacional para esta fazenda o worker NÃO inicia.
+  // Processar comandos no backend errado é pior que não processar.
+  try {
+    activeDb = assertOperationalClient(farmId);
+  } catch (e) {
+    console.error("[commandWorker] backend operacional indisponível — worker não iniciado:", e);
+    activeDb = null;
+    return () => {};
+  }
   activeFarmId = farmId;
 
   // 1. Realtime: dispara processamento ao surgir novo pending (nome único por start)
   try {
-    realtimeChannel = supabase
+    // Canal do backend ANTIGO não representa uma fazenda migrada; nesse caso
+    // ficamos só com o poll de fallback abaixo (que já existe).
+    realtimeChannel = !isRealtimeAvailableForFarm(farmId) ? null : supabase
       .channel(`commands-${farmId}-${Math.random().toString(36).slice(2, 8)}`)
       .on(
         "postgres_changes",
@@ -515,6 +543,7 @@ export function stopCommandWorker() {
     try { supabase.removeChannel(realtimeChannel); } catch { /* ignore */ }
     realtimeChannel = null;
   }
+  activeDb = null;
   if (pollFallbackTimer) { clearInterval(pollFallbackTimer); pollFallbackTimer = null; }
   if (unsubData) { try { unsubData(); } catch { /* ignore */ } unsubData = null; }
   inflight.clear();

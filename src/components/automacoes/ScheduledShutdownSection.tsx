@@ -6,6 +6,7 @@ import { Clock, Power, CalendarDays } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { toast } from "sonner";
 
 interface EquipmentLite {
@@ -70,7 +71,8 @@ export function ScheduledShutdownSection({ farmId, equipments, canEdit }: Props)
 
   const toggle = async (row: ScheduledAutomation) => {
     if (!canEdit) return;
-    const { error } = await supabase
+    // Automação é operacional: grava no backend da própria fazenda.
+    const { error } = await assertOperationalClient(farmId)
       .from("scheduled_automations")
       .update({ is_active: !row.is_active })
       .eq("id", row.id);

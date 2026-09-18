@@ -5,6 +5,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -235,7 +236,8 @@ export default function SectorsConfig() {
             .from("profiles").select("default_farm_id").eq("id", uid).maybeSingle();
           const cloudFarmId = prof?.default_farm_id;
           if (cloudFarmId) {
-            await supabase.from("equipments")
+            // Escrita operacional: segue o backend da fazenda de destino.
+            await assertOperationalClient(cloudFarmId).from("equipments")
               .update({ farm_id: cloudFarmId })
               .in("id", cloudIds);
           }
@@ -300,7 +302,7 @@ export default function SectorsConfig() {
           const cloudFarmId = prof?.default_farm_id;
           if (!cloudFarmId) throw new Error("Fazenda padrão não configurada na nuvem.");
 
-          const { error } = await supabase
+          const { error } = await assertOperationalClient(cloudFarmId)
             .from("equipments")
             .update({ farm_id: cloudFarmId, sector_id: null })
             .in("id", cloudIds);
