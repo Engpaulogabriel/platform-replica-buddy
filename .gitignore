@@ -14,3 +14,13 @@ electron-agent/app/main.cjs
 # Artefatos que nao pertencem ao repositorio do frontend
 *.zip
 .DS_Store
+
+# Agent — saídas de build e staging (a fonte canônica é electron-agent/ na raiz)
+electron-agent/dist/
+electron-agent/release/app.asar
+electron-agent/.main.original.cjs
+electron-agent/app/main.cjs
+electron-agent/app/main.original.cjs
+electron-agent/app/lib/
+electron-agent/app/auth.html
+electron-agent/app/auth-preload.cjs

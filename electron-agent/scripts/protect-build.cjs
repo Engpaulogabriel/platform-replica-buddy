@@ -24,7 +24,10 @@ const { execSync } = require("child_process");
 const ROOT = path.resolve(__dirname, "..");
 const APP_DIR = path.join(ROOT, "app");
 const MAIN_SRC = path.join(APP_DIR, "main.cjs");
-const MAIN_BACKUP = path.join(APP_DIR, "main.original.cjs");
+// FORA de app/ de propósito: `asar pack app` empacota tudo que estiver na
+// pasta, e um backup ali dentro colocaria o fonte LIMPO dentro do artefato
+// ofuscado — anulando a proteção e inflando o pacote.
+const MAIN_BACKUP = path.join(ROOT, ".main.original.cjs");
 const RELEASE_DIR = path.join(ROOT, "release");
 const ASAR_OUT = path.join(RELEASE_DIR, "app.asar");
 
@@ -39,6 +42,58 @@ async function main() {
     console.error("app/main.cjs não encontrado em " + MAIN_SRC);
     process.exit(1);
   }
+
+  // 0) STAGING DETERMINÍSTICO — fonte canônica → app/
+  //
+  // Antes isto era cópia manual: o `main.cjs` autoritativo vivia na raiz de
+  // electron-agent/ e alguém o copiava para app/ antes de buildar. Quando a
+  // cópia não acontecia (ou acontecia ao contrário), o .asar saía com um main
+  // de outra versão — foi assim que a fonte da 3.26 se perdeu e o app/ ficou
+  // com um main 3.25.6. Agora o build sincroniza sozinho, sempre na mesma
+  // direção, e falha alto se um arquivo de runtime faltar.
+  log("staging: copiando fonte canônica → app/");
+  const RUNTIME_FILES = [
+    "main.cjs", "package.json",
+    "auth.html", "auth-preload.cjs",
+    "setup.html", "setup-preload.cjs",
+    "log.html", "log-preload.cjs",
+    "config.html", "config-preload.cjs",
+    "icon.png", "icon.ico",
+  ];
+  for (const f of RUNTIME_FILES) {
+    const src = path.join(ROOT, f);
+    if (!fs.existsSync(src)) {
+      console.error(`[PROTECT] arquivo de runtime ausente na raiz: ${f}`);
+      process.exit(1);
+    }
+    fs.copyFileSync(src, path.join(APP_DIR, f));
+  }
+  // lib/ inteiro — os require("./lib/*.cjs") do main viram null sem isto.
+  const LIB_SRC = path.join(ROOT, "lib");
+  const LIB_DST = path.join(APP_DIR, "lib");
+  if (!fs.existsSync(LIB_SRC)) {
+    console.error("[PROTECT] lib/ não encontrada na raiz de electron-agent/");
+    process.exit(1);
+  }
+  fs.mkdirSync(LIB_DST, { recursive: true });
+  for (const f of fs.readdirSync(LIB_SRC).filter((n) => n.endsWith(".cjs"))) {
+    fs.copyFileSync(path.join(LIB_SRC, f), path.join(LIB_DST, f));
+  }
+  // O backup do main anterior não pode sobreviver ao staging: ele restauraria
+  // um main de outra versão no passo 6.
+  if (fs.existsSync(MAIN_BACKUP)) fs.unlinkSync(MAIN_BACKUP);
+  // Poda: nada além do runtime pode viajar no .asar. `serial_bridge.exe` e o
+  // .py vão como extraResources (soltos em resources/) — Python não executa de
+  // dentro do asar —, e qualquer sobra de build anterior sairia junto.
+  const PERMITIDOS = new Set([...RUNTIME_FILES, "lib", "node_modules",
+    "package-lock.json", "renov-logo.png"]);
+  for (const nome of fs.readdirSync(APP_DIR)) {
+    if (PERMITIDOS.has(nome)) continue;
+    const alvo = path.join(APP_DIR, nome);
+    fs.rmSync(alvo, { recursive: true, force: true });
+    log(`staging: removido de app/ (não é runtime): ${nome}`);
+  }
+  log(`staging concluído: ${RUNTIME_FILES.length} arquivos + lib/`);
 
   // 1) npm install --production em app/
   log("instalando dependências de produção em app/ ...");
