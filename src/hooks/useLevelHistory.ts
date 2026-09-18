@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
+import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 
 export interface LevelHistoryPoint {
   read_at: string;
@@ -22,6 +23,9 @@ export function useLevelHistory(
   const fromTime = from.getTime();
   const toTime = to.getTime();
 
+  // Telemetria de nível segue o backend da fazenda ATIVA (o equipamento
+  // consultado é sempre o da fazenda em tela).
+  const farmId = useDefaultFarmId();
   useEffect(() => {
     if (!enabled || !equipmentId) {
       setData([]);
@@ -35,7 +39,7 @@ export function useLevelHistory(
     setHasLoaded(false);
     setError(null);
     (async () => {
-      const { data: rows, error } = await supabase
+      const { data: rows, error } = await getSupabaseForFarm(farmId)
         .from("level_history")
         .select("read_at, percent, meters, raw, is_calibrated")
         .eq("equipment_id", equipmentId)

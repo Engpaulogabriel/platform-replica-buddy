@@ -4,6 +4,7 @@
 // não há contexto montado (polling 60s).
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 
 export interface OpenMaintenanceOrder {
@@ -34,7 +35,7 @@ function useOpenMaintenanceData(): MaintenanceCtx {
       setOrders([]);
       return;
     }
-    const { data } = await supabase
+    const { data } = await getSupabaseForFarm(farmId)
       .from("maintenance_orders")
       .select("id,equipment_id,equipment_name,problem_type,priority,description,status,created_at")
       .eq("farm_id", farmId)

@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   TrendingUp, TrendingDown, Minus, AlertTriangle, Droplets, HelpCircle, Pause, AlertOctagon,
@@ -166,16 +167,16 @@ export function WaterBalanceCard({ farmId, pumpStats }: Props) {
         { data: logs },
       ] = await Promise.all([
         supabase.rpc("get_water_balance", { _farm_id: farmId }),
-        supabase.from("farm_productivity_config" as any)
+        getSupabaseForFarm(farmId).from("farm_productivity_config" as any)
           .select("tariff_peak, tariff_reserved")
           .eq("farm_id", farmId)
           .maybeSingle(),
-        supabase.from("equipments")
+        getSupabaseForFarm(farmId).from("equipments")
           .select("id, name, power_kw, last_outputs_state, saida, communication_status, last_communication")
           .eq("farm_id", farmId)
           .eq("active", true)
           .in("type", ["poco", "bombeamento"] as any),
-        supabase.from("automation_log")
+        getSupabaseForFarm(farmId).from("automation_log")
           .select("equipment_id, occurred_at, action, result")
           .eq("farm_id", farmId)
           .eq("action", "on" as any)

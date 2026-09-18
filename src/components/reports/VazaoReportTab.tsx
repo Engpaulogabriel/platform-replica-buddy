@@ -5,6 +5,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Droplets, Loader2 } from "lucide-react";
 import { BarChart, Bar, Cell, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 interface VazaoReportTabProps {
   farmId: string | null;
@@ -83,7 +84,7 @@ export default function VazaoReportTab({ farmId, fromDate, toDate }: VazaoReport
     let cancelled = false;
     const load = async () => {
       try {
-        const { data } = await supabase
+        const { data } = await getSupabaseForFarm(farmId)
           .from("equipments")
           .select("id, name, type, vazao_mode, flow_total_m3, flow_rate_m3h")
           .eq("farm_id", farmId)
@@ -110,7 +111,7 @@ export default function VazaoReportTab({ farmId, fromDate, toDate }: VazaoReport
   useEffect(() => {
     if (!farmId) return;
     let cancelled = false;
-    void supabase
+    void getSupabaseForFarm(farmId)
       .from("equipments")
       .select("id,name")
       .eq("farm_id", farmId)
@@ -132,7 +133,7 @@ export default function VazaoReportTab({ farmId, fromDate, toDate }: VazaoReport
     from.setDate(1);
     const fromStr = `${from.getFullYear()}-${String(from.getMonth() + 1).padStart(2, "0")}-01`;
     void (async () => {
-      let query = supabase
+      let query = getSupabaseForFarm(farmId)
         .from("daily_consumption")
         .select("equipment_id,date,total_m3")
         .eq("farm_id", farmId)
@@ -157,7 +158,7 @@ export default function VazaoReportTab({ farmId, fromDate, toDate }: VazaoReport
       const fromTs = `${fromDate}T00:00:00`;
       // toDate é inclusivo — pega até o fim do dia
       const toTs = `${toDate}T23:59:59.999`;
-      let q = supabase
+      let q = getSupabaseForFarm(farmId)
         .from("flow_history")
         .select("equipment_id,ts,flow_rate_m3h")
         .eq("farm_id", farmId)

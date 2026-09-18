@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import { TrendingUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 interface Roi {
   total: number;          // valor real nos dias de operação
@@ -56,13 +57,13 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
         farmRes, cfgRes, eqRes, logRes, firstLogRes, firstEqRes,
       ] = await Promise.all([
         supabase.from("farms").select("latitude, longitude").eq("id", farmId).maybeSingle(),
-        supabase.from("farm_productivity_config" as any)
+        getSupabaseForFarm(farmId).from("farm_productivity_config" as any)
           .select("worker_cost_per_hour, vehicle_cost_per_km, travel_minutes_avg, manual_operation_time_minutes, remote_operation_time_minutes, cycles_per_day, tariff_peak, tariff_reserved, demand_cost_per_kw")
           .eq("farm_id", farmId).maybeSingle(),
-        supabase.from("equipments")
+        getSupabaseForFarm(farmId).from("equipments")
           .select("id, latitude, longitude, power_kw, estimated_flow_m3h")
           .eq("farm_id", farmId).in("type", ["poco", "bombeamento"] as any).eq("active", true),
-        supabase.from("automation_log")
+        getSupabaseForFarm(farmId).from("automation_log")
           .select("equipment_id, occurred_at, origin")
           .eq("farm_id", farmId)
           .eq("origin", "remote" as any)
@@ -70,12 +71,12 @@ export function RoiTravelCard({ farmId }: { farmId: string | null }) {
           .order("occurred_at", { ascending: true })
           .limit(5000),
         // descobre quando o sistema começou a operar
-        supabase.from("automation_log")
+        getSupabaseForFarm(farmId).from("automation_log")
           .select("occurred_at")
           .eq("farm_id", farmId)
           .order("occurred_at", { ascending: true })
           .limit(1),
-        supabase.from("equipments")
+        getSupabaseForFarm(farmId).from("equipments")
           .select("created_at")
           .eq("farm_id", farmId)
           .order("created_at", { ascending: true })

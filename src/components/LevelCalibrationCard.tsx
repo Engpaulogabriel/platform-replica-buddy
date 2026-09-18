@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Activity, Crosshair, Save, Waves } from "lucide-react";
 import { notify } from "@/lib/notify";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { calibrateLevel, formatLevelDisplay } from "@/lib/levelCalibration";
 import type { CloudEquipamento } from "@/hooks/useCadastrosCloud";
 
@@ -88,7 +89,8 @@ export default function LevelCalibrationCard({ equip, onSaved, compact }: Props)
     if (mx !== null && mx <= 0) { notify.fail("Calibração de Nível", "O nível máximo deve ser maior que zero."); return; }
 
     setSaving(true);
-    const { error } = await supabase
+    // Calibração de nível é consumida pelo Agent no cálculo da telemetria.
+    const { error } = await assertOperationalClient(equip.farm_id)
       .from("equipments")
       .update({
         level_cal_digital: d,

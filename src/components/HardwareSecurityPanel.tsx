@@ -4,6 +4,8 @@ import { notify } from "@/lib/notify";
 // e permite que platform_admin reautorize o hardware.
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isFarmMigrated, MIGRATED_FARMS } from "@/lib/migrationRegistry";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -50,14 +52,30 @@ export default function HardwareSecurityPanel() {
 
   async function load() {
     setLoading(true);
+    // O INVENTÁRIO é global (todas as fazendas vivem no backend antigo), mas as
+    // linhas de uma fazenda MIGRADA estão congeladas ali desde o cutover: o
+    // Agent dela reporta hardware no backend novo. Base global + overlay.
     const [{ data: hw }, { data: hist }, { data: farms }] = await Promise.all([
       supabase.from("agent_hardware").select("*").order("alert_level", { ascending: false }),
       supabase.from("agent_hardware_history").select("*").order("created_at", { ascending: false }).limit(50),
       supabase.from("farms").select("id, name"),
     ]);
+    const hwRows = [...(((hw as any[]) || []).filter((r) => !isFarmMigrated(r.farm_id)))];
+    const histRows = [...(((hist as any[]) || []).filter((r) => !isFarmMigrated(r.farm_id)))];
+    await Promise.all([...MIGRATED_FARMS].map(async (fid) => {
+      const routed = tryGetSupabaseForFarm(fid);
+      if (!routed.client) return;   // sem fallback: some da lista em vez de mentir
+      const [{ data: h }, { data: ht }] = await Promise.all([
+        routed.client.from("agent_hardware").select("*").eq("farm_id", fid),
+        routed.client.from("agent_hardware_history").select("*").eq("farm_id", fid)
+          .order("created_at", { ascending: false }).limit(50),
+      ]);
+      hwRows.push(...(((h as any[]) || [])));
+      histRows.push(...(((ht as any[]) || [])));
+    }));
     const byId = new Map((farms || []).map((f: any) => [f.id, f.name]));
-    setRows(((hw as any[]) || []).map((r) => ({ ...r, farm_name: byId.get(r.farm_id) ?? r.farm_id.slice(0, 8) })));
-    setHistory(((hist as any[]) || []).map((r) => ({ ...r, farm_name: byId.get(r.farm_id) ?? r.farm_id.slice(0, 8) })));
+    setRows((hwRows).map((r) => ({ ...r, farm_name: byId.get(r.farm_id) ?? r.farm_id.slice(0, 8) })));
+    setHistory((histRows).map((r) => ({ ...r, farm_name: byId.get(r.farm_id) ?? r.farm_id.slice(0, 8) })));
     setLoading(false);
   }
 

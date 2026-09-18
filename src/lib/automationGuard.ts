@@ -8,6 +8,7 @@
 // navegador for fechado.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 
 export interface GuardEntry {
@@ -33,7 +34,7 @@ export async function wasScheduledOffRecently(
   windowMs: number,
 ): Promise<boolean> {
   try {
-    const { data: schedules } = await supabase
+    const { data: schedules } = await getSupabaseForFarm(farmId)
       .from("automation_schedules")
       .select("id, time_off")
       .eq("farm_id", farmId)

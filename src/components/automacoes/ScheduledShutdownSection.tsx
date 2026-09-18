@@ -6,6 +6,7 @@ import { Clock, Power, CalendarDays } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { toast } from "sonner";
 
@@ -56,7 +57,7 @@ export function ScheduledShutdownSection({ farmId, equipments, canEdit }: Props)
       return;
     }
     setLoading(true);
-    const { data } = await supabase
+    const { data } = await getSupabaseForFarm(farmId)
       .from("scheduled_automations")
       .select("id,name,action,time_brt,days_of_week,target_equipment_ids,excluded_equipment_ids,is_active,last_run_at")
       .eq("farm_id", farmId)

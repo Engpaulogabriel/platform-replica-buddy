@@ -6,6 +6,8 @@ import { useLanguage } from "@/contexts/LanguageContext";
 import { Button } from "@/components/ui/button";
 import { notify } from "@/lib/notify";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
+import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { useReservoirDrainEta, formatEta } from "@/hooks/useReservoirDrainEta";
 
 export interface Reservoir {
@@ -58,12 +60,15 @@ interface LevelReading {
 
 /** Últimas leituras de nível — carregadas ao abrir o popover. */
 function LastLevelReadings({ equipmentId }: { equipmentId: string }) {
+  // `level_history` é telemetria: pertence ao backend da fazenda ATIVA — a
+  // mesma que originou este equipamento no dashboard.
+  const farmId = useDefaultFarmId();
   const [rows, setRows] = useState<LevelReading[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("level_history")
         .select("read_at, percent, meters")
         .eq("equipment_id", equipmentId)
@@ -79,7 +84,7 @@ function LastLevelReadings({ equipmentId }: { equipmentId: string }) {
       );
     })();
     return () => { cancelled = true; };
-  }, [equipmentId]);
+  }, [equipmentId, farmId]);
 
   if (rows === null) {
     return <p className="text-[11px] text-muted-foreground text-center py-1">Carregando leituras...</p>;

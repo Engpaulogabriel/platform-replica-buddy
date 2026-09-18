@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -54,7 +55,7 @@ export default function EquipmentPowerConfig({ farmId, canEdit }: Props) {
   const load = useCallback(async () => {
     if (!farmId) return;
     setLoading(true);
-    const { data, error } = await supabase
+    const { data, error } = await getSupabaseForFarm(farmId)
       .from("equipments")
       .select("id, name, type, power_cv, power_kw, estimated_flow_m3h")
       .eq("farm_id", farmId)

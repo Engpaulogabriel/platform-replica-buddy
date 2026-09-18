@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Zap } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { toast } from "sonner";
@@ -42,8 +43,8 @@ export default function PeakHourConfigCard() {
     (async () => {
       setLoading(true);
       const [cfgRes, eqRes] = await Promise.all([
-        supabase.from("peak_hour_config" as any).select("*").eq("farm_id", farmId).maybeSingle(),
-        supabase.from("equipments").select("id, name, type").eq("farm_id", farmId)
+        getSupabaseForFarm(farmId).from("peak_hour_config" as any).select("*").eq("farm_id", farmId).maybeSingle(),
+        getSupabaseForFarm(farmId).from("equipments").select("id, name, type").eq("farm_id", farmId)
           .in("type", ["poco", "bombeamento"] as any).order("name"),
       ]);
       if (cancelled) return;

@@ -4,6 +4,7 @@
 // equipamento selecionado.
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import type { PeriodRange, PumpOption } from "@/components/indicadores/PeriodPicker";
 
 export interface DailyProductivityRow {
@@ -84,12 +85,12 @@ export function useProductivityHistory(
 
       // 1) Equipamentos + config da fazenda (vazão padrão como fallback)
       const [eqRes, cfgRes] = await Promise.all([
-        supabase
+        getSupabaseForFarm(farmId)
           .from("equipments")
           .select("id, name, estimated_flow_m3h")
           .eq("farm_id", farmId)
           .in("type", ["poco", "bombeamento"] as any),
-        supabase
+        getSupabaseForFarm(farmId)
           .from("farm_productivity_config")
           .select("default_flow_m3h")
           .eq("farm_id", farmId)
@@ -116,7 +117,7 @@ export function useProductivityHistory(
       );
 
       const logPromise = fetchAllPages<any>((from, to) =>
-        supabase
+        getSupabaseForFarm(farmId)
           .from("automation_log")
           .select("equipment_id, action, occurred_at")
           .eq("farm_id", farmId)

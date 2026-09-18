@@ -10,6 +10,7 @@
 // automation_log guarda (equipment_name).
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 const WINDOW_DAYS = 7;
 const WINDOW_MS = WINDOW_DAYS * 24 * 60 * 60 * 1000;
@@ -23,7 +24,7 @@ export function useCommReliability(farmId: string | null): Map<string, number> {
     void (async () => {
       const now = Date.now();
       const fromIso = new Date(now - WINDOW_MS).toISOString();
-      const { data, error } = await supabase
+      const { data, error } = await getSupabaseForFarm(farmId)
         .from("automation_log")
         .select("equipment_name, occurred_at, details")
         .eq("farm_id", farmId)

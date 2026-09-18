@@ -3,6 +3,7 @@ import { Zap, Plus, History, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useUserFarms } from "@/hooks/useUserFarms";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAutomacoes } from "@/hooks/useAutomacoes";
@@ -29,7 +30,7 @@ export default function Automacoes() {
   useEffect(() => {
     if (!activeFarmId) return;
     void (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(activeFarmId)
         .from("equipments")
         .select("id, name")
         .eq("farm_id", activeFarmId)
@@ -50,7 +51,7 @@ export default function Automacoes() {
       return;
     }
     void (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(activeFarmId)
         .from("automation_log")
         .select("id, equipment_name, action, result, actor_label, occurred_at")
         .eq("farm_id", activeFarmId)

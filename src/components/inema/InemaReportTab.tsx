@@ -13,6 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Download, FileSpreadsheet, FileText, Loader2, Droplets, CalendarRange } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { exportInemaPDF, exportInemaXLSX, exportInemaAnnualPDF, type InemaReportData, type InemaFarmHeader, type InemaAnnualReportData, type InemaAnnualPump, type InemaAnnualMonth, type InemaSignatureTitular, type InemaSignatureRT } from "@/lib/reportExport";
 import { notify } from "@/lib/notify";
 
@@ -119,7 +120,7 @@ export default function InemaReportTab({ farmId, fromDate, toDate }: Props) {
       // OUTORGA vinda de water_permits (+ water_permit_wells), NÃO de inema_permits
       // (que está vazia e deixava o PDF com "—"). O resto do fluxo é idêntico.
       const [{ data: eq }, { data: farm }, { data: inema }, { data: wPermits }] = await Promise.all([
-        supabase.from("equipments")
+        getSupabaseForFarm(farmId).from("equipments")
           .select("id, name, type, estimated_flow_m3h, is_captacao, latitude, longitude")
           .eq("farm_id", farmId)
           .eq("is_captacao", true)
@@ -127,10 +128,10 @@ export default function InemaReportTab({ farmId, fromDate, toDate }: Props) {
         supabase.from("farms")
           .select("name, city, state, cnpj, proprietario, endereco, zip_code, phone, email, latitude, longitude")
           .eq("id", farmId).maybeSingle(),
-        supabase.from("farm_inema_config" as any)
+        getSupabaseForFarm(farmId).from("farm_inema_config" as any)
           .select("outorga_numero, orgao, vazao_outorgada_m3h")
           .eq("farm_id", farmId).maybeSingle(),
-        supabase.from("water_permits" as any)
+        getSupabaseForFarm(farmId).from("water_permits" as any)
           .select("id, permit_number, process_number, purpose, basin, validity_end, permit_date, regime_hours_per_day, municipality, holder_name, holder_cpf_cnpj")
           .eq("farm_id", farmId)
           .order("validity_end", { ascending: false }),
@@ -142,7 +143,7 @@ export default function InemaReportTab({ farmId, fromDate, toDate }: Props) {
       const permitsList = ((wPermits as any[] | null) ?? []);
       let wells: any[] = [];
       if (permitsList.length) {
-        const { data: ww } = await supabase.from("water_permit_wells" as any)
+        const { data: ww } = await getSupabaseForFarm(farmId).from("water_permit_wells" as any)
           .select("permit_id, equipment_id, well_name, flow_rate_m3_day")
           .in("permit_id", permitsList.map((p) => p.id));
         wells = ((ww as any[] | null) ?? []);

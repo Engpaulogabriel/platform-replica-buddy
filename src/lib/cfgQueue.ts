@@ -19,6 +19,7 @@
 // useCommandTracker.
 
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import type { Database } from "@/integrations/supabase/types";
 
 type CommandInsert = Database["public"]["Tables"]["commands"]["Insert"];
@@ -35,7 +36,8 @@ const sourceDevice = (): string | null =>
   typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 80) : null;
 
 async function insertCommand(row: Omit<CommandInsert, "id" | "created_at">): Promise<EnqueueResult> {
-  const { data, error } = await supabase
+  // COMANDO FÍSICO de configuração. Fail-closed pelo farm_id do próprio row.
+  const { data, error } = await assertOperationalClient(row.farm_id as string)
     .from("commands")
     .insert({
       ...row,

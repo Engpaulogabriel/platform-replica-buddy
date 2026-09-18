@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, AlertTriangle, Clock, Zap, CircleCheck } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 type DayRow = {
   cycle_date: string;
@@ -106,7 +107,7 @@ export function EnergyEfficiencyHistoryPanel({ farmId, range: rangeProp, onRange
     if (!farmId) { setActivePumps(0); return; }
     let cancel = false;
     (async () => {
-      const { count } = await supabase
+      const { count } = await getSupabaseForFarm(farmId)
         .from("equipments")
         .select("id", { count: "exact", head: true })
         .eq("farm_id", farmId)

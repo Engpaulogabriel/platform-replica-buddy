@@ -5,6 +5,7 @@
 // Requer ≥30 dias de operação; senão retorna insufficientData=true.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 // ── Premissas (conservadoras, rotuladas na UI). safraValuePerM3 e monthlySalary
 //    começam em 0 = "configurar" (não assume valor sem o dado do cliente). ────
@@ -79,16 +80,16 @@ export function useRenovImpact(farmId: string | null | undefined): RenovImpact {
     const fromIso = range.from.toISOString(), toIso = range.to.toISOString();
     const [{ data: eqs }, { data: logs }, { data: cmds }, { data: cfg }, { data: horas }, { data: permits }, { data: earliest }] =
       await Promise.all([
-        supabase.from("equipments").select("id,name,latitude,longitude,estimated_flow_m3h,power_kw,power_cv")
+        getSupabaseForFarm(farmId).from("equipments").select("id,name,latitude,longitude,estimated_flow_m3h,power_kw,power_cv")
           .eq("farm_id", farmId).eq("active", true).in("type", ["poco", "bombeamento"]).order("name"),
-        supabase.from("automation_log").select("origin,action,occurred_at,equipment_id")
+        getSupabaseForFarm(farmId).from("automation_log").select("origin,action,occurred_at,equipment_id")
           .eq("farm_id", farmId).gte("occurred_at", fromIso).in("action", ["turn_on", "turn_off"]),
-        supabase.from("commands").select("created_at,responded_at")
+        getSupabaseForFarm(farmId).from("commands").select("created_at,responded_at")
           .eq("farm_id", farmId).gte("created_at", fromIso).not("responded_at", "is", null).limit(2000),
-        supabase.from("farm_productivity_config").select("tariff_peak,tariff_off_peak,manual_travel_minutes_per_trigger,valor_safra_r_per_m3,salario_medio_regional,operadores_reduzidos").eq("farm_id", farmId).maybeSingle(),
-        supabase.rpc("get_horimetro_daily", { _farm_id: farmId, _from: fromIso, _to: toIso }),
-        supabase.from("water_permits" as any).select("regime_hours_per_day").eq("farm_id", farmId).limit(1).maybeSingle(),
-        supabase.from("automation_log").select("occurred_at").eq("farm_id", farmId).order("occurred_at", { ascending: true }).limit(1).maybeSingle(),
+        getSupabaseForFarm(farmId).from("farm_productivity_config").select("tariff_peak,tariff_off_peak,manual_travel_minutes_per_trigger,valor_safra_r_per_m3,salario_medio_regional,operadores_reduzidos").eq("farm_id", farmId).maybeSingle(),
+        getSupabaseForFarm(farmId).rpc("get_horimetro_daily", { _farm_id: farmId, _from: fromIso, _to: toIso }),
+        getSupabaseForFarm(farmId).from("water_permits" as any).select("regime_hours_per_day").eq("farm_id", farmId).limit(1).maybeSingle(),
+        getSupabaseForFarm(farmId).from("automation_log").select("occurred_at").eq("farm_id", farmId).order("occurred_at", { ascending: true }).limit(1).maybeSingle(),
       ]);
     const hoursByEq: Record<string, number> = {};
     for (const r of (horas ?? []) as Array<{ equipment_id: string; hours: number }>) {

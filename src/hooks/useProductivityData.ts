@@ -6,6 +6,7 @@
 // Faz os cálculos por bomba e retorna estrutura pronta para UI/PDF.
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import {
   splitSessionByPost,
@@ -115,8 +116,8 @@ export function useProductivityData(args: { from: Date; to: Date }): Productivit
     if (!farmId) return;
     setLoading(true);
     const [cfgRes, eqRes, runRes, holRes, cmdRes] = await Promise.all([
-      supabase.from("farm_productivity_config" as any).select("*").eq("farm_id", farmId).maybeSingle(),
-      supabase.from("equipments").select("id, name, estimated_flow_m3h, power_kw")
+      getSupabaseForFarm(farmId).from("farm_productivity_config" as any).select("*").eq("farm_id", farmId).maybeSingle(),
+      getSupabaseForFarm(farmId).from("equipments").select("id, name, estimated_flow_m3h, power_kw")
         .eq("farm_id", farmId).in("type", ["poco", "bombeamento"] as any),
       supabase.from("pump_runtime").select("equipment_id, started_at, ended_at")
         .eq("farm_id", farmId)
@@ -125,7 +126,7 @@ export function useProductivityData(args: { from: Date; to: Date }): Productivit
       supabase.from("national_holidays" as any).select("holiday_date")
         .gte("holiday_date", fromIso.slice(0, 10))
         .lte("holiday_date", toIso.slice(0, 10)),
-      supabase.from("commands").select("id", { count: "exact", head: true })
+      getSupabaseForFarm(farmId).from("commands").select("id", { count: "exact", head: true })
         .eq("farm_id", farmId)
         .gte("created_at", fromIso)
         .lte("created_at", toIso),
@@ -283,7 +284,7 @@ export function useInemaConfig() {
   const reload = useCallback(async () => {
     if (!farmId) return;
     setLoading(true);
-    const { data } = await supabase.from("farm_inema_config" as any).select("*").eq("farm_id", farmId).maybeSingle();
+    const { data } = await getSupabaseForFarm(farmId).from("farm_inema_config" as any).select("*").eq("farm_id", farmId).maybeSingle();
     setData((data as any) ?? null);
     setLoading(false);
   }, [farmId]);

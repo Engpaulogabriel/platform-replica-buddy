@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { tryGetSupabaseForFarm, assertOperationalClient } from "@/lib/supabaseRouter";
+import { isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { AlertOctagon, AlertTriangle, Info, X } from "lucide-react";
@@ -16,9 +18,15 @@ interface Msg {
 export function FarmMessagesBanner({ farmId }: { farmId: string | null }) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
 
+  // `farm_messages` é FARM-SCOPED OPERACIONAL: a plataforma escreve avisos
+  // dirigidos a UMA fazenda (manutenção, bloqueio, aviso de campo) e o operador
+  // daquela fazenda os lê e descarta. Leitura, descarte e Realtime têm de viver
+  // no MESMO backend — um par partido faria a mensagem reaparecer para sempre.
   const load = useCallback(async () => {
     if (!farmId) { setMsgs([]); return; }
-    const { data } = await supabase.rpc("farm_messages_active" as any, { _farm_id: farmId });
+    const routed = tryGetSupabaseForFarm(farmId);
+    if (!routed.client) { setMsgs([]); return; }   // indisponível ≠ dado velho do antigo
+    const { data } = await routed.client.rpc("farm_messages_active" as any, { _farm_id: farmId });
     setMsgs((data as any) ?? []);
   }, [farmId]);
 
@@ -27,19 +35,24 @@ export function FarmMessagesBanner({ farmId }: { farmId: string | null }) {
   // Realtime + polling de segurança a cada 60s
   useEffect(() => {
     if (!farmId) return;
-    const ch = supabase
+    // Fazenda migrada: o canal disponível é o do backend ANTIGO e não representa
+    // esta fazenda. Corrigido junto com o READ porque são inseparáveis — assinar
+    // o antigo aqui manteria a tela olhando para o servidor errado. O polling de
+    // segurança abaixo continua sendo a fonte periódica.
+    const ch = !isRealtimeAvailableForFarm(farmId) ? null : supabase
       .channel("farm-messages-" + farmId)
       .on("postgres_changes",
           { event: "*", schema: "public", table: "farm_messages", filter: `farm_id=eq.${farmId}` },
           () => void load())
       .subscribe();
     const t = setInterval(() => void load(), 300_000); // 5 min p/ cota Cloud
-    return () => { void supabase.removeChannel(ch); clearInterval(t); };
+    return () => { if (ch) void supabase.removeChannel(ch); clearInterval(t); };
   }, [farmId, load]);
 
   const dismiss = async (id: string) => {
     setMsgs(prev => prev.filter(m => m.id !== id));
-    await supabase.rpc("farm_messages_dismiss" as any, { _message_id: id });
+    // Descarte é escrita operacional: MESMO backend da leitura, fail-closed.
+    await assertOperationalClient(farmId).rpc("farm_messages_dismiss" as any, { _message_id: id });
   };
 
   if (!msgs.length) return null;

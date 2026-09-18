@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -63,7 +64,7 @@ export default function AuditoriaPanel() {
     if (!farmId) return;
     setLoading(true);
     const [execRes, auditRes, eqRes] = await Promise.all([
-      supabase
+      getSupabaseForFarm(farmId)
         .from("automation_execution_log")
         .select("id, equipment_id, action, scheduled_time, executed_at, status, origin")
         .eq("farm_id", farmId)
@@ -75,7 +76,7 @@ export default function AuditoriaPanel() {
         .eq("farm_id", farmId)
         .order("created_at", { ascending: false })
         .limit(100),
-      supabase.from("equipments").select("id, name").eq("farm_id", farmId),
+      getSupabaseForFarm(farmId).from("equipments").select("id, name").eq("farm_id", farmId),
     ]);
     setExec((execRes.data ?? []) as ExecRow[]);
     setAudit((auditRes.data ?? []) as AuditRow[]);

@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FileText, ScrollText, ShieldCheck, Loader2, Droplets } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { InemaCompliancePanel } from "@/components/inema/InemaCompliancePanel";
 
 const InemaReportTab = lazy(() => import("@/components/reports/InemaReportTab"));
@@ -77,7 +78,7 @@ function useWaterPermits(farmId: string | null) {
         return;
       }
       setLoading(true);
-      const { data: perms } = await supabase
+      const { data: perms } = await getSupabaseForFarm(farmId)
         .from("water_permits" as any)
         .select(
           "id, permit_number, process_number, permit_date, validity_start, validity_end, holder_name, holder_cpf_cnpj, municipality, basin, purpose, irrigated_area_ha, regime_hours_per_day, status",
@@ -92,7 +93,7 @@ function useWaterPermits(farmId: string | null) {
       let conds: any[] = [];
       if (ids.length > 0) {
         const [w, c] = await Promise.all([
-          supabase
+          getSupabaseForFarm(farmId)
             .from("water_permit_wells" as any)
             .select("id, permit_id, well_name, flow_rate_m3_day, latitude, longitude, datum")
             .in("permit_id", ids),

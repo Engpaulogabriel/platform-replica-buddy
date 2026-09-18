@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Droplets, Waves, Share2, Radio, Clock, Activity } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import type { Pump } from "@/components/dashboard/PumpTable";
 import { cn } from "@/lib/utils";
 
@@ -50,7 +51,7 @@ export default function FarmTopologyDiagram({ farmId, pumps }: Props) {
     if (!farmId) { setNodes([]); setLoading(false); return; }
     setLoading(true);
     (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("equipments")
         .select("id, name, type, alimenta_id, alimenta_alt_id")
         .eq("farm_id", farmId)

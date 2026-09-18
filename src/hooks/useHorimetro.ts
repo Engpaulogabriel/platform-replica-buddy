@@ -7,6 +7,7 @@
 
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 
 export interface HorimetroDailyRow {
@@ -141,7 +142,7 @@ export function useHorimetro(args: { from: Date; to: Date; enabled?: boolean }) 
       .or(`ended_at.is.null,ended_at.gte.${fromIso}`)
       .order("created_at", { ascending: false })
       .limit(200);
-    const eqPromise = supabase
+    const eqPromise = getSupabaseForFarm(farmId)
       .from("equipments")
       .select("id, name, last_outputs_state, last_actuation_origin, last_communication, saida")
       .eq("farm_id", farmId)
@@ -257,7 +258,7 @@ export function useHorimetroMonthTotal(equipmentId: string | null | undefined) {
     }
     let cancelled = false;
     (async () => {
-      const { data, error } = await supabase.rpc("get_horimetro_month_total", {
+      const { data, error } = await getSupabaseForFarm(farmId).rpc("get_horimetro_month_total", {
         _farm_id: farmId,
         _equipment_id: equipmentId,
       });

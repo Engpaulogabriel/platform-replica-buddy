@@ -5,6 +5,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -111,7 +112,7 @@ export default function SectorsConfig() {
         const farmId = prof?.default_farm_id;
         if (!farmId) return;
         if (!cancelled) setCloudFarmId(farmId);
-        const { data: rows } = await supabase
+        const { data: rows } = await getSupabaseForFarm(farmId)
           .from("equipments")
           .select("id,name,type,plc_group_id,farm_id,sector_id")
           .eq("farm_id", farmId)

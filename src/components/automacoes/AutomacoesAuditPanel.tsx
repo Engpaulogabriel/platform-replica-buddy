@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Download } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { toast } from "sonner";
 
 interface Equipment { id: string; name: string; }
@@ -116,7 +117,7 @@ export function AutomacoesAuditPanel({ farmId, equipments, automacaoNameById }: 
     if (!farmId) return;
     setLoading(true);
     try {
-      let q = supabase
+      let q = getSupabaseForFarm(farmId)
         .from("automation_audit_log")
         .select("*")
         .eq("farm_id", farmId)

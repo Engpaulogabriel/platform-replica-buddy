@@ -5,6 +5,7 @@
 // fazenda para nunca mais rodar.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { loadCloudIdMap } from "@/lib/cadastrosCloud";
 
@@ -88,10 +89,10 @@ export async function migrateLegacyAutomationToCloud(farmId: string): Promise<{
       { count: existingEngineRows },
       { count: equipmentsCount },
     ] = await Promise.all([
-      supabase.from("automation_schedules").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
-      supabase.from("automation_holiday_configs").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
-      supabase.from("automation_engine").select("farm_id", { count: "exact", head: true }).eq("farm_id", farmId),
-      supabase.from("equipments").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
+      getSupabaseForFarm(farmId).from("automation_schedules").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
+      getSupabaseForFarm(farmId).from("automation_holiday_configs").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
+      getSupabaseForFarm(farmId).from("automation_engine").select("farm_id", { count: "exact", head: true }).eq("farm_id", farmId),
+      getSupabaseForFarm(farmId).from("equipments").select("id", { count: "exact", head: true }).eq("farm_id", farmId),
     ]);
 
     const needsSchedulesMigration = schedules.length > 0 && (existingSchedules ?? 0) === 0;
@@ -113,7 +114,7 @@ export async function migrateLegacyAutomationToCloud(farmId: string): Promise<{
         .filter((schedule): schedule is LegacySchedule & { equipmentId: string } => !!schedule.equipmentId);
 
       const equipmentIds = Array.from(new Set(normalizedSchedules.map((s) => s.equipmentId)));
-      const { data: validEqs } = await supabase
+      const { data: validEqs } = await getSupabaseForFarm(farmId)
         .from("equipments")
         .select("id")
         .eq("farm_id", farmId)
@@ -143,7 +144,7 @@ export async function migrateLegacyAutomationToCloud(farmId: string): Promise<{
         });
 
       if (rows.length > 0) {
-        const { error } = await supabase.from("automation_schedules").insert(rows);
+        const { error } = await assertOperationalClient(farmId).from("automation_schedules").insert(rows);
         if (error) return { status: "error", error: error.message };
         migratedSchedules = rows.length;
       }
@@ -157,7 +158,7 @@ export async function migrateLegacyAutomationToCloud(farmId: string): Promise<{
         .filter((entry): entry is readonly [string, LegacyHoliday] => !!entry[0]);
 
       const equipmentIds = normalizedHolidayEntries.map(([eqId]) => eqId);
-      const { data: validEqs } = await supabase
+      const { data: validEqs } = await getSupabaseForFarm(farmId)
         .from("equipments")
         .select("id")
         .eq("farm_id", farmId)

@@ -13,6 +13,7 @@
 
 import { buildLoRaFrame, buildDirectToServer, buildViaRepetidorTx, type Radio } from "@/lib/protocol";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 
 const LS_RADIO = "rf_routing_radio_v1";
@@ -59,7 +60,7 @@ export function saveRfRouting(cfg: RfRoutingConfig): void {
  */
 export async function pullRfRoutingFromCloud(farmId: string): Promise<void> {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await getSupabaseForFarm(farmId)
       .from("rf_routing")
       .select("radio, via_repetidor")
       .eq("farm_id", farmId)

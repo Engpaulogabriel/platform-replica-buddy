@@ -10,6 +10,7 @@
 import { useEffect, useState } from "react";
 import { Trophy } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 interface SubScore {
   label: string;
@@ -99,12 +100,12 @@ export function FarmScoreCard({ farmId }: { farmId: string | null }) {
           .select("date, late_min, early_off_min, peak_minutes, post_status, pre_status, peak_violation")
           .eq("farm_id", farmId)
           .gte("date", sinceDate),
-        supabase.from("automation_log")
+        getSupabaseForFarm(farmId).from("automation_log")
           .select("origin")
           .eq("farm_id", farmId)
           .gte("occurred_at", sinceTs)
           .in("origin", ["local", "remote", "auto", "system"] as any),
-        supabase.from("equipments")
+        getSupabaseForFarm(farmId).from("equipments")
           .select("id, last_communication")
           .eq("farm_id", farmId)
           .in("type", ["poco", "bombeamento", "conjunto", "rio"] as any)

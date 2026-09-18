@@ -6,6 +6,7 @@ import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContai
 import { AlertTriangle, Download, Droplets, Loader2 } from "lucide-react";
 import { PageErrorBoundary } from "@/components/PageErrorBoundary";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useHorimetro } from "@/hooks/useHorimetro";
 
 interface AguaConsumoReportTabProps {
@@ -83,7 +84,7 @@ export default function AguaConsumoReportTab({ farmId, fromDate, toDate, selecte
     if (!renderReady || !farmId) { setEquipments([]); return; }
     let cancelled = false;
     (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("equipments")
         .select("id, name, estimated_flow_m3h")
         .eq("farm_id", farmId)

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Legend } from "recharts";
 import { Droplet, AlertTriangle, Download, FileText, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { useLevelHistory } from "@/hooks/useLevelHistory";
 import { notify } from "@/lib/notify";
@@ -36,7 +37,7 @@ const NiveisReport = ({ fromDate, toDate }: Props) => {
     let cancelled = false;
     setEquipmentLoading(true);
     (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("equipments")
         .select("id, name")
         .eq("farm_id", farmId)

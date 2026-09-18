@@ -6,6 +6,7 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxi
 import { Download, FileText, Loader2 } from "lucide-react";
 import { PageErrorBoundary } from "@/components/PageErrorBoundary";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useHorimetro } from "@/hooks/useHorimetro";
 import { exportDemandaCSV, exportDemandaPDF, type DemandReportRow } from "@/lib/reportExport";
 import { notifyReport } from "@/lib/notify";
@@ -52,7 +53,7 @@ export default function ConsumoReportTab({ farmId, fromDate, toDate, selectedPum
     let cancelled = false;
     (async () => {
       const [{ data: eqs }, { data: farm }] = await Promise.all([
-        supabase
+        getSupabaseForFarm(farmId)
           .from("equipments")
           .select("id, name, demanda_kw, power_kw, power_cv")
           .eq("farm_id", farmId)

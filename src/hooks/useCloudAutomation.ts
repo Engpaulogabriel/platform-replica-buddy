@@ -4,6 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { STAGGER_DEFAULTS, validateStaggerConfig } from "@/lib/automaticPumpState";
 
@@ -139,15 +140,15 @@ export function useCloudAutomation(): UseCloudAutomationResult {
 
     setLoading(true);
     const [schRes, holRes, engRes, farmRes] = await Promise.all([
-      supabase
+      getSupabaseForFarm(farmId)
         .from("automation_schedules")
         .select("id, farm_id, equipment_id, active, mode, days, time_on, time_off")
         .eq("farm_id", farmId),
-      supabase
+      getSupabaseForFarm(farmId)
         .from("automation_holiday_configs")
         .select("equipment_id, enabled, mode, special_time_on, special_time_off")
         .eq("farm_id", farmId),
-      supabase
+      getSupabaseForFarm(farmId)
         .from("automation_engine")
         .select("enabled")
         .eq("farm_id", farmId)
@@ -229,7 +230,7 @@ export function useCloudAutomation(): UseCloudAutomationResult {
     if (!farmId) return;
     let cancelled = false;
     const tick = async () => {
-      const { data, error } = await supabase
+      const { data, error } = await getSupabaseForFarm(farmId)
         .from("automation_engine")
         .select("enabled")
         .eq("farm_id", farmId)

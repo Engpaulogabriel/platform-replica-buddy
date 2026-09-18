@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 export interface PeriodRange {
   fromIso: string; // YYYY-MM-DD
@@ -46,8 +47,8 @@ export function PeriodPicker({ farmId, value, onChange, pumpFilter, onPumpChange
     setLoadingAll(true);
     try {
       const [logRes, eqRes] = await Promise.all([
-        supabase.from("automation_log").select("occurred_at").eq("farm_id", farmId).order("occurred_at", { ascending: true }).limit(1),
-        supabase.from("equipments").select("created_at").eq("farm_id", farmId).order("created_at", { ascending: true }).limit(1),
+        getSupabaseForFarm(farmId).from("automation_log").select("occurred_at").eq("farm_id", farmId).order("occurred_at", { ascending: true }).limit(1),
+        getSupabaseForFarm(farmId).from("equipments").select("created_at").eq("farm_id", farmId).order("created_at", { ascending: true }).limit(1),
       ]);
       const first =
         (logRes.data?.[0] as { occurred_at?: string } | undefined)?.occurred_at ||

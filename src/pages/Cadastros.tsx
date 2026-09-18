@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { notifyRegistry, notify } from "@/lib/notify";
 import { supabase } from "@/integrations/supabase/client";
+import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { confirmAction } from "@/lib/confirmDialog";
 import { toast } from "sonner";
 import RestrictedAuth from "@/components/RestrictedAuth";
@@ -1040,7 +1041,7 @@ export const Cadastros = () => {
                             //  2) soma o segmento pré-reset ao acumulador do dia,
                             //  3) recalcula flow_total_m3 automaticamente.
                             // NÃO gravar em daily_consumption aqui e NÃO zerar flow_total_m3.
-                            const { error } = await supabase
+                            const { error } = await assertOperationalClient(farmId)
                               .from("equipments")
                               .update({ vazao_reset_pending: true } as never)
                               .eq("id", editingEquip.id);

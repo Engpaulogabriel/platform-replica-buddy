@@ -16,6 +16,7 @@ import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
 } from "recharts";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import type { ProductivityHistory } from "@/hooks/useProductivityHistory";
 
 const fmtInt = (v: number) => Math.round(v).toLocaleString("pt-BR");
@@ -41,7 +42,7 @@ export function ManualVsAutoPanel({ farmId, history }: Props) {
   useEffect(() => {
     if (!farmId) return;
     (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("farm_productivity_config")
         .select("manual_operation_time_minutes, remote_operation_time_minutes")
         .eq("farm_id", farmId)

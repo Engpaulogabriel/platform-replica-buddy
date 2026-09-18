@@ -555,7 +555,7 @@ export async function startAutomationLogSync(): Promise<void> {
   // `noise_reason IS NULL` = só TRANSIÇÃO CONFIRMADA. Polling, eco, retry,
   // reconexão e comando não confirmado ficam de fora — marcados na fonte, não
   // escondidos aqui.
-  let { data: rows, error: errRows } = await supabase
+  let { data: rows, error: errRows } = await getSupabaseForFarm(ctx.farmId)
     .from("automation_log")
     .select("*")
     .eq("farm_id", ctx.farmId)
@@ -565,7 +565,7 @@ export async function startAutomationLogSync(): Promise<void> {
     .limit(500);
   // Se a coluna da Fase B ainda não existir, refaz sem o filtro em vez de quebrar.
   if (errRows && isMissingNoiseColumn(errRows)) {
-    ({ data: rows } = await supabase
+    ({ data: rows } = await getSupabaseForFarm(ctx.farmId)
       .from("automation_log")
       .select("*")
       .eq("farm_id", ctx.farmId)
@@ -626,7 +626,7 @@ export async function loadAutomationLogRange(
     // e travava o período de 30+ dias. Comandos reais cobrem meses em poucas centenas.
     const collected: AutomationLogEntry[] = [];
     for (let page = 0; page < MAX_PAGES; page++) {
-      let { data: rows, error } = await supabase
+      let { data: rows, error } = await getSupabaseForFarm(farmId)
         .from("automation_log")
         .select("*")
         .eq("farm_id", farmId)
@@ -637,7 +637,7 @@ export async function loadAutomationLogRange(
         .order("occurred_at", { ascending: false })
         .range(page * PAGE, (page + 1) * PAGE - 1);
       if (error && isMissingNoiseColumn(error)) {
-        ({ data: rows, error } = await supabase
+        ({ data: rows, error } = await getSupabaseForFarm(farmId)
           .from("automation_log")
           .select("*")
           .eq("farm_id", farmId)
@@ -700,7 +700,7 @@ export async function loadTechnicalReadings(
 ): Promise<TechnicalReading[]> {
   if (!farmId || !fromIso || !toIso) return [];
   try {
-    const { data: rows, error } = await supabase
+    const { data: rows, error } = await getSupabaseForFarm(farmId)
       .from("agent_technical_events" as any)
       .select("id, equipment_id, equipment_name, occurred_at, kind, details")
       .eq("farm_id", farmId)

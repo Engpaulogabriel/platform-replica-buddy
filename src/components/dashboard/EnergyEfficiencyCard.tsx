@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { Zap, CheckCircle2, AlertTriangle, Clock, Activity } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 interface Summary {
   date: string;
@@ -314,13 +315,13 @@ function EnergyEfficiencyCardInner({ farmId, customPeriod }: InnerProps) {
           .eq("farm_id", farmId)
           .gte("date", fromIso)
           .lte("date", untilIso),
-        supabase
+        getSupabaseForFarm(farmId)
           .from("automation_log")
           .select("origin, occurred_at")
           .eq("farm_id", farmId)
           .gte("occurred_at", fromTs)
           .in("origin", ["local", "remote", "auto", "system"] as any),
-        supabase
+        getSupabaseForFarm(farmId)
           .from("equipments")
           .select("id, last_communication")
           .eq("farm_id", farmId)
@@ -443,10 +444,10 @@ function EnergyEfficiencyCardInner({ farmId, customPeriod }: InnerProps) {
     let cancelled = false;
     const loadEnergyContext = async () => {
       const [cfgRes, eqRes] = await Promise.all([
-        supabase.from("farm_productivity_config")
+        getSupabaseForFarm(farmId).from("farm_productivity_config")
           .select("tariff_reserved, tariff_off_peak, tariff_intermediate, tariff_peak, utility_name, peak_hour_start, peak_hour_end")
           .eq("farm_id", farmId).maybeSingle(),
-        supabase.from("equipments")
+        getSupabaseForFarm(farmId).from("equipments")
           .select("id, name, power_kw, saida, last_outputs_state").eq("farm_id", farmId).in("type", ["poco", "bombeamento", "conjunto", "rio"] as any),
       ]);
       if (cancelled) return;

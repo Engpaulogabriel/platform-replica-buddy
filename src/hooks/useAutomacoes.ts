@@ -1,6 +1,7 @@
 // useAutomacoes — CRUD para automações independentes (Fase 1)
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { toast } from "sonner";
 import { notifyWhatsAppImmediate } from "@/lib/whatsappNotify";
@@ -102,7 +103,7 @@ export function useAutomacoes(farmId: string | null) {
     }
     setLoading(true);
     try {
-      const { data: autos, error } = await supabase
+      const { data: autos, error } = await getSupabaseForFarm(farmId)
         .from("automations")
         .select("*")
         .eq("farm_id", farmId)
@@ -346,7 +347,7 @@ export function useAutomacoes(farmId: string | null) {
   const remove = useCallback(
     async (id: string, actor: string | null) => {
       const target = items.find((a) => a.id === id);
-      const { error } = await supabase.from("automations").delete().eq("id", id);
+      const { error } = await assertOperationalClient(farmId).from("automations").delete().eq("id", id);
       if (error) {
         toast.error("Falha ao excluir automação");
         return;

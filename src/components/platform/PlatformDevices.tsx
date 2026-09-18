@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { assertOperationalClient } from "@/lib/supabaseRouter";
+import { assertOperationalClient, tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isFarmMigrated, MIGRATED_FARMS } from "@/lib/migrationRegistry";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -95,9 +96,31 @@ export default function PlatformDevices({ isAdmin }: Props) {
     ]);
     if (devRes.error) notify.fail("Dispositivos", "Erro: " + devRes.error.message);
     else setDevices((devRes.data as any) ?? []);
-    setTampers(((tampRes.data as any) ?? []) as TamperRow[]);
+    // Inventário global segue no antigo; linhas de fazenda MIGRADA vêm do
+    // backend dela (lá é que o Agent reporta adulteração/hardware/licença).
+    const tampers = (((tampRes.data as any) ?? []) as TamperRow[]).filter((r) => !isFarmMigrated(r.farm_id));
     const hwMap: Record<string, HardwareRow> = {};
-    for (const r of ((hwRes.data as any) ?? []) as HardwareRow[]) hwMap[r.farm_id] = r;
+    for (const r of ((hwRes.data as any) ?? []) as HardwareRow[]) {
+      if (!isFarmMigrated(r.farm_id)) hwMap[r.farm_id] = r;
+    }
+    const licRows = (((licRes.data as any) ?? []) as Array<{ farm_id: string; revoked_at: string | null }>)
+      .filter((r) => !isFarmMigrated(r.farm_id));
+    await Promise.all([...MIGRATED_FARMS].map(async (fid) => {
+      const routed = tryGetSupabaseForFarm(fid);
+      if (!routed.client) return;
+      const [t, h, l] = await Promise.all([
+        routed.client.from("tampering_events")
+          .select("id, farm_id, kind, level, details, reported_at, acknowledged_at, agent_version")
+          .eq("farm_id", fid).order("reported_at", { ascending: false }).limit(500),
+        routed.client.from("agent_hardware")
+          .select("farm_id, alert_level, changed_components, last_check_at").eq("farm_id", fid),
+        routed.client.from("device_licenses").select("farm_id, revoked_at").eq("farm_id", fid),
+      ]);
+      tampers.push(...(((t.data as any) ?? []) as TamperRow[]));
+      for (const r of ((h.data as any) ?? []) as HardwareRow[]) hwMap[r.farm_id] = r;
+      licRows.push(...(((l.data as any) ?? [])));
+    }));
+    setTampers(tampers);
     setHardware(hwMap);
     const deviceAuthValue = (((settingRes.data as any)?.value as any) ?? {});
     setDeviceAuthEnabled(deviceAuthValue.enabled === true);
@@ -107,7 +130,7 @@ export default function PlatformDevices({ isAdmin }: Props) {
     );
 
     const activeByFarm: Record<string, number> = {};
-    for (const r of ((licRes.data as any) ?? []) as { farm_id: string; revoked_at: string | null }[]) {
+    for (const r of licRows) {
       if (!r.revoked_at) activeByFarm[r.farm_id] = (activeByFarm[r.farm_id] ?? 0) + 1;
     }
     const farmsArr = (((farmsRes.data as any) ?? []) as { id: string; name: string; max_devices: number | null }[])

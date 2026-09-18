@@ -9,6 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { LineChart, Line, ReferenceLine, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts";
 import { Zap, Download, FileSpreadsheet, AlertTriangle, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { notifyReport } from "@/lib/notify";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -72,12 +73,12 @@ export default function DemandReportTab({ farmId, fromDate, toDate }: Props) {
     let cancelled = false;
     (async () => {
       const [eqRes, cfgRes] = await Promise.all([
-        supabase
+        getSupabaseForFarm(farmId)
           .from("equipments")
           .select("id, name, power_kw, power_cv, demanda_kw, active, type")
           .eq("farm_id", farmId)
           .in("type", ["poco", "bombeamento"]),
-        supabase
+        getSupabaseForFarm(farmId)
           .from("farm_productivity_config")
           .select("contracted_demand_kw")
           .eq("farm_id", farmId)

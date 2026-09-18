@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { Server } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 
 const ONLINE_THRESHOLD_SEC = 180; // 3 min
@@ -21,7 +22,7 @@ export function CloudBridgeStatusBadge() {
     if (!farmId) return;
     let cancelled = false;
     const load = async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("equipments")
         .select("updated_at")
         .eq("farm_id", farmId)

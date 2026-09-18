@@ -4,6 +4,7 @@
 // RoiTravelCard, porém distribuído por dia para permitir histórico real.
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import type { PeriodRange } from "@/components/indicadores/PeriodPicker";
 
 export interface RoiDailyRow {
@@ -69,10 +70,10 @@ export function useRoiHistory(farmId: string | null, range: PeriodRange): RoiHis
       const toIso = `${range.toIso}T23:59:59.999`;
 
       const [cfgRes, eqRes, runtimeRes, logRes] = await Promise.all([
-        supabase.from("farm_productivity_config")
+        getSupabaseForFarm(farmId).from("farm_productivity_config")
           .select("worker_cost_per_hour, vehicle_cost_per_km, travel_distance_km, travel_minutes_avg, manual_operation_time_minutes, remote_operation_time_minutes, cycles_per_day, tariff_peak, tariff_reserved, default_flow_m3h")
           .eq("farm_id", farmId).maybeSingle(),
-        supabase.from("equipments")
+        getSupabaseForFarm(farmId).from("equipments")
           .select("id, power_kw, estimated_flow_m3h, active, type")
           .eq("farm_id", farmId).in("type", ["poco", "bombeamento"] as any),
         supabase.from("pump_runtime")
@@ -82,7 +83,7 @@ export function useRoiHistory(farmId: string | null, range: PeriodRange): RoiHis
           .lte("started_at", toIso)
           .order("started_at", { ascending: true })
           .limit(10000),
-        supabase.from("automation_log")
+        getSupabaseForFarm(farmId).from("automation_log")
           .select("equipment_id, occurred_at, origin, action")
           .eq("farm_id", farmId)
           .in("action", ["turn_on", "turn_off"] as any)

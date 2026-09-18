@@ -1,5 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
+import { isFarmMigrated, MIGRATED_FARMS } from "@/lib/migrationRegistry";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -62,6 +64,7 @@ export default function AgentUpdateStatusPanel() {
 
   const load = async () => {
     setLoading(true);
+    // Lista global no antigo; estado de OTA de fazenda migrada vem do backend dela.
     const [{ data: status }, { data: fs }, { data: hist }] = await Promise.all([
       supabase.from("agent_update_status").select("*"),
       supabase.from("farms").select("id,name").order("name"),
@@ -71,7 +74,14 @@ export default function AgentUpdateStatusPanel() {
         .order("created_at", { ascending: false })
         .limit(30),
     ]);
-    setRows((status as UpdateStatusRow[]) ?? []);
+    const statusRows = ((status as UpdateStatusRow[]) ?? []).filter((r) => !isFarmMigrated(r.farm_id));
+    await Promise.all([...MIGRATED_FARMS].map(async (fid) => {
+      const routed = tryGetSupabaseForFarm(fid);
+      if (!routed.client) return;   // indisponível some da lista; nunca dado velho do antigo
+      const { data } = await routed.client.from("agent_update_status").select("*").eq("farm_id", fid);
+      statusRows.push(...(((data as UpdateStatusRow[]) ?? [])));
+    }));
+    setRows(statusRows);
     setFarms((fs as FarmInfo[]) ?? []);
     setHistory((hist as HistoryRow[]) ?? []);
     setLoading(false);

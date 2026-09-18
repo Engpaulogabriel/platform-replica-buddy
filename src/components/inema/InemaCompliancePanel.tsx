@@ -11,6 +11,7 @@
 // ============================================================================
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useHorimetro } from "@/hooks/useHorimetro";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -113,10 +114,10 @@ export function useInemaCompliance(farmId: string | null | undefined) {
     setLoading(true);
     // Outorgas: water_permits + water_permit_wells (NÃO inema_permits, que está vazia).
     const [{ data: wPermits }, { data: eqs }, { data: farm }] = await Promise.all([
-      supabase.from("water_permits" as any)
+      getSupabaseForFarm(farmId).from("water_permits" as any)
         .select("id, permit_number, process_number, purpose, basin, validity_end, regime_hours_per_day, holder_name")
         .eq("farm_id", farmId),
-      supabase.from("equipments").select("id,name,estimated_flow_m3h,flow_total_m3,flow_daily_start_m3,outorga_volume_max_mensal_m3").eq("farm_id", farmId).eq("type", "poco"),
+      getSupabaseForFarm(farmId).from("equipments").select("id,name,estimated_flow_m3h,flow_total_m3,flow_daily_start_m3,outorga_volume_max_mensal_m3").eq("farm_id", farmId).eq("type", "poco"),
       supabase.from("farms").select("name,city,state").eq("id", farmId).maybeSingle(),
     ]);
     if (farm) setFarmHeader({ name: (farm as any).name ?? "Fazenda", city: (farm as any).city ?? null, state: (farm as any).state ?? null });
@@ -132,7 +133,7 @@ export function useInemaCompliance(farmId: string | null | undefined) {
     const permitList = ((wPermits as any[]) ?? []);
     let wells: any[] = [];
     if (permitList.length) {
-      const { data: ww } = await supabase.from("water_permit_wells" as any)
+      const { data: ww } = await getSupabaseForFarm(farmId).from("water_permit_wells" as any)
         .select("permit_id, equipment_id, well_name, flow_rate_m3_day")
         .in("permit_id", permitList.map((p) => p.id));
       wells = ((ww as any[]) ?? []);

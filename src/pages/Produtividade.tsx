@@ -17,6 +17,7 @@ import { useProductivityData, useInemaConfig, DEFAULT_PROD_CFG, type Productivit
 import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -402,7 +403,7 @@ function EquipmentParamsForm({ canEdit, farmId }: { canEdit: boolean; farmId: st
 
   useMemoEffect(() => {
     if (!farmId) return;
-    void supabase.from("equipments")
+    void getSupabaseForFarm(farmId).from("equipments")
       .select("id, name, estimated_flow_m3h, power_kw")
       .eq("farm_id", farmId).in("type", ["poco", "bombeamento"] as any)
       .order("name")

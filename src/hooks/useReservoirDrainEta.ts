@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
+import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 
 /**
  * Para cada reservatório, busca os últimos ~30 min de `level_history`
@@ -17,6 +18,9 @@ export function useReservoirDrainEta(
   // Estável p/ deps
   const key = equipmentIds.slice().sort().join(",");
 
+  // Telemetria de nível segue o backend da fazenda ATIVA (o equipamento
+  // consultado é sempre o da fazenda em tela).
+  const farmId = useDefaultFarmId();
   useEffect(() => {
     if (!key) {
       setEta({});
@@ -28,7 +32,7 @@ export function useReservoirDrainEta(
     const fetchAll = async () => {
       // Janela ampla (6h) — telemetria pode ter poucas amostras por hora.
       const since = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
-      const { data, error } = await supabase
+      const { data, error } = await getSupabaseForFarm(farmId)
         .from("level_history")
         .select("equipment_id, read_at, percent")
         .in("equipment_id", ids)
@@ -104,7 +108,7 @@ export function useReservoirDrainEta(
       cancelled = true;
       window.clearInterval(iv);
     };
-  }, [key]);
+  }, [key, farmId]);
 
   return eta;
 }

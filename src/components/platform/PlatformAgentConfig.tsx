@@ -5,6 +5,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { assertOperationalClient } from "@/lib/supabaseRouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -56,7 +57,7 @@ export default function PlatformAgentConfig({ isAdmin }: Props) {
   useEffect(() => {
     if (!farmId) return;
     (async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("agent_config")
         .select("farm_id, serial_port, polling_interval_ms, sweep_timeout_ms, tx_gap_ms, updated_at")
         .eq("farm_id", farmId)

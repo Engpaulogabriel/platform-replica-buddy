@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { BarChart3, ChevronRight, Trophy, Zap, TrendingUp } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 interface Summary {
   efficiency: number | null;
@@ -48,30 +49,30 @@ export function IndicatorsMiniSummary({ farmId }: { farmId: string | null }) {
           .eq("farm_id", farmId)
           .gte("date", sevenAgo)
           .gt("minutes_on_during_peak", 0),
-        supabase.from("equipments")
+        getSupabaseForFarm(farmId).from("equipments")
           .select("id, last_communication")
           .eq("farm_id", farmId)
           .in("type", ["poco", "bombeamento"] as any)
           .eq("active", true),
         supabase.from("farms").select("latitude, longitude").eq("id", farmId).maybeSingle(),
-        supabase.from("farm_productivity_config" as any)
+        getSupabaseForFarm(farmId).from("farm_productivity_config" as any)
           .select("worker_cost_per_hour, vehicle_cost_per_km, travel_minutes_avg, travel_distance_km, manual_operation_time_minutes, remote_operation_time_minutes, cycles_per_day, tariff_peak, tariff_reserved")
           .eq("farm_id", farmId).maybeSingle(),
-        supabase.from("equipments").select("id, latitude, longitude, power_kw, estimated_flow_m3h")
+        getSupabaseForFarm(farmId).from("equipments").select("id, latitude, longitude, power_kw, estimated_flow_m3h")
           .eq("farm_id", farmId).in("type", ["poco", "bombeamento"] as any).eq("active", true),
-        supabase.from("automation_log")
+        getSupabaseForFarm(farmId).from("automation_log")
           .select("equipment_id, occurred_at")
           .eq("farm_id", farmId)
           .eq("origin", "remote" as any)
           .gte("occurred_at", thirtyAgo)
           .order("occurred_at", { ascending: true })
           .limit(5000),
-        supabase.from("automation_log")
+        getSupabaseForFarm(farmId).from("automation_log")
           .select("occurred_at")
           .eq("farm_id", farmId)
           .order("occurred_at", { ascending: true })
           .limit(1),
-        supabase.from("equipments")
+        getSupabaseForFarm(farmId).from("equipments")
           .select("created_at")
           .eq("farm_id", farmId)
           .order("created_at", { ascending: true })

@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { PauseCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 
 interface Cfg {
@@ -39,7 +40,7 @@ export function PeakHourPauseBanner() {
     let cancelled = false;
     const refresh = async () => {
       const [cRes, fRes] = await Promise.all([
-        supabase.from("peak_hour_config" as any)
+        getSupabaseForFarm(farmId).from("peak_hour_config" as any)
           .select("enabled, start_time, end_time").eq("farm_id", farmId).maybeSingle(),
         supabase.from("farms").select("timezone").eq("id", farmId).maybeSingle(),
       ]);

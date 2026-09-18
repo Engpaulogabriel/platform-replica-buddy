@@ -5,6 +5,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 
 export function useAutomationGuards(): Set<string> {
@@ -16,7 +17,7 @@ export function useAutomationGuards(): Set<string> {
     let cancelled = false;
 
     const refresh = async () => {
-      const { data } = await supabase
+      const { data } = await getSupabaseForFarm(farmId)
         .from("automation_guards")
         .select("equipment_id")
         .eq("farm_id", farmId);

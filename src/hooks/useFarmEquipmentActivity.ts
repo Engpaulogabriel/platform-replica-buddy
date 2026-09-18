@@ -10,6 +10,7 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { getSupabaseForFarm } from "@/lib/supabaseRouter";
 
 const POLL_MS = 60_000;
 const TICK_MS = 15_000;
@@ -39,7 +40,7 @@ export function useFarmEquipmentActivity(farmId: string | null): FarmEquipmentAc
 
     const fetchOnce = async () => {
       try {
-        const { data } = await supabase
+        const { data } = await getSupabaseForFarm(farmId)
           .from("equipments")
           .select("updated_at")
           .eq("farm_id", farmId)
