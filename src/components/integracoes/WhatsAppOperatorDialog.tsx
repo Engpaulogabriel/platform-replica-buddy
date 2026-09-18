@@ -183,7 +183,7 @@ export function WhatsAppOperatorDialog({ open, onOpenChange, initial, farms, def
         if (initial.can_check_status !== form.can_check_status) changes.push(form.can_check_status ? "consulta permitida" : "consulta bloqueada");
         if (initial.is_active !== form.is_active) changes.push(form.is_active ? "ativo" : "inativo");
         if (changes.length) {
-          notifyWhatsAppImmediate("operator_permissions_changed", {
+          notifyWhatsAppImmediate(form.farm_id, "operator_permissions_changed", {
             target_phone: form.phone,
             target_name: form.name,
             farm_id: form.farm_id,

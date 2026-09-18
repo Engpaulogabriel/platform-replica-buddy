@@ -69,8 +69,10 @@ function emitAutomationUpdated() {
 async function invokeAutomationNotify(body: Record<string, unknown>) {
   const { type, ...rest } = body as { type?: string } & Record<string, unknown>;
   console.log("[MODE_CHANGE] invokeAutomationNotify payload:", { type: type ?? "mode_change", ...rest });
+  // A fazenda vem do próprio payload (farm_id), que é quem a operação notificou.
   return notifyWhatsAppImmediate(
-    (type as Parameters<typeof notifyWhatsAppImmediate>[0]) ?? "mode_change",
+    (rest.farm_id as string | null | undefined) ?? null,
+    (type as Parameters<typeof notifyWhatsAppImmediate>[1]) ?? "mode_change",
     rest,
   );
 }

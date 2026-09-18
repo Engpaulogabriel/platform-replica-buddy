@@ -154,6 +154,28 @@ export function assertOperationalClient(farmId: string | null | undefined): Reno
   return newSupabase;
 }
 
+/**
+ * URL + publishable key do backend da fazenda.
+ *
+ * Existe por causa do caminho de `fetch` direto a Edge Functions: o SDK às vezes
+ * falha por preflight/sessão, e o fallback montava a URL a partir das variáveis
+ * do projeto ANTIGO — o que mandaria a chamada de uma fazenda migrada para o
+ * servidor errado mesmo com o cliente certo já resolvido.
+ *
+ * Devolve null quando a fazenda é migrada e o backend novo não está configurado
+ * neste build: quem chama trata como indisponível, nunca cai para o antigo.
+ */
+export function backendEndpointForFarm(
+  farmId: string | null | undefined,
+): { url: string; anonKey: string } | null {
+  if (!isFarmMigrated(farmId)) {
+    const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+    const anonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined;
+    return url && anonKey ? { url, anonKey } : null;
+  }
+  return NEW_URL && NEW_KEY ? { url: NEW_URL, anonKey: NEW_KEY } : null;
+}
+
 /** Rótulo curto para log e para os testes de roteamento. */
 export function backendLabelForFarm(farmId: string | null | undefined): "NEW" | "OLD" {
   return isFarmMigrated(farmId) ? "NEW" : "OLD";

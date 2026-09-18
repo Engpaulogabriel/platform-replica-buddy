@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Megaphone, Send, Clock, CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { isFarmMigrated, MIGRATED_FARMS } from "@/lib/migrationRegistry";
 import { notify } from "@/lib/notify";
 
 type BroadcastRow = {
@@ -50,6 +51,20 @@ export function WhatsAppBroadcastCard({ farmId, farms }: Props) {
     const msg = message.trim();
     if (!msg) return notify.fail("Broadcast", "Digite uma mensagem.");
     if (msg.length > 4000) return notify.fail("Broadcast", "Máximo de 4000 caracteres.");
+
+    // ── BLOQUEIO EXPLÍCITO ────────────────────────────────────────────────
+    // `whatsapp-broadcast` ainda NÃO existe no backend novo. As duas saídas
+    // erradas seriam: enviar pelo backend antigo (lista de operadores congelada
+    // no cutover — mensagem chegando a quem talvez já não opere a fazenda) ou
+    // chamar o novo e colher um 404 silencioso. Recusamos antes de sair daqui,
+    // com o motivo na tela. Some quando a função for publicada no novo.
+    if (target === "farm" && isFarmMigrated(farmId)) {
+      return notify.fail(
+        "Broadcast indisponível",
+        "Esta fazenda já opera no novo servidor, onde o envio em massa ainda não está publicado. Use a notificação individual até a liberação.",
+      );
+    }
+
     setBusy(true);
 
     const body: Record<string, unknown> = {
@@ -71,6 +86,9 @@ export function WhatsAppBroadcastCard({ farmId, farms }: Props) {
     setScheduled("");
     void loadHistory();
   };
+
+  /** Fazendas migradas ficam fora do alcance real deste envio. */
+  const migratedOutOfReach = target !== "farm" && MIGRATED_FARMS.size > 0;
 
   const statusBadge = (s: string) => {
     if (s === "sent") return <Badge className="bg-emerald-500/20 text-emerald-600 border-emerald-500/40"><CheckCircle2 className="w-3 h-3 mr-1" />Enviado</Badge>;
@@ -95,6 +113,13 @@ export function WhatsAppBroadcastCard({ farmId, farms }: Props) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {migratedOutOfReach && (
+          <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning-foreground">
+            O envio em massa ainda roda no servidor anterior. Fazendas já migradas
+            para o novo servidor <strong>não são alcançadas</strong> por este disparo —
+            notifique os operadores delas individualmente até a liberação.
+          </div>
+        )}
         <div className="space-y-2">
           <Label>Destinatários</Label>
           <Select value={target} onValueChange={setTarget}>

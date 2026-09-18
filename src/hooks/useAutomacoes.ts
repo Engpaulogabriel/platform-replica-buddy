@@ -187,6 +187,7 @@ export function useAutomacoes(farmId: string | null) {
       if (!farmId) return;
       try {
         await notifyWhatsAppImmediate(
+          farmId,
           "schedule_change",
           {
             farm_id: farmId,

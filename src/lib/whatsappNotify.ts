@@ -2,11 +2,23 @@
 // notifyWhatsAppImmediate — chamada direta (sem fila/cron) para qualquer
 // notificação disparada do interface web. Deve completar em < 3s.
 //
-// Implementação: usa supabase.functions.invoke como caminho primário e mantém
-// fetch direto como fallback explícito. Assim temos o caminho padrão do SDK,
-// mas sem perder entrega quando o SDK falhar por sessão/preflight/etc.
+// Implementação: usa functions.invoke como caminho primário e mantém fetch
+// direto como fallback explícito. Assim temos o caminho padrão do SDK, mas sem
+// perder entrega quando o SDK falhar por sessão/preflight/etc.
+//
+// DUAL-BACKEND: toda notificação aqui é FARM-SCOPED — a Edge Function recebe um
+// farm_id e lê, no SEU projeto, operadores, permissões e estado daquela fazenda.
+// Invocá-la no projeto errado não dá erro: ela responde 200 usando os dados
+// congelados no cutover. Por isso o farmId é o PRIMEIRO parâmetro, obrigatório,
+// e o cliente é resolvido a partir dele — inclusive no fallback por fetch, que
+// antes montava a URL com as variáveis do projeto antigo.
 // ─────────────────────────────────────────────────────────────────────────────
-import { supabase } from "@/integrations/supabase/client";
+import {
+  assertOperationalClient,
+  backendEndpointForFarm,
+  BackendRoutingError,
+  type RenovSupabase,
+} from "@/lib/supabaseRouter";
 
 export type ImmediateNotificationType =
   | "mode_change"
@@ -28,41 +40,55 @@ interface ImmediateNotificationOptions {
 export interface WhatsAppNotifyDiagnosticResult {
   ok: boolean;
   status: number;
-  via: "invoke" | "fetch";
+  via: "invoke" | "fetch" | "blocked";
   data: unknown;
   raw: string;
 }
 
-// Resolve URL e chaves a partir do client gerado (sem hardcode além do
-// publishable key, que já é público).
-const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL as string | undefined) ?? "";
-const SUPABASE_ANON = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ?? "";
+/** Resultado quando o backend da fazenda não está acessível. Nunca vira OLD. */
+function unavailable(reason: string): WhatsAppNotifyDiagnosticResult {
+  return { ok: false, status: 0, via: "blocked", data: reason, raw: reason };
+}
 
-async function invokeFunction(fnName: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; raw: string }> {
-  console.log("[MODE_CHANGE] Calling Edge Function via supabase.functions.invoke:", fnName, "Body:", body);
-  const { data, error } = await supabase.functions.invoke(fnName, { body });
+async function invokeFunction(
+  client: RenovSupabase,
+  fnName: string,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; status: number; raw: string }> {
+  console.log("[MODE_CHANGE] Calling Edge Function via functions.invoke:", fnName, "Body:", body);
+  const { data, error } = await client.functions.invoke(fnName, { body });
 
   if (error) {
-    console.error("[MODE_CHANGE] supabase.functions.invoke failed:", error);
+    console.error("[MODE_CHANGE] functions.invoke failed:", error);
     return { ok: false, status: (error as { status?: number })?.status ?? 0, raw: JSON.stringify(error) };
   }
 
   const raw = typeof data === "string" ? data : JSON.stringify(data ?? null);
-  console.log("[MODE_CHANGE] supabase.functions.invoke response:", raw.slice(0, 1000));
+  console.log("[MODE_CHANGE] functions.invoke response:", raw.slice(0, 1000));
   return { ok: true, status: 200, raw };
 }
 
-async function postToFunction(fnName: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; raw: string }> {
-  const url = `${SUPABASE_URL}/functions/v1/${fnName}`;
+async function postToFunction(
+  client: RenovSupabase,
+  farmId: string,
+  fnName: string,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; status: number; raw: string }> {
+  // Endpoint do backend DA FAZENDA. Sem isto o fallback anulava o roteamento.
+  const endpoint = backendEndpointForFarm(farmId);
+  if (!endpoint) return { ok: false, status: 0, raw: "backend da fazenda indisponível" };
+
+  const url = `${endpoint.url}/functions/v1/${fnName}`;
   console.log("[MODE_CHANGE] Calling Edge Function via direct fetch fallback:", fnName, "URL:", url, "Body:", body);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    apikey: SUPABASE_ANON,
-    Authorization: `Bearer ${SUPABASE_ANON}`,
+    apikey: endpoint.anonKey,
+    Authorization: `Bearer ${endpoint.anonKey}`,
   };
-  // Anexa JWT da sessão atual quando disponível (não obrigatório — a função tem verify_jwt=false).
+  // Anexa JWT da sessão DESTE backend quando disponível (não obrigatório — a
+  // função tem verify_jwt=false). Um JWT do projeto errado seria rejeitado.
   try {
-    const { data } = await supabase.auth.getSession();
+    const { data } = await client.auth.getSession();
     const token = data?.session?.access_token;
     if (token) {
       headers.Authorization = `Bearer ${token}`;
@@ -90,31 +116,49 @@ function parseRaw(raw: string): unknown {
 }
 
 export async function invokeWhatsAppNotificationDiagnostic(
+  farmId: string | null | undefined,
   payload: Record<string, unknown>,
   options: Pick<ImmediateNotificationOptions, "functionName"> = {},
 ): Promise<WhatsAppNotifyDiagnosticResult> {
   const fn = options.functionName ?? "whatsapp-automation-notify";
   const body = { ...payload, immediate: true, source: payload.source ?? "Teste Diagnóstico" };
 
-  const first = await invokeFunction(fn, body);
+  // FAIL-CLOSED: fazenda migrada sem sessão no backend novo não cai para o antigo.
+  let client: RenovSupabase;
+  try {
+    client = assertOperationalClient(farmId);
+  } catch (e) {
+    const reason = e instanceof BackendRoutingError
+      ? e.message
+      : "Não foi possível resolver o servidor desta fazenda.";
+    console.error("[MODE_CHANGE] notificação bloqueada — roteamento:", reason);
+    return unavailable(reason);
+  }
+
+  const first = await invokeFunction(client, fn, body);
   if (first.ok) {
     return { ...first, via: "invoke", data: parseRaw(first.raw) };
   }
 
-  const fallback = await postToFunction(fn, body);
+  const fallback = await postToFunction(client, farmId as string, fn, body);
   return { ...fallback, via: "fetch", data: parseRaw(fallback.raw) };
 }
 
+/**
+ * `farmId` é o primeiro parâmetro e é OBRIGATÓRIO: sem fazenda não há decisão de
+ * roteamento possível, e a notificação é sempre sobre uma fazenda específica.
+ */
 export async function notifyWhatsAppImmediate(
+  farmId: string | null | undefined,
   type: ImmediateNotificationType,
   payload: Record<string, unknown>,
   options: ImmediateNotificationOptions = {},
 ): Promise<WhatsAppNotifyDiagnosticResult | void> {
   const fn = options.functionName ?? "whatsapp-automation-notify";
   const body = { ...payload, type, immediate: true, source: payload.source ?? "frontend" };
-  console.log("[MODE_CHANGE] notifyWhatsAppImmediate start:", { type, fn, body, fireAndForget: !!options.fireAndForget });
+  console.log("[MODE_CHANGE] notifyWhatsAppImmediate start:", { farmId, type, fn, body, fireAndForget: !!options.fireAndForget });
 
-  const invocation = invokeWhatsAppNotificationDiagnostic(body, { functionName: fn })
+  const invocation = invokeWhatsAppNotificationDiagnostic(farmId, body, { functionName: fn })
     .then((result) => {
       const { ok, status, raw, data, via } = result;
       if (!ok) {

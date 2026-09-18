@@ -230,7 +230,7 @@ export function WhatsAppAccessPanel({ farmId, farms }: { farmId: string | null; 
       details: { via: "web", role_provided: r.role_provided },
     });
     // Notificação WhatsApp imediata ao operador aprovado
-    notifyWhatsAppImmediate("operator_approved", {
+    notifyWhatsAppImmediate(r.farm_id, "operator_approved", {
       target_phone: cleanPhone,
       target_name: r.name,
       farm_id: r.farm_id,
@@ -253,7 +253,7 @@ export function WhatsAppAccessPanel({ farmId, farms }: { farmId: string | null; 
       farm_id: r.farm_id,
       details: { via: "web" },
     });
-    notifyWhatsAppImmediate("operator_rejected", {
+    notifyWhatsAppImmediate(r.farm_id, "operator_rejected", {
       target_phone: r.phone,
       target_name: r.name,
       farm_id: r.farm_id,
@@ -349,7 +349,7 @@ export function WhatsAppAccessPanel({ farmId, farms }: { farmId: string | null; 
     // Entrega imediata via WhatsApp se telefone informado
     const targetPhone = newCodePhone.replace(/\D/g, "");
     if (targetPhone) {
-      notifyWhatsAppImmediate("invite_code_created", {
+      notifyWhatsAppImmediate(farmId, "invite_code_created", {
         target_phone: targetPhone.startsWith("55") ? `+${targetPhone}` : `+55${targetPhone}`,
         code,
         farm_id: farmId,
