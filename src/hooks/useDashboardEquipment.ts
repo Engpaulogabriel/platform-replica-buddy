@@ -17,6 +17,7 @@ import { logEvent, useAutomationLog, type AutomationLogEntry } from "@/lib/autom
 import { buildMiniCommandHistory, buildMiniStatusHistory } from "@/lib/dashboardMiniHistory";
 // DUAL-BACKEND: leitura operacional segue o backend do farmId.
 import { getSupabaseForFarm } from "@/lib/supabaseRouter";
+import { finalizePumpCommandIfConfirmed } from "@/lib/pumpCommandFinalization";
 import { notify } from "@/lib/notify";
 import { useDefaultFarmId } from "@/hooks/useDefaultFarmId";
 import { calibrateLevel } from "@/lib/levelCalibration";
@@ -868,6 +869,29 @@ export function useDashboardEquipment(): UseDashboardEquipmentResult {
     const intervalId = setInterval(tick, tickMs);
     return () => clearInterval(intervalId);
   }, [cloudPumps, cloud.equipments, cloud.plcs, pendingManualByEq]);
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // FINALIZAÇÃO ÚNICA DO COMANDO MANUAL
+  // ───────────────────────────────────────────────────────────────────────────
+  // Um comando termina quando a transição termina — não quando o agente dá ACK.
+  // Este efeito observa exatamente isso: `pending` deixou de existir sem virar
+  // "error", logo a telemetria confirmou o estado físico. É o ÚNICO lugar que
+  // emite o toast de sucesso, e ele vale para card e lista, ligar e desligar,
+  // manual e forçado — todos passam por aqui ao sair da transição.
+  const prevPendingRef = useRef<Map<string, string | undefined>>(new Map());
+  useEffect(() => {
+    const anterior = prevPendingRef.current;
+    const atual = new Map<string, string | undefined>();
+    for (const p of pumps) {
+      atual.set(p.id, p.pending);
+      const antes = anterior.get(p.id);
+      // transição → limpo (e não para "error"/"comm_fail"): confirmação física
+      if (antes && antes !== "error" && antes !== "comm_fail" && !p.pending) {
+        finalizePumpCommandIfConfirmed(p.id, p.running);
+      }
+    }
+    prevPendingRef.current = atual;
+  }, [pumps]);
 
   // Tick a cada 5–15s para reavaliar offline mesmo sem novo realtime
   const [reservoirTick, setReservoirTick] = useState(0);

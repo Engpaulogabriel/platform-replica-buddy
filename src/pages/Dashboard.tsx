@@ -21,6 +21,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { notify } from "@/lib/notify";
 import { notifyCommand } from "@/lib/notify";
+import { beginPumpCommand, failPumpCommand } from "@/lib/pumpCommandFinalization";
 import { confirmAction } from "@/lib/confirmDialog";
 import { loadFarms, loadSectors, loadPlcGroups, groupEquipmentByFarm } from "@/lib/sectors";
 import { logEvent } from "@/lib/automationLog";
@@ -592,6 +593,10 @@ const Dashboard = () => {
           // só porque a bomba respondeu o estado antigo (0 ao ligar / 1 ao desligar).
           // O comando só finaliza antes de 120s se a telemetria confirmar o estado esperado
           // ou se o agente retornar erro real.
+          // Registra o comando em voo. O toast de sucesso deixou de sair daqui:
+          // quem o emite é a CONFIRMAÇÃO FÍSICA, um único lugar, uma única vez.
+          beginPumpCommand(target.id, enq.commandId, willTurnOn, target.name);
+
           const result = await waitForCommand(enq.commandId, 140_000, { farmId });
           const succeeded = result.status === "executed";
           const isCommFail = !succeeded && (result.status === "timeout" || result.status === "unknown");
@@ -642,16 +647,22 @@ const Dashboard = () => {
           }
 
           if (succeeded) {
-            if (willTurnOn) notifyCommand.turnedOn(target.name);
-            else notifyCommand.turnedOff(target.name);
+            // ACK do agente — o frame saiu e a serial respondeu. NÃO é prova de
+            // que a bomba obedeceu, então não notifica sucesso aqui. O card
+            // segue em VERIFYING e `finalizePumpCommandIfConfirmed` fecha os
+            // dois (card + toast) quando a telemetria confirmar.
           } else if (isCommFail) {
+            failPumpCommand(target.id);
             notifyCommand.safetyExpired(target.name);
           } else if (result.status === "error") {
+            failPumpCommand(target.id);
             notifyCommand.error(target.name, result.errorMessage ?? "falha no envio");
           } else {
+            failPumpCommand(target.id);
             notifyCommand.notConfirmed(target.name);
           }
         } catch (e: any) {
+          failPumpCommand(target.id);
           setPumps((prev) => prev.map((p) => (p.id === id ? { ...p, pending: "error" as const } : p)));
           notifyCommand.error(target.name, e?.message ?? "falha ao enfileirar comando");
         }

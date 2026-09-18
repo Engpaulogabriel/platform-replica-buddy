@@ -260,13 +260,12 @@ export function PumpTable({ pumps, onToggle, onReset, onModeChange, onRefreshSta
       const old = prev.find((o) => o.id === p.id);
       if (old && old.pending && !p.pending && old.pending !== "error") {
         newFlash[p.id] = p.running ? "Ligado" : "Desligado";
-        // Toast de confirmação SÓ na confirmação física real (pending saiu para
-        // limpo, não para "error"). Cobre o desligamento forçado: agora que o
-        // latch libera "Desligando…" → "Desligado" ao confirmar last_outputs_state=0,
-        // esta transição dispara e o usuário vê "Desligamento confirmado".
-        if (!p.running && (old.pending === "turning_off" || old.pending === "resetting")) {
-          notify.ok("Bombas", `${p.name}: desligamento confirmado`);
-        }
+        // O toast de confirmação NÃO vive mais aqui. Ele era o segundo de dois
+        // caminhos para o mesmo evento (o outro saía no ACK, em Dashboard.tsx),
+        // e só existia na visão em lista. Agora a finalização é única e central
+        // — ver finalizePumpCommandIfConfirmed em useDashboardEquipment, que
+        // cobre card e lista, ligar e desligar, incluindo o forçado.
+        // Aqui fica apenas o flash visual de estado.
       }
     });
     if (Object.keys(newFlash).length > 0) {
