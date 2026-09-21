@@ -2099,12 +2099,62 @@ async function suggestEquipments(farmId: string, base: string, nums: number[]): 
 }
 
 
-function computeEqState(eq: any): { estado: string; isOffline: boolean; inMaintenance: boolean } {
+// Default do sistema para janela de comunicação, igual ao usado em
+// enqueue_startup_sync_polling e enqueue_polling_for_due_equipments:
+// COALESCE(NULLIF(comm_timeout_minutes, 0), 15). O zero conta como "não
+// configurado", não como "expira imediatamente".
+const DEFAULT_COMM_TIMEOUT_MIN = 15;
+
+/** Janela de comunicação da fazenda, em minutos, com o default do sistema. */
+function janelaDaFazenda(min: unknown): number {
+  const n = Number(min);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_COMM_TIMEOUT_MIN;
+}
+
+/**
+ * Carrega comm_timeout_minutes de várias fazendas numa consulta só.
+ * Chamado UMA vez por mensagem, antes do laço de equipamentos — nunca por
+ * equipamento.
+ */
+async function timeoutsDasFazendas(ids: string[]): Promise<Map<string, number>> {
+  const m = new Map<string, number>();
+  const unicos = [...new Set((ids ?? []).filter(Boolean))];
+  if (unicos.length === 0) return m;
+  const { data, error } = await supabase
+    .from("farms").select("id, comm_timeout_minutes").in("id", unicos);
+  if (error) console.error("[COMM] falha ao ler comm_timeout_minutes:", error.message);
+  for (const f of (data ?? []) as any[]) m.set(f.id, janelaDaFazenda(f.comm_timeout_minutes));
+  // Fazenda que não voltou na consulta cai no default, nunca em "sem janela".
+  for (const id of unicos) if (!m.has(id)) m.set(id, DEFAULT_COMM_TIMEOUT_MIN);
+  return m;
+}
+
+// COMUNICAÇÃO vem de FRESHNESS, não de flag persistido.
+//
+// A versão anterior exigia communication_status === 'offline' E 30 minutos de
+// silêncio. O primeiro termo matava a regra: `communication_status` é gravado
+// em algum momento e não acompanha a realidade — em 21/09/2026, 64 dos 128
+// equipamentos ativos estavam marcados 'online' e nove deles não comunicavam
+// havia dias. O POÇO 04 da Sossego, mudo desde 16/09, aparecia no WhatsApp
+// como "Desligado" enquanto a tela o mostrava OFFLINE.
+//
+// Agora a decisão é a mesma do frontend: idade de `last_communication` contra
+// a janela da PRÓPRIA fazenda. Os 30 minutos fixos não correspondiam a
+// configuração nenhuma — Sossego, Semear e Terra Norte usam 15.
+//
+// O que esta função NÃO decide: se a bomba está fisicamente ligada. Isso
+// continua vindo de desired_running / last_outputs_state, intocados. E o
+// bloqueio de comando por equipamento offline segue em outro caminho
+// (linha ~10649, lê communication_status direto) — deliberadamente não
+// alterado aqui, para não passar a recusar comando que hoje é aceito.
+function computeEqState(
+  eq: any,
+  timeoutMin: number = DEFAULT_COMM_TIMEOUT_MIN,
+): { estado: string; isOffline: boolean; inMaintenance: boolean } {
   const inMaintenance = eq?.maintenance_mode === true;
-  const commStatus = String(eq.communication_status ?? "").toLowerCase();
   const lastCommMs = eq.last_communication ? new Date(eq.last_communication).getTime() : 0;
-  const stale30m = lastCommMs > 0 && (Date.now() - lastCommMs) > 30 * 60 * 1000;
-  const isOffline = commStatus === "offline" && stale30m;
+  const janelaMs = janelaDaFazenda(timeoutMin) * 60 * 1000;
+  const isOffline = lastCommMs <= 0 || (Date.now() - lastCommMs) >= janelaMs;
   let estado: string;
   if (inMaintenance) estado = "MANUTENÇÃO 🔧";
   else if (isOffline) estado = "Offline ⚫";
@@ -5672,7 +5722,9 @@ async function dispatchAiAction(
         return true;
       }
 
-      const enriched = list.map((e) => ({ ...e, _s: computeEqState(e) }));
+      const __janela = (await timeoutsDasFazendas([target.id])).get(target.id)
+        ?? DEFAULT_COMM_TIMEOUT_MIN;
+      const enriched = list.map((e) => ({ ...e, _s: computeEqState(e, __janela) }));
       let filtered: typeof enriched;
       let title: string;
       if (statusFilter === "offline") {
@@ -9465,6 +9517,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
       autoEq.add(s.equipment_id);
     }
 
+    const __janelas = await timeoutsDasFazendas(farmIds);
     const equipments = ((eqRows ?? []) as any[]).slice().sort((a, b) =>
       String(a.name ?? "").localeCompare(String(b.name ?? ""), "pt-BR"));
 
@@ -9481,7 +9534,8 @@ async function processMessage(from: string, text: string, location: WaLocation =
         const offline: string[] = [];
         const manutencao: string[] = [];
         for (const eq of eqs) {
-          const { isOffline, inMaintenance } = computeEqState(eq);
+          const { isOffline, inMaintenance } = computeEqState(
+            eq, __janelas.get(farm.id) ?? DEFAULT_COMM_TIMEOUT_MIN);
           const isAuto = autoEq.has(eq.id);
           const origin = String(eq.last_actuation_origin ?? "").toLowerCase();
           const controlMode = origin === "local" ? "Local" : "Remoto";
@@ -10586,7 +10640,9 @@ async function processMessage(from: string, text: string, location: WaLocation =
   if (op0.action === "status") {
     if (targets.length === 1 && targets[0].eq && effectiveNums.length <= 1) {
       const eq = targets[0].eq;
-      const { estado } = computeEqState(eq);
+      const __janelaEq = (await timeoutsDasFazendas([farmId])).get(farmId)
+        ?? DEFAULT_COMM_TIMEOUT_MIN;
+      const { estado } = computeEqState(eq, __janelaEq);
       await sendWhatsAppText(
         from,
         `📊 ${eq.name}\n\nStatus: ${estado}\nOrigem: ${originLabel(eq.last_actuation_origin)}\nÚltima comunicação: ${fmtLastComm(eq.last_communication)}`,
@@ -10595,11 +10651,13 @@ async function processMessage(from: string, text: string, location: WaLocation =
       return;
     }
     const lines: string[] = ["📊 Status múltiplo:", ""];
+    const __janelaMult = (await timeoutsDasFazendas([farmId])).get(farmId)
+      ?? DEFAULT_COMM_TIMEOUT_MIN;
     for (const t of targets) {
       if (!t.eq) {
         lines.push(`• ${op0.base} ${t.num} — ❓ não encontrado`);
       } else {
-        const { estado } = computeEqState(t.eq);
+        const { estado } = computeEqState(t.eq, __janelaMult);
         lines.push(`• ${t.eq.name} — ${estado} — ${originLabel(t.eq.last_actuation_origin)}`);
       }
     }
