@@ -2129,6 +2129,19 @@ async function timeoutsDasFazendas(ids: string[]): Promise<Map<string, number>> 
   return m;
 }
 
+/**
+ * ÚNICA definição de "sem comunicação" do WhatsApp. Toda decisão que dependa
+ * de comunicação — classificação, bloqueio de comando, rótulo de listagem —
+ * passa por aqui, para não existirem três regras divergentes dentro da mesma
+ * função. `communication_status` NÃO participa: é flag persistido que ninguém
+ * atualiza.
+ */
+function semComunicacao(eq: any, timeoutMin: number): boolean {
+  const ms = eq?.last_communication ? new Date(eq.last_communication).getTime() : 0;
+  if (!(ms > 0)) return true;                       // nulo/ausente = offline
+  return (Date.now() - ms) >= janelaDaFazenda(timeoutMin) * 60 * 1000;
+}
+
 // COMUNICAÇÃO vem de FRESHNESS, não de flag persistido.
 //
 // A versão anterior exigia communication_status === 'offline' E 30 minutos de
@@ -2152,9 +2165,7 @@ function computeEqState(
   timeoutMin: number = DEFAULT_COMM_TIMEOUT_MIN,
 ): { estado: string; isOffline: boolean; inMaintenance: boolean } {
   const inMaintenance = eq?.maintenance_mode === true;
-  const lastCommMs = eq.last_communication ? new Date(eq.last_communication).getTime() : 0;
-  const janelaMs = janelaDaFazenda(timeoutMin) * 60 * 1000;
-  const isOffline = lastCommMs <= 0 || (Date.now() - lastCommMs) >= janelaMs;
+  const isOffline = semComunicacao(eq, timeoutMin);
   let estado: string;
   if (inMaintenance) estado = "MANUTENÇÃO 🔧";
   else if (isOffline) estado = "Offline ⚫";
@@ -5806,7 +5817,7 @@ async function dispatchAiAction(
       // ---- Consulta equipamentos ----
       const { data: eqs, error } = await supabase
         .from("equipments")
-        .select("name, auto_mode, communication_status, maintenance_mode, last_actuation_origin")
+        .select("name, auto_mode, last_communication, maintenance_mode, last_actuation_origin")
         .eq("farm_id", target.id)
         .order("name", { ascending: true });
       if (error) {
@@ -5817,7 +5828,7 @@ async function dispatchAiAction(
       const list = (eqs ?? []) as Array<{
         name: string;
         auto_mode: boolean | null;
-        communication_status: string | null;
+        last_communication: string | null;
         maintenance_mode: boolean | null;
         last_actuation_origin: string | null;
       }>;
@@ -5826,11 +5837,13 @@ async function dispatchAiAction(
         return true;
       }
 
+      const __janelaLista = (await timeoutsDasFazendas([target.id])).get(target.id)
+        ?? DEFAULT_COMM_TIMEOUT_MIN;
       const fmt = (arr: typeof list) =>
         arr.map((e) => {
           const flags: string[] = [];
           if (e.maintenance_mode) flags.push("manutenção");
-          if (String(e.communication_status ?? "").toLowerCase() === "offline") flags.push("offline");
+          if (semComunicacao(e, __janelaLista)) flags.push("offline");
           return `• ${e.name}${flags.length ? ` _(${flags.join(", ")})_` : ""}`;
         }).join("\n") || "_(nenhum)_";
 
@@ -9566,12 +9579,19 @@ async function processMessage(from: string, text: string, location: WaLocation =
     // no request_overview. Nesses casos, anexamos os níveis ao final do status
     // se a(s) fazenda(s) tiver(em) sensores de nível. Pedidos explícitos de
     // "bombas/poços/status das bombas" continuam retornando só bombas.
+    // Chegar aqui já É a intenção resolvida: status_all, visão geral da
+    // fazenda. Exigir também a palavra "fazenda" no texto era redundante e
+    // quebrava o caso mais comum — "status sossego" devolvia bombas sem
+    // níveis, enquanto "status fazenda sossego" devolvia os dois. Para o
+    // operador as duas frases são a mesma pergunta.
+    //
+    // As intenções ESPECÍFICAS não passam por aqui: "níveis sossego" resolve
+    // em cmd.kind === "level" e "status poço 01" no caminho de equipamento.
+    // O único recorte que sobra é o pedido explícito de bombas.
     const shouldAppendLevelsToStatus = (() => {
       const mentionsLevels = /\b(nivel|niveis|reservatorio|reservatorios|canal|canais|agua|tanque|tanques|caixa|caixas)\b/.test(normStatusText);
       const explicitPumpOnly = /\b(bomba|bombas|poco|pocos|equipamento|equipamentos|conjunto|conjuntos|booster|boosters)\b/.test(normStatusText);
-      const overviewSignal = /\b(fazenda|captacao|tudo|geral|resumo)\b/.test(normStatusText)
-        || /\bcomo\s+(esta|estao|ta|tao)\b/.test(normStatusText);
-      return overviewSignal && !mentionsLevels && !explicitPumpOnly;
+      return !mentionsLevels && !explicitPumpOnly;
     })();
 
     if (shouldAppendLevelsToStatus) {
@@ -10697,6 +10717,8 @@ async function processMessage(from: string, text: string, location: WaLocation =
   const alreadyTargets: typeof validTargets = [];
   const actionableTargets: typeof validTargets = [];
   const maintenanceTargets: typeof validTargets = [];
+  const __janelaCmd = (await timeoutsDasFazendas([farmId])).get(farmId)
+    ?? DEFAULT_COMM_TIMEOUT_MIN;
   for (const t of validTargets) {
     // Bloqueio total: equipamento em manutenção rejeita LIGAR.
     // Para DESLIGAR, permite (não há sentido manter ligado em manutenção).
@@ -10704,8 +10726,11 @@ async function processMessage(from: string, text: string, location: WaLocation =
       maintenanceTargets.push(t);
       continue;
     }
-    const commStatus = String(t.eq.communication_status ?? "").toLowerCase();
-    if (commStatus === "offline") {
+    // Segurança: não aceitar comando para equipamento sem comunicação. Antes
+    // isto lia `communication_status`, que estava errado em 64 dos 128
+    // equipamentos ativos — na prática quase nunca bloqueava. Agora usa a
+    // mesma freshness do resto.
+    if (semComunicacao(t.eq, __janelaCmd)) {
       offlineTargets.push(t);
       continue;
     }
@@ -11019,13 +11044,9 @@ async function executeTurnCommands(args: {
       try {
         const { data: finalEq } = await supabase
           .from("equipments")
-          .select("communication_status, last_communication")
+          .select("last_communication")
           .eq("id", eq.id).maybeSingle();
-        const cs = String((finalEq as any)?.communication_status ?? "").toLowerCase();
-        const lastMs = (finalEq as any)?.last_communication
-          ? new Date((finalEq as any).last_communication).getTime() : 0;
-        const stale = lastMs > 0 && (Date.now() - lastMs) > 30 * 60 * 1000;
-        if (cs === "offline" && stale) offlineSuffix = " (possivelmente offline)";
+        if (semComunicacao(finalEq, __janelaCmd)) offlineSuffix = " (sem comunicação)";
       } catch (_) { /* ignore */ }
       return `• ${eq.name} — ⚠️ ${verboGer} NÃO confirmado em 90s${offlineSuffix}`;
     });
