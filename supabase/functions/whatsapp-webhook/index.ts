@@ -1440,6 +1440,100 @@ function parseCommand(text: string): ParsedCmd {
 
 // Extrai todos os inteiros do nome (ex: "Poço 02" → [2]).
 // ─────────────────────────────────────────────────────────────────────────────
+// IDENTIDADE OPERACIONAL: FARM_ID + EQUIPMENT_ID + ACTION
+// ─────────────────────────────────────────────────────────────────────────────
+// Em 22/09/2026, "Desligar Poço 11" — sem fazenda no texto — abriu confirmação
+// para o Poço 11 da TERRA NORTE, embora as sete mensagens anteriores fossem
+// todas sobre a Semear. A fazenda veio do `default_farm_id` do operador, em
+// silêncio. Existe Poço 11 em três fazendas acessíveis:
+//
+//   Semear       POÇO 11 R4    desligado
+//   Sykue        POÇO 11 R06   LIGADO
+//   Terra Norte  Poço 11       LIGADO
+//
+// Um "SIM" teria desligado bomba em produção na fazenda errada. E a tela de
+// confirmação dizia só "DESLIGAR Poço 11", sem fazenda — o operador não tinha
+// como perceber antes de confirmar.
+//
+// `default_farm_id` continua válido para navegação e consulta. O que ele não
+// pode mais fazer é decidir, sozinho e sem avisar, o alvo de um comando FÍSICO
+// quando há mais de uma interpretação possível.
+
+/** Fazendas que este operador pode operar. Base da resolução multi-fazenda. */
+async function fazendasAcessiveis(op: any, phone: string): Promise<Array<{ id: string; name: string }>> {
+  if (isGlobalSuperAdminPhone(phone) || isSuperAdmin(op)) {
+    const { data } = await supabase.from("farms").select("id, name").order("name");
+    return ((data ?? []) as any[]).map((f) => ({ id: f.id, name: f.name }));
+  }
+  const tail8 = normalizePhone(phone).slice(-8);
+  const { data } = await supabase
+    .from("whatsapp_operators").select("farm_id, phone").eq("is_active", true);
+  const ids = Array.from(new Set(((data ?? []) as any[])
+    .filter((o) => normalizePhone(o.phone ?? "").slice(-8) === tail8)
+    .map((o) => o.farm_id).filter(Boolean)));
+  if (!ids.length) return [];
+  const { data: fs } = await supabase.from("farms").select("id, name").in("id", ids).order("name");
+  return ((fs ?? []) as any[]).map((f) => ({ id: f.id, name: f.name }));
+}
+
+/**
+ * Fazenda escrita EXPLICITAMENTE na mensagem. Tem prioridade absoluta sobre
+ * default_farm_id, sobre pendência anterior e sobre qualquer contexto.
+ */
+function fazendaExplicitaNoTexto(
+  texto: string,
+  acessiveis: Array<{ id: string; name: string }>,
+): { id: string; name: string } | null {
+  const t = stripAccents(String(texto ?? "").toLowerCase());
+  if (!t.trim()) return null;
+  let melhor: { id: string; name: string } | null = null;
+  let maior = 0;
+  for (const f of acessiveis) {
+    const nome = stripAccents(String(f.name ?? "").toLowerCase()).trim();
+    const curto = nome.replace(/^fazenda\s+/, "").trim();
+    for (const cand of [nome, curto]) {
+      // \b evita que "sao miguel" case dentro de outra palavra.
+      if (cand.length >= 3 && new RegExp(`\\b${cand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(t)) {
+        if (cand.length > maior) { maior = cand.length; melhor = f; }
+      }
+    }
+  }
+  return melhor;
+}
+
+/**
+ * Onde existe o equipamento pedido, entre TODAS as fazendas acessíveis.
+ * Usa o mesmo resolvedor por identidade lógica (base + número), então sufixo
+ * de rádio R1/R2/R3/R4 e metadados como NV15/16 não participam.
+ */
+async function acharEquipamentoEntreFazendas(
+  acessiveis: Array<{ id: string; name: string }>,
+  base: string,
+  num: number,
+): Promise<Array<{ farm: { id: string; name: string }; eq: any }>> {
+  if (!acessiveis.length) return [];
+  const variants = baseSearchVariants(base);
+  const achados: Array<{ farm: { id: string; name: string }; eq: any }> = [];
+  const vistos = new Set<string>();
+  for (const v of variants) {
+    const { data } = await supabase
+      .from("equipments").select("id, name, farm_id")
+      .in("farm_id", acessiveis.map((f) => f.id))
+      .eq("active", true)
+      .ilike("name", `%${v}%`).limit(1000);
+    for (const e of (data ?? []) as any[]) {
+      if (vistos.has(e.id)) continue;
+      if (!casaNumeroLogico(e.name, num, base)) continue;
+      const farm = acessiveis.find((f) => f.id === e.farm_id);
+      if (!farm) continue;
+      vistos.add(e.id);
+      achados.push({ farm, eq: e });
+    }
+  }
+  return achados;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // IDENTIDADE NUMÉRICA DO EQUIPAMENTO
 // ─────────────────────────────────────────────────────────────────────────────
 // Em 22/09/2026, de madrugada, três bombas erradas foram LIGADAS na Semear:
@@ -8620,6 +8714,22 @@ async function processMessage(from: string, text: string, location: WaLocation =
         );
         return;
       }
+      // Mensagem nova que é, ela própria, um comando físico completo NÃO pode
+      // ser engolida pela pendência. Em 22/09, "Desligar Poço 11 Semear" — com
+      // a fazenda escrita — foi respondida com "ainda tem um comando pendente"
+      // referente à TERRA NORTE. A instrução explícita do operador foi perdida.
+      if (/^\s*(ligar|desligar|liga|desliga)\b/i.test(String(text ?? ""))) {
+        console.log(`[pending] nova instrução física explícita — substituindo pendência`);
+        await deleteAllPending(phone);
+        await sendWhatsAppText(
+          from,
+          `↩️ A confirmação anterior (*${desc}*) foi descartada. Processando o novo comando.`,
+          pending.farm_id ?? op.farm_id,
+        );
+        // Cai no fluxo normal: o texto novo é re-parseado do zero, com a
+        // fazenda que ELE informar.
+        return await processMessage(from, text, null) as any;
+      }
       console.log(`[pending] unrelated — mantendo pendência viva`);
       // segue o fluxo normal abaixo
     }
@@ -9489,7 +9599,22 @@ async function processMessage(from: string, text: string, location: WaLocation =
 
 
   // 3) Resolve fazenda
-  let farmId: string | null = op.default_farm_id ?? op.farm_id ?? null;
+  //
+  // Para COMANDO FÍSICO a ordem é: fazenda escrita no texto > resolução única
+  // entre as acessíveis > desambiguação. `default_farm_id` NUNCA decide um
+  // alvo físico ambíguo — ver bloco IDENTIDADE OPERACIONAL. Consultas seguem
+  // usando o default, que é comportamento inofensivo e conveniente.
+  const __ehComandoFisico = cmd.kind === "ops"
+    && (cmd as any).ops?.some((o: any) => o.action === "turn_on" || o.action === "turn_off");
+  let __acessiveis: Array<{ id: string; name: string }> = [];
+  let __fazendaExplicita: { id: string; name: string } | null = null;
+  if (__ehComandoFisico) {
+    __acessiveis = await fazendasAcessiveis(op, phone);
+    __fazendaExplicita = fazendaExplicitaNoTexto(text, __acessiveis);
+  }
+
+  let farmId: string | null = __fazendaExplicita?.id
+    ?? op.default_farm_id ?? op.farm_id ?? null;
   if (!farmId) {
     const { data: f } = await supabase.from("farms").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
     farmId = f?.id ?? null;
@@ -10957,12 +11082,22 @@ async function processMessage(from: string, text: string, location: WaLocation =
   }
   if (lines.length) lines.push("");
 
+  // A confirmação SEMPRE nomeia a fazenda. Sem isso o operador não tem como
+  // perceber que o alvo está na fazenda errada — foi o que deixou o engano de
+  // 22/09 invisível até o momento do SIM.
+  const __nomeFazenda = (await supabase
+    .from("farms").select("name").eq("id", farmId).maybeSingle()).data?.name ?? "—";
   if (actionableTargets.length === 1) {
     lines.push("⚠️ Confirmar comando:", "");
-    lines.push(`• ${verbo} ${actionableTargets[0].eq.name}`);
+    lines.push(`Fazenda: ${__nomeFazenda}`);
+    lines.push(`Equipamento: ${actionableTargets[0].eq.name}`);
+    lines.push(`Ação: ${verbo}`);
   } else {
     lines.push("⚠️ Confirmar comandos:", "");
-    for (const t of actionableTargets) lines.push(`• ${verbo} ${t.eq.name}`);
+    lines.push(`Fazenda: ${__nomeFazenda}`);
+    lines.push(`Ação: ${verbo}`);
+    lines.push("");
+    for (const t of actionableTargets) lines.push(`• ${t.eq.name}`);
   }
 
   if (missingTargets.length) {
@@ -11478,9 +11613,53 @@ async function createAutomacaoFromText(
       if (nums.length) {
         for (const n of nums) {
           const r = resolverPorNumeroLogico(pool, n, base);
-          if (r.eq) matches.push(r.eq);
-          else if (r.ambiguos.length > 1) {
+          if (r.eq) { matches.push(r.eq); continue; }
+          if (r.ambiguos.length > 1) {
             ambiguidades.push({ n, nomes: r.ambiguos.map((e) => e.name) });
+            continue;
+          }
+          // Não achou NESTA fazenda. Se o operador não escreveu fazenda
+          // nenhuma, o equipamento pode estar em outra a que ele tem acesso —
+          // e escolher por default_farm_id foi exatamente o que comandou a
+          // fazenda errada. Procura em todas e devolve a decisão ao operador.
+          if (__ehComandoFisico && !__fazendaExplicita && __acessiveis.length > 1) {
+            const entre = await acharEquipamentoEntreFazendas(__acessiveis, base, n);
+            if (entre.length > 1) {
+              const linhas = entre
+                .map((x) => `• ${x.farm.name} — ${x.eq.name}`).join("\n");
+              await sendWhatsAppText(
+                from,
+                `❓ Encontrei ${base} ${n} em mais de uma fazenda:\n\n${linhas}\n\n` +
+                "Em qual fazenda deseja executar o comando? Nenhum comando foi enviado.",
+                null,
+              );
+              return true;
+            }
+            if (entre.length === 1) {
+              // Único no universo acessível: resolve, mas a confirmação vai
+              // mostrar a fazenda para o operador conferir antes do SIM.
+              matches.push(entre[0].eq);
+              farmId = entre[0].farm.id;
+              continue;
+            }
+          }
+        }
+        // Mesmo achando nesta fazenda, se o operador NÃO escreveu a fazenda e
+        // o mesmo número existe em outra acessível, é ambíguo por definição.
+        if (__ehComandoFisico && !__fazendaExplicita && __acessiveis.length > 1) {
+          for (const n of nums) {
+            const entre = await acharEquipamentoEntreFazendas(__acessiveis, base, n);
+            if (entre.length > 1) {
+              const linhas = entre
+                .map((x) => `• ${x.farm.name} — ${x.eq.name}`).join("\n");
+              await sendWhatsAppText(
+                from,
+                `❓ Encontrei ${base} ${n} em mais de uma fazenda:\n\n${linhas}\n\n` +
+                "Em qual fazenda deseja executar o comando? Nenhum comando foi enviado.",
+                null,
+              );
+              return true;
+            }
           }
         }
       } else {
