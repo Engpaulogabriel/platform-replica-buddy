@@ -168,13 +168,12 @@ describe("regressão — sufixo de rádio não é identidade", () => {
   });
 });
 
-// ── identidade: nunca a de outra pessoa ───────────────────────────────────
-describe("TEST H — operador sem vínculo não vira comando de outro usuário", () => {
-  it("recusa e explica, em vez de gravar no nome do admin da fazenda", async () => {
+// ── identidade: autorização é do whatsapp_operators, autoria é do vínculo ──
+describe("TEST H — Yuri autorizado sem user_id", () => {
+  it("o comando sai, created_by é null e o source_device identifica o Yuri", async () => {
     const banco = bancoDeTeste();
-    // o operador existe e pode controlar, mas não está vinculado a um usuário
-    for (const o of banco.whatsapp_operators) o.user_id = null;
-    // e a fazenda TEM admin — era exatamente esse que o fallback usava
+    for (const o of banco.whatsapp_operators) { o.user_id = null; o.name = "Yuri Seibert"; }
+    // a fazenda TEM admin — era exatamente esse que o fallback usava
     banco.user_roles = [{ user_id: "u-admin", role: "admin", farm_id: "f-semear" }];
     banco.whatsapp_pending_actions = [{
       id: "p1", operator_phone: "5577999608294", action_type: "desliga",
@@ -183,16 +182,70 @@ describe("TEST H — operador sem vínculo não vira comando de outro usuário",
     }];
 
     const r = await enviarMensagem({
-      texto: "sim", banco,
-      decisaoDoLLM: { decision: "confirm", confidence: 1 },
+      texto: "sim", banco, decisaoDoLLM: { decision: "confirm", confidence: 1 },
     });
-    const txt = juntou(r);
 
-    expect(txt).toMatch(/não vou registrar este comando no nome de outra pessoa/i);
-    expect(comandosCriados(r)).toHaveLength(0);
-    // e nada foi gravado com o usuário do admin
     const cmds = comandosCriados(r).flatMap((c: any) => c.linhas);
-    expect(cmds.some((c: any) => c.created_by === "u-admin")).toBe(false);
+    expect(cmds).toHaveLength(1);
+    expect(cmds[0].created_by).toBeNull();
+    expect(cmds[0].source_device).toMatch(/^whatsapp:Yuri Seibert\|/);
+    expect(cmds[0].farm_id).toBe("f-semear");
+    // e em nenhuma hipótese no nome do admin
+    expect(cmds[0].created_by).not.toBe("u-admin");
+  });
+});
+
+describe("TEST I — Alcione com vínculo real", () => {
+  it("created_by é o user_id dela, não nulo", async () => {
+    const banco = bancoDeTeste();
+    for (const o of banco.whatsapp_operators) { o.user_id = null; o.name = "Alcione Costa"; }
+    // só a linha da fazenda alvo tem vínculo
+    banco.whatsapp_operators.find((o: any) => o.farm_id === "f-semear").user_id = "u-alcione";
+    banco.whatsapp_pending_actions = [{
+      id: "p1", operator_phone: "5577999608294", action_type: "desliga",
+      equipment_id: "e-semear-11", equipment_name: "POÇO 11 R4", farm_id: "f-semear",
+      operator_id: "op-2", created_at: new Date().toISOString(),
+    }];
+
+    const r = await enviarMensagem({
+      texto: "sim", banco, decisaoDoLLM: { decision: "confirm", confidence: 1 },
+    });
+    const cmds = comandosCriados(r).flatMap((c: any) => c.linhas);
+    expect(cmds[0].created_by).toBe("u-alcione");
+    expect(cmds[0].source_device).toMatch(/^whatsapp:Alcione Costa\|/);
+  });
+});
+
+describe("TEST J — mesmo telefone em várias fazendas", () => {
+  const cenario = (ordem: number[]) => {
+    const banco = bancoDeTeste();
+    // Terra Norte tem vínculo; Semear e Sykue não — como em produção
+    const porFazenda: Record<string, string | null> = {
+      "f-terranorte": "u-gabriel", "f-semear": null, "f-sykue": null,
+    };
+    for (const o of banco.whatsapp_operators) o.user_id = porFazenda[o.farm_id];
+    banco.whatsapp_operators = ordem.map((i) => banco.whatsapp_operators[i]);
+    banco.whatsapp_pending_actions = [{
+      id: "p1", operator_phone: "5577999608294", action_type: "desliga",
+      equipment_id: "e-semear-11", equipment_name: "POÇO 11 R4", farm_id: "f-semear",
+      operator_id: "op-2", created_at: new Date().toISOString(),
+    }];
+    return banco;
+  };
+
+  it("o comando na Semear nunca herda o user_id da Terra Norte", async () => {
+    // toda permutação das linhas precisa dar o MESMO resultado
+    for (const ordem of [[0,1,2],[1,2,0],[2,0,1],[2,1,0]]) {
+      const r = await enviarMensagem({
+        texto: "sim", banco: cenario(ordem),
+        decisaoDoLLM: { decision: "confirm", confidence: 1 },
+      });
+      const cmds = comandosCriados(r).flatMap((c: any) => c.linhas);
+      expect(cmds).toHaveLength(1);
+      expect(cmds[0].farm_id).toBe("f-semear");
+      expect(cmds[0].created_by).toBeNull();           // determinístico
+      expect(cmds[0].created_by).not.toBe("u-gabriel"); // sem vazamento entre fazendas
+    }
   });
 });
 

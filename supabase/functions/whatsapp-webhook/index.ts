@@ -3516,6 +3516,35 @@ const APPROVER_ROLES = new Set(["super_admin", "manager", "approver"]);
 const MANAGER_ROLES = new Set(["super_admin", "manager"]);
 
 // ─── Super admin bypass: dono do sistema tem TODAS permissões, sempre ──
+/**
+ * user_id do operador NESTA fazenda — ou null.
+ *
+ * O mesmo telefone tem uma linha de `whatsapp_operators` por fazenda, e nem
+ * todas têm vínculo com usuário da plataforma. Escolher "a linha que veio
+ * primeiro" tornava a autoria dependente da ordem do SELECT, que não tem
+ * ORDER BY. Aqui só conta a linha da fazenda ALVO do comando; empate entre
+ * linhas da mesma fazenda é resolvido por ordem estável de id.
+ */
+async function vinculoDaFazenda(
+  phone: string, farmId: string | null, op: any,
+): Promise<string | null> {
+  if (!farmId) return null;
+  if (op?.farm_id === farmId && op?.user_id) return op.user_id as string;
+
+  const { data } = await supabase
+    .from("whatsapp_operators")
+    .select("id, phone, user_id, farm_id")
+    .eq("farm_id", farmId)
+    .eq("is_active", true);
+
+  const tail8 = normalizePhone(phone).slice(-8);
+  const daFazenda = ((data ?? []) as any[])
+    .filter((o) => normalizePhone(o.phone ?? "").slice(-8) === tail8 && o.user_id)
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+
+  return daFazenda.length ? (daFazenda[0].user_id as string) : null;
+}
+
 function isSuperAdmin(op: any): boolean {
   if (isGlobalSuperAdminPhone(op?.phone ?? op?.whatsapp_phone ?? op?.phone_number)) return true;
   if (!op) return false;
@@ -8019,6 +8048,13 @@ async function processMessage(from: string, text: string, location: WaLocation =
   });
   // Se houver registros duplicados para o mesmo WhatsApp, super_admin vence sempre.
   // Isso evita cair em um registro comum/antigo e bloquear permissões do dono.
+  //
+  // A ordenação por id existe porque a consulta acima não tem ORDER BY: com dez
+  // linhas para o mesmo telefone, "a primeira" variava entre chamadas — e com
+  // ela variavam permissões e autoria. A autoria hoje nem depende mais desta
+  // escolha (ver vinculoDaFazenda), mas permissão dependendo de sorteio é
+  // inaceitável do mesmo jeito.
+  operatorMatches.sort((a: any, b: any) => String(a.id).localeCompare(String(b.id)));
   const matched = operatorMatches.find((o: any) => isSuperAdmin(o)) ?? operatorMatches[0];
 
   // ── STEP B: unknown/revoked sender → permitir fluxo de cadastro por código ──
@@ -11270,30 +11306,23 @@ async function executeTurnCommands(args: {
     return;
   }
 
-  // created_by: SOMENTE o user_id do próprio operador.
+  // created_by: só o vínculo INEQUÍVOCO do operador NESTA fazenda.
   //
-  // Existia aqui um fallback para o primeiro admin/owner da fazenda. Ele não
-  // "resolvia" a falta de vínculo: gravava o comando no nome de OUTRA pessoa.
-  // Foi assim que o relatório da Semear creditou ao "Admin Renov" acionamentos
-  // feitos pelo Yuri — e o dado ficou errado na origem, não na exibição.
-  // Identidade de terceiro nunca é fallback.
+  // Existia aqui um fallback para o primeiro admin/owner. Ele não resolvia a
+  // falta de vínculo: gravava o comando no nome de OUTRA pessoa. Foi assim que
+  // o relatório da Semear creditou ao "Admin Renov" o que o Yuri fez.
   //
-  // Recusar é obrigatório enquanto `guard_manual_command_without_user`
-  // (trigger BEFORE INSERT em commands) rejeitar comando manual com
-  // created_by nulo cujo source_device não seja 'cloud-automation',
-  // 'cloud-protective-off' ou 'backend-reset:%'. Sem esse vínculo o INSERT
-  // falharia no banco de qualquer forma; a diferença é que agora o operador
-  // recebe o motivo em vez de um erro de constraint — e ninguém é acusado no
-  // lugar dele.
-  const createdBy: string | null = (op as any).user_id ?? null;
-  if (!createdBy) {
-    await sendWhatsAppText(
-      from,
-      `❌ ${op.name}, seu WhatsApp ainda não está vinculado a um usuário da plataforma, e eu não vou registrar este comando no nome de outra pessoa.\n\nPeça para o administrador vincular em Integrações → WhatsApp.`,
-      farmId,
-    );
-    return;
-  }
+  // E não basta usar `op.user_id`: o mesmo telefone tem uma linha por fazenda
+  // (o super admin tem dez), e `op` é a linha que venceu a busca por telefone —
+  // que podia ser a da Terra Norte enquanto o comando é da Semear. Herdar o
+  // user_id de outra fazenda é o mesmo erro com outro rosto.
+  //
+  // Sem vínculo nesta fazenda, created_by fica NULL e a identidade viaja em
+  // source_device ('whatsapp:<nome>|<telefone>'), que é de onde o relatório
+  // passou a tirar o autor. A AUTORIZAÇÃO não muda: continua vindo de
+  // whatsapp_operators (ativo, can_control, can_turn_on/can_turn_off).
+  const createdBy: string | null = await vinculoDaFazenda(phone, farmId, op);
+  console.log(`WA AUTORIA — fazenda=${farmId} created_by=${createdBy ?? "null"} src=whatsapp:${op.name}`);
 
   const selectCols = "id, name, desired_running, communication_status, last_communication, last_actuation_origin, farm_id, hw_id, saida, plc_group_id, last_outputs_state, type, command_blocked_until, maintenance_mode, maintenance_reason, maintenance_started_at, maintenance_started_by, maintenance_started_via";
   const { data: eqsRaw } = await supabase

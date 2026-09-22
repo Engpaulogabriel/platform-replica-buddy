@@ -63,6 +63,30 @@ describe("CASO B — created_by histórico aponta para outra pessoa", () => {
   });
 });
 
+describe("CASO A2 — WhatsApp sem vínculo auth (created_by nulo)", () => {
+  it("o relatório mostra WhatsApp / Yuri mesmo sem user_id", async () => {
+    const db = await bancoDaCadeia(); await aplicarCorrecaoP0(db); await semear(db);
+    await comando(db, { src: "whatsapp:Yuri Seibert|5577999604782", createdBy: null, frame: frameOn });
+    await telemetria(db, LIGADO);
+
+    const [linha] = await linhasDoRelatorio(db);
+    expect(linha.origin).toBe("whatsapp");
+    expect(linha.actor_label).toBe("Yuri Seibert");
+    expect(linha.user_id).toBeNull();
+    expect(linha.fonte).toBe("whatsapp_source_device");
+  });
+
+  it("telefone sozinho no source_device não vai para a tela como nome", async () => {
+    const db = await bancoDaCadeia(); await aplicarCorrecaoP0(db); await semear(db);
+    await comando(db, { src: "whatsapp:5577999604782", createdBy: null, frame: frameOn });
+    await telemetria(db, LIGADO);
+
+    const [linha] = await linhasDoRelatorio(db);
+    expect(linha.origin).toBe("whatsapp");
+    expect(linha.actor_label === null || !/\d{6}/.test(linha.actor_label)).toBe(true);
+  });
+});
+
 describe("CASO C — transição sem correlação nenhuma", () => {
   it("não diz 'Acionamento local': diz origem não identificada, sem autor", async () => {
     const db = await bancoDaCadeia(); await aplicarCorrecaoP0(db); await semear(db);
