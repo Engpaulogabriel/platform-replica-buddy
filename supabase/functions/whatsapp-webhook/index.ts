@@ -8414,7 +8414,13 @@ async function processMessage(from: string, text: string, location: WaLocation =
   //  • awaiting_numbers=true → operador deve responder com números/"todas".
   //  • equipment_ids preenchidos → texto vira motivo/confirmação para o lote.
   {
-    const farmIdMP = op.farm_id ?? null;
+    // A fazenda do lote de manutenção vem da PENDÊNCIA, que já guarda
+    // farm_id resolvido quando o operador pediu. `op.farm_id` é uma das
+    // linhas de operador de quem tem acesso a várias fazendas — usá-lo
+    // atribuía log e autoria à fazenda errada. Os ALVOS nunca dependeram
+    // disto: são equipment_ids explícitos e o comando nasce com
+    // `farm_id = eq.farm_id`.
+    let farmIdMP: string | null = op.farm_id ?? null;
     const tMP = stripAccents((text || "").trim().toLowerCase()).replace(/[.!?]+$/g, "");
     const { data: pendMPRows } = await supabase
       .from("whatsapp_maintenance_pending")
@@ -8423,6 +8429,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
       .order("created_at", { ascending: false })
       .limit(1);
     const pendMP: any | null = (pendMPRows ?? [])[0] ?? null;
+    if (pendMP?.farm_id) farmIdMP = pendMP.farm_id;
     if (pendMP) {
       const expired = pendMP.expires_at && new Date(pendMP.expires_at).getTime() < Date.now();
       if (expired) {
@@ -11663,6 +11670,23 @@ async function createAutomacaoFromText(
           }
         }
       } else {
+        // LOTE. Aqui não existe número que desempate: "desligar todos" atinge
+        // tudo o que estiver ligado na fazenda escolhida. Se a fazenda veio do
+        // default_farm_id e não do texto, o operador multi-fazenda pode
+        // desligar uma fazenda inteira sem ter escrito o nome dela.
+        //
+        // Por isso a regra do lote é mais restritiva que a do alvo único: não
+        // basta "existir em uma só fazenda" — sem fazenda no texto, pergunta.
+        if (__ehComandoFisico && !__fazendaExplicita && __acessiveis.length > 1) {
+          const linhas = __acessiveis.map((f) => `• ${f.name}`).join("\n");
+          await sendWhatsAppText(
+            from,
+            `❓ Em qual fazenda deseja ${verbo.toLowerCase()} os equipamentos?\n\n${linhas}\n\n` +
+            "Repita o comando com o nome da fazenda. Nenhum comando foi enviado.",
+            null,
+          );
+          return true;
+        }
         matches.push(...pool);
       }
       // Ambiguidade NÃO vira comando: isto liga bomba. Pergunta e para.

@@ -223,3 +223,81 @@ describe("default_farm_id", () => {
     );
   });
 });
+
+// ── LOTE — regra mais restritiva que a do alvo único ───────────────────────
+// "desligar todas" não tem número que desempate: atinge tudo o que estiver
+// ligado na fazenda escolhida. Se a fazenda viesse do default_farm_id, um
+// operador multi-fazenda desligaria uma fazenda inteira sem ter escrito o
+// nome dela.
+describe("comando em lote", () => {
+  it("sem fazenda no texto e multi-fazenda: pergunta, não executa", () => {
+    expect(src).toMatch(/Em qual fazenda deseja \$\{verbo\.toLowerCase\(\)\} os equipamentos\?/);
+    expect(src).toMatch(/Repita o comando com o nome da fazenda\. Nenhum comando foi enviado\./);
+  });
+
+  it("a pergunta acontece ANTES de montar os alvos", () => {
+    const iPergunta = src.indexOf("Em qual fazenda deseja ${verbo.toLowerCase()} os equipamentos?");
+    const iMatches = src.indexOf("matches.push(...pool);");
+    expect(iPergunta).toBeGreaterThan(-1);
+    expect(iPergunta).toBeLessThan(iMatches);
+  });
+
+  it("a guarda do lote exige as três condições", () => {
+    const i = src.indexOf("// LOTE. Aqui não existe número que desempate");
+    const trecho = src.slice(i, i + 900);
+    expect(trecho).toMatch(/__ehComandoFisico && !__fazendaExplicita && __acessiveis\.length > 1/);
+  });
+
+  it("operador de uma fazenda só segue resolvendo — e a confirmação nomeia", () => {
+    // __acessiveis.length > 1 é falso, então não pergunta; a confirmação
+    // continua exibindo "Fazenda: …".
+    expect(src).toMatch(/lines\.push\(`Fazenda: \$\{__nomeFazenda\}`\)/);
+  });
+
+  it("fazenda explícita no lote dispensa a pergunta", () => {
+    const f = fazendaExplicitaNoTexto("desligar todas as bombas da Semear", ACESSIVEIS);
+    expect(f?.name).toBe("Semear");
+  });
+
+  it("e resolve Terra Norte quando é ela a escrita", () => {
+    const f = fazendaExplicitaNoTexto("desligar todas da Terra Norte", ACESSIVEIS);
+    expect(f?.name).toBe("Fazenda Terra Norte");
+  });
+});
+
+// ── manutenção: fazenda vem da pendência ──────────────────────────────────
+describe("lote de manutenção", () => {
+  it("usa o farm_id da pendência, não op.farm_id", () => {
+    expect(src).toMatch(/if \(pendMP\?\.farm_id\) farmIdMP = pendMP\.farm_id;/);
+  });
+
+  it("os alvos sempre foram equipment_ids explícitos, nunca busca por fazenda", () => {
+    expect(src).toMatch(/equipmentIds: runningIds/);
+    expect(src).toMatch(/if \(eqMap\.get\(eid\)\?\.desired_running === true\) runningIds\.push\(eid\)/);
+  });
+});
+
+// ── a porta física é única e vinculada ao equipamento ──────────────────────
+describe("produtores físicos", () => {
+  it("existe UMA função que cria comando físico", () => {
+    expect([...src.matchAll(/async function enqueueManualPumpCommandSrv\(/g)].length).toBe(1);
+  });
+
+  it("e ela é chamada de UM único lugar", () => {
+    expect([...src.matchAll(/enqueueManualPumpCommandSrv\(/g)].length).toBe(2); // definição + 1 chamada
+  });
+
+  it("o comando nasce com a fazenda DO EQUIPAMENTO, não a resolvida", () => {
+    // Mesmo que farmId estivesse errado, o alvo físico seria coerente.
+    expect(src).toMatch(/farm_id: eq\.farm_id,\s*\n\s*equipment_id: eq\.id,/);
+  });
+
+  it("desired_running é escrito por equipment_id, nunca por fazenda", () => {
+    expect(src).toMatch(/desired_running: turnOn,[\s\S]{0,200}\.eq\("id", eq\.id\)/);
+  });
+
+  it("não há outra porta lateral: zero rpc, zero enqueue_remote_command", () => {
+    expect(src).not.toMatch(/enqueue_remote_command/);
+    expect(src).not.toMatch(/\.rpc\(/);
+  });
+});
