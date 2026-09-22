@@ -105,11 +105,10 @@ describe("fazenda explícita tem prioridade", () => {
     });
   }
 
-  it("a fazenda explícita vence o default_farm_id na ordem de resolução", () => {
-    expect(src).toMatch(
-      /let farmId[\s\S]{0,80}__fazendaExplicita\?\.id\s*\n?\s*\?\? op\.default_farm_id/,
-    );
-  });
+  // A ordem de resolução (explícita > alvo único > pergunta, e nunca o
+  // default) é provada por comportamento em whatsapp-real-path.integration,
+  // TESTs A e B. A asserção de regex que existia aqui passava em verde
+  // enquanto a v10 comandava a fazenda errada em produção.
 
   it("nome parcial não casa dentro de outra palavra", () => {
     // "semeadura" não pode ativar a fazenda "Semear".
@@ -136,9 +135,8 @@ describe("CASO E — nova instrução física substitui pendência", () => {
       .toBeLessThan(trecho.indexOf("processMessage(from, text, null)"));
   });
 
-  it("só ligar/desligar substituem — 'sim' e 'cancelar' seguem seu caminho", () => {
-    expect(src).toMatch(/\/\^\\s\*\(ligar\|desligar\|liga\|desliga\)\\b\/i\.test/);
-  });
+  // "só ligar/desligar substituem" é provado por comportamento em
+  // whatsapp-real-path.integration (TEST E substitui; TEST F mantém o "sim").
 });
 
 // ── CASO F — o SIM executa os IDs já confirmados ──────────────────────────

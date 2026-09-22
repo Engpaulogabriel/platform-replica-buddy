@@ -1533,6 +1533,53 @@ async function acharEquipamentoEntreFazendas(
   return achados;
 }
 
+/**
+ * Instrução física COMPLETA: verbo de atuação seguido de um alvo.
+ *
+ * Existe para uma razão específica. Em 22/09/2026 o operador tinha uma
+ * confirmação aberta da TERRA NORTE e escreveu "Desligar Poço 11 Semear" —
+ * com a fazenda. O classificador de pendência devolveu null, o fallback
+ * respondeu "ainda tem um comando pendente" e a instrução explícita morreu
+ * ali. Uma ordem física nova nunca pode ser engolida por uma confirmação
+ * antiga: ela cancela a anterior e é reprocessada do zero.
+ */
+function ehInstrucaoFisicaExplicita(texto: string): boolean {
+  const t = stripAccents(String(texto ?? "").trim().toLowerCase());
+  const m = /^(?:por favor,?\s+)?(lig(?:a|ar|ue|uem)|deslig(?:a|ar|ue|uem)|corta|cortar)\s+(.+)$/.exec(t);
+  if (!m) return false;
+  return m[2].trim().length > 0;
+}
+
+/**
+ * Pedido de LOTE: "todas", "desligar todos os poços", "desligar tudo".
+ *
+ * O parser trata os tokens depois do verbo como nome de equipamento, então
+ * "desligar todas" virava a busca do equipamento "todas" e respondia
+ * `Equipamento "todas" não encontrado`. Coletivo não é equipamento.
+ * O nome da fazenda, quando escrito, é removido antes da análise — foi assim
+ * que "desligar todas semear" virou o equipamento "todas semear".
+ */
+const __COLETIVOS_DE_LOTE = new Set(["todos", "todas", "todo", "toda", "tds", "tudo", "geral"]);
+const __PLURAIS_DE_EQUIPAMENTO = new Set([
+  "bomba", "bombas", "poco", "pocos", "equipamento", "equipamentos",
+  "conjunto", "conjuntos", "booster", "boosters", "motor", "motores",
+]);
+function ehPedidoDeLote(base: string, nomeFazenda?: string | null): boolean {
+  let b = stripAccents(String(base ?? "").toLowerCase());
+  if (nomeFazenda) {
+    const n = stripAccents(String(nomeFazenda).toLowerCase()).trim();
+    for (const cand of [n, n.replace(/^fazenda\s+/, "").trim()]) {
+      if (cand.length >= 3) b = b.split(cand).join(" ");
+    }
+  }
+  b = b.replace(/\b(as|os|a|o|de|da|do|das|dos|na|no|nas|nos|em|fazenda)\b/g, " ")
+       .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  const toks = b.split(" ").filter(Boolean);
+  if (!toks.length) return false;
+  return toks.some((t) => __COLETIVOS_DE_LOTE.has(t))
+      && toks.every((t) => __COLETIVOS_DE_LOTE.has(t) || __PLURAIS_DE_EQUIPAMENTO.has(t));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // IDENTIDADE NUMÉRICA DO EQUIPAMENTO
 // ─────────────────────────────────────────────────────────────────────────────
@@ -8640,6 +8687,22 @@ async function processMessage(from: string, text: string, location: WaLocation =
     const pending = validPendings[0];
     const desc = describePending(pending);
 
+    // Uma ordem física nova vence a confirmação antiga — e essa decisão vem
+    // ANTES do classificador de propósito: era exatamente no fallback de
+    // classificador nulo, logo abaixo, que a instrução explícita do operador
+    // era descartada com "ainda tem um comando pendente".
+    if (ehInstrucaoFisicaExplicita(text)) {
+      console.log(`[pending] nova instrução física explícita — substituindo pendência`);
+      await deleteAllPending(phone);
+      await sendWhatsAppText(
+        from,
+        `↩️ A confirmação anterior (*${desc}*) foi descartada. Processando o novo comando.`,
+        pending.farm_id ?? op.farm_id,
+      );
+      // O texto novo é re-parseado do zero, com a fazenda que ELE informar.
+      return await processMessage(from, text, null) as any;
+    }
+
     type PendingDecision = { decision: "confirm" | "cancel" | "modify" | "unrelated"; confidence: number; reply?: string; new_command?: string };
     let decision: PendingDecision | null = null;
 
@@ -8721,22 +8784,8 @@ async function processMessage(from: string, text: string, location: WaLocation =
         );
         return;
       }
-      // Mensagem nova que é, ela própria, um comando físico completo NÃO pode
-      // ser engolida pela pendência. Em 22/09, "Desligar Poço 11 Semear" — com
-      // a fazenda escrita — foi respondida com "ainda tem um comando pendente"
-      // referente à TERRA NORTE. A instrução explícita do operador foi perdida.
-      if (/^\s*(ligar|desligar|liga|desliga)\b/i.test(String(text ?? ""))) {
-        console.log(`[pending] nova instrução física explícita — substituindo pendência`);
-        await deleteAllPending(phone);
-        await sendWhatsAppText(
-          from,
-          `↩️ A confirmação anterior (*${desc}*) foi descartada. Processando o novo comando.`,
-          pending.farm_id ?? op.farm_id,
-        );
-        // Cai no fluxo normal: o texto novo é re-parseado do zero, com a
-        // fazenda que ELE informar.
-        return await processMessage(from, text, null) as any;
-      }
+      // A instrução física explícita já foi tratada acima, antes do
+      // classificador — não se repete aqui.
       console.log(`[pending] unrelated — mantendo pendência viva`);
       // segue o fluxo normal abaixo
     }
@@ -9620,7 +9669,49 @@ async function processMessage(from: string, text: string, location: WaLocation =
     __fazendaExplicita = fazendaExplicitaNoTexto(text, __acessiveis);
   }
 
-  let farmId: string | null = __fazendaExplicita?.id
+  // A fazenda de um comando físico não pode vir de `default_farm_id`. Sem
+  // fazenda escrita e com mais de uma acessível, o alvo só é aceito quando é
+  // ÚNICO entre elas; qualquer outra situação pergunta. Em 22/09/2026,
+  // "Desligar Poço 11" — sem fazenda — abriu confirmação para o Poço 11 da
+  // TERRA NORTE porque era o default, enquanto o operador falava da Semear.
+  let __fazendaInferida: { id: string; name: string } | null = null;
+  if (__ehComandoFisico && !__fazendaExplicita && __acessiveis.length > 1) {
+    const __ops = (cmd as any).ops as any[];
+    const __base = String(__ops[0]?.base ?? "");
+    const __nums: number[] = __ops.flatMap((o: any) => (o.nums ?? []) as number[]);
+    const __porFazenda = new Map<string, { id: string; name: string }>();
+    for (const n of __nums) {
+      for (const achado of await acharEquipamentoEntreFazendas(__acessiveis, __base, n)) {
+        __porFazenda.set(achado.farm.id, achado.farm);
+      }
+    }
+    const __candidatas = [...__porFazenda.values()];
+    if (__candidatas.length === 1) {
+      __fazendaInferida = __candidatas[0];
+      console.log(`WA FAZENDA — alvo único em "${__fazendaInferida.name}"`);
+    } else {
+      const __ofertadas = __candidatas.length ? __candidatas : __acessiveis;
+      const __exemplo = `${String(text ?? "").trim()} ${__ofertadas[0].name.replace(/^Fazenda\s+/i, "")}`;
+      console.log(`WA FAZENDA — ambígua entre ${__ofertadas.length}; nada foi comandado`);
+      await sendWhatsAppText(
+        from,
+        [
+          "❓ Em qual fazenda?",
+          "",
+          `Você não disse a fazenda, e "${String(text ?? "").trim()}" pode se aplicar a mais de uma:`,
+          ...__ofertadas.map((f) => `• ${f.name}`),
+          "",
+          `Repita com o nome da fazenda. Ex.: "${__exemplo}".`,
+          "",
+          "Nenhum comando foi enviado.",
+        ].join("\n"),
+        op.farm_id,
+      );
+      return;
+    }
+  }
+
+  let farmId: string | null = __fazendaExplicita?.id ?? __fazendaInferida?.id
     ?? op.default_farm_id ?? op.farm_id ?? null;
   if (!farmId) {
     const { data: f } = await supabase.from("farms").select("id").order("created_at", { ascending: true }).limit(1).maybeSingle();
@@ -10852,9 +10943,15 @@ async function processMessage(from: string, text: string, location: WaLocation =
 
   // Carrega pool de equipamentos da base (uma única vez, com variantes).
   const op0 = cmd.ops[0];
+  // "desligar todas" pede o LOTE da fazenda, não um equipamento chamado
+  // "todas" — que era como o parser tratava, respondendo `Equipamento "todas"
+  // não encontrado`. Sensores de nível e repetidores não são acionáveis.
+  const __pediuLote = (op0.nums?.length ?? 0) === 0
+    && ehPedidoDeLote(op0.base, __fazendaExplicita?.name ?? __fazendaInferida?.name ?? null);
   const variants = baseSearchVariants(op0.base);
   const seen = new Set<string>();
   const pool: any[] = [];
+  {
   for (const v of variants) {
     const { data } = await supabase
       .from("equipments")
@@ -10865,6 +10962,25 @@ async function processMessage(from: string, text: string, location: WaLocation =
     for (const r of (data ?? []) as any[]) {
       if (!seen.has(r.id)) { seen.add(r.id); pool.push(r); }
     }
+  }
+  }
+  // O lote só entra quando a busca literal não achou nada: se a fazenda tiver
+  // um equipamento chamado "Bomba Geral", ele continua sendo um equipamento.
+  let __ehLote = false;
+  if (__pediuLote && pool.length === 0) {
+    const { data } = await supabase
+      .from("equipments")
+      .select(selectCols)
+      .eq("farm_id", farmId)
+      .eq("active", true)
+      .neq("type", "nivel")
+      .neq("type", "repetidor")
+      .limit(500);
+    for (const r of (data ?? []) as any[]) {
+      if (!seen.has(r.id)) { seen.add(r.id); pool.push(r); }
+    }
+    __ehLote = pool.length > 0;
+    console.log(`WA EQ LOOKUP — LOTE em ${farmId}: ${pool.length} equipamentos`);
   }
   console.log(`WA EQ LOOKUP — base="${op0.base}" pool=${pool.length} nums=${JSON.stringify(op0.nums)}`);
 
@@ -10892,9 +11008,11 @@ async function processMessage(from: string, text: string, location: WaLocation =
 
   // Resolve a lista de alvos. Se não tem números, usa o primeiro item do pool.
   type Target = { num: number | null; eq: any | null };
-  const targets: Target[] = effectiveNums.length === 0
-    ? [{ num: null, eq: pool[0] ?? null }]
-    : effectiveNums.map((n) => ({ num: n, eq: findByNum(n) }));
+  const targets: Target[] = __ehLote
+    ? pool.map((e) => ({ num: null, eq: e }))
+    : effectiveNums.length === 0
+      ? [{ num: null, eq: pool[0] ?? null }]
+      : effectiveNums.map((n) => ({ num: n, eq: findByNum(n) }));
 
   // Se nenhum encontrado: lista equipamentos disponíveis.
   const anyFound = targets.some((t) => !!t.eq);
@@ -11038,7 +11156,10 @@ async function processMessage(from: string, text: string, location: WaLocation =
 
   // ── BYPASS de confirmação: somente super_admin OU operador explicitamente liberado.
   // Operadores comuns (skip_confirmation=false) SEMPRE recebem "Responda SIM".
-  const skipConfirm = op.role === "super_admin" || op.skip_confirmation === true;
+  // LOTE nunca dispensa confirmação, nem para super_admin. Um "desligar
+  // todas" sem confirmar desligaria a fazenda inteira a partir de uma
+  // palavra só.
+  const skipConfirm = (op.role === "super_admin" || op.skip_confirmation === true) && !__ehLote;
   if (skipConfirm) {
     // Avisos sobre alvos não acionáveis (não bloqueia o lote).
     const preNotes: string[] = [];
