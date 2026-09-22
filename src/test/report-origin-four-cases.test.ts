@@ -1,122 +1,77 @@
 // @vitest-environment node
-// Coluna ORIGEM do Relatório: quatro casos do produto, mutuamente exclusivos.
-// "Modo Automático" (motor da nuvem) deixa de ser confundido com "Automação"
-// (desligamento programado e demais rotinas). Regra derivada de `source_device`,
-// que já vinha do banco — sem migration.
+// ─────────────────────────────────────────────────────────────────────────────
+// Coluna ORIGEM do Relatório: DUAS categorias, e só duas.
+// ─────────────────────────────────────────────────────────────────────────────
+// A tela tinha seis rótulos e misturava dois eixos: de onde partiu a ordem
+// (remoto × local) e por qual canal ela chegou (WhatsApp, motor da nuvem,
+// desligamento programado). O operador lia "WhatsApp" e "Automação" como
+// origens concorrentes de "Remoto" — são a mesma origem.
+//
+// REMOTO = o comando partiu do sistema. Quem foi está na coluna NOME.
+// LOCAL  = a bomba mudou de estado sem comando correlacionado.
 import { describe, it, expect } from "vitest";
-import fs from "node:fs";
-import path from "node:path";
 import {
   resolveReportOrigin, REPORT_ORIGIN_ICON, REPORT_ORIGIN_ICON_CLASS,
   REPORT_ORIGIN_BADGE, AUTO_ENGINE_SOURCE, type ReportOrigin,
 } from "@/lib/reportOrigin";
 
-describe("1 a 4. os quatro casos", () => {
-  it("1. comando manual pela plataforma → Remoto", () => {
-    expect(resolveReportOrigin("Remoto", "web-app")).toBe("Remoto");
-  });
+describe("tudo que partiu do sistema é REMOTO", () => {
+  const remotos: Array<[string, string | null]> = [
+    ["Remoto", "web-app"],                                              // plataforma
+    ["Remoto", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"],      // navegador
+    ["WhatsApp", "whatsapp:Yuri Seibert|557798654782"],                 // canal WhatsApp
+    ["Automático", "backend-reset:scheduled_shutdown_a1"],              // desligamento programado
+    ["Automático", "backend-reset:scheduled_shutdown_a3_forced"],
+    ["Automático", AUTO_ENGINE_SOURCE],                                 // motor da nuvem
+    ["Modo Automático", AUTO_ENGINE_SOURCE],
+    ["Automático", null],                                               // sem source_device
+  ];
+  for (const [origem, src] of remotos) {
+    it(`${origem} / ${src ?? "null"} → Remoto`, () => {
+      expect(resolveReportOrigin(origem, src)).toBe("Remoto");
+    });
+  }
+});
 
-  it("2. acionamento físico local → Local", () => {
+describe("só o que não teve comando correlacionado é LOCAL", () => {
+  it("atuação local declarada pela telemetria", () => {
     expect(resolveReportOrigin("Manual", null)).toBe("Local");
     expect(resolveReportOrigin("Manual", "agent-serial")).toBe("Local");
   });
 
-  it("3. scheduled-shutdown → Automação", () => {
-    // O RPC do desligamento programado grava `backend-reset:scheduled_shutdown_aN`.
-    expect(resolveReportOrigin("Automático", "backend-reset:scheduled_shutdown_a1")).toBe("Automação");
-    expect(resolveReportOrigin("Automático", "backend-reset:scheduled_shutdown_a3_forced")).toBe("Automação");
-  });
-
-  it("4. cloud-automation → Modo Automático", () => {
-    expect(resolveReportOrigin("Automático", AUTO_ENGINE_SOURCE)).toBe("Modo Automático");
-    expect(resolveReportOrigin("Automático", "cloud-automation")).toBe("Modo Automático");
-  });
-
-  it("4b. comparação é exata e tolera caixa/espaço, mas não prefixo", () => {
-    expect(resolveReportOrigin("Automático", "  Cloud-Automation ")).toBe("Modo Automático");
-    // um motor futuro com nome parecido NÃO pode virar Modo Automático por engano
-    expect(resolveReportOrigin("Automático", "cloud-automation-v2")).toBe("Automação");
-    expect(resolveReportOrigin("Automático", "peak-hour")).toBe("Automação");
+  it("transição física sem correlação (origin='system' no banco)", () => {
+    expect(resolveReportOrigin("Sistema", "auto-trigger")).toBe("Local");
+    expect(resolveReportOrigin("Sistema", null)).toBe("Local");
   });
 });
 
-describe("5 e 6. exclusividade", () => {
-  it("5. nenhuma origem automática usa o ícone da mão", () => {
-    for (const o of ["Automação", "Modo Automático"] as ReportOrigin[]) {
-      expect(REPORT_ORIGIN_ICON[o]).not.toBe("Hand");
+describe("o canal nunca vira categoria visual", () => {
+  it("existem exatamente duas origens, e são Remoto e Local", () => {
+    const chaves = Object.keys(REPORT_ORIGIN_ICON).sort();
+    expect(chaves).toEqual(["Local", "Remoto"]);
+    expect(Object.keys(REPORT_ORIGIN_ICON_CLASS).sort()).toEqual(chaves);
+    expect(Object.keys(REPORT_ORIGIN_BADGE).sort()).toEqual(chaves);
+  });
+
+  it("nenhum rótulo de canal sobrevive como origem", () => {
+    for (const canal of ["WhatsApp", "Automação", "Modo Automático", "Sistema"]) {
+      expect(["Remoto", "Local"]).toContain(resolveReportOrigin(canal, null));
     }
+    // e nenhum deles é chave do mapa de ícones
+    for (const canal of ["WhatsApp", "Automação", "Modo Automático", "Sistema"]) {
+      expect(Object.keys(REPORT_ORIGIN_ICON)).not.toContain(canal);
+    }
+  });
+
+  it("a mão é do Local e de mais ninguém", () => {
     expect(REPORT_ORIGIN_ICON["Local"]).toBe("Hand");
-  });
-
-  it("6. os quatro ícones do produto são todos diferentes", () => {
-    const quatro: ReportOrigin[] = ["Remoto", "Local", "Automação", "Modo Automático"];
-    const icones = quatro.map((o) => REPORT_ORIGIN_ICON[o]);
-    expect(new Set(icones).size).toBe(4);
-  });
-
-  it("6b. Modo Automático não cai no genérico quando falta source_device", () => {
-    // Sem o dado, o seguro é o genérico — nunca afirmar o específico.
-    expect(resolveReportOrigin("Automático", null)).toBe("Automação");
-    expect(resolveReportOrigin("Automático", undefined)).toBe("Automação");
-    expect(resolveReportOrigin("Automático", "")).toBe("Automação");
-  });
-});
-
-describe("7 a 9. o que NÃO pode mudar", () => {
-  it("7. Remoto permanece idêntico: monitor, azul", () => {
     expect(REPORT_ORIGIN_ICON["Remoto"]).toBe("Monitor");
-    expect(REPORT_ORIGIN_ICON_CLASS["Remoto"]).toBe("text-info");
-    expect(REPORT_ORIGIN_BADGE["Remoto"]).toBe("bg-info/10 text-info");
+    const icones: ReportOrigin[] = ["Remoto", "Local"];
+    expect(new Set(icones.map((o) => REPORT_ORIGIN_ICON[o])).size).toBe(2);
   });
 
-  it("8. Local permanece idêntico ao que o código já fazia", () => {
-    expect(REPORT_ORIGIN_ICON["Local"]).toBe("Hand");
-    expect(REPORT_ORIGIN_ICON_CLASS["Local"]).toBe("text-warning");
-    expect(REPORT_ORIGIN_BADGE["Local"]).toBe("bg-warning/15 text-warning border border-warning/30");
-  });
-
-  it("Automação e Modo Automático são AZUL (--info), como pedido", () => {
-    for (const o of ["Automação", "Modo Automático"] as ReportOrigin[]) {
-      expect(REPORT_ORIGIN_ICON_CLASS[o]).toBe("text-info");
-      expect(REPORT_ORIGIN_BADGE[o]).toBe("bg-info/10 text-info");
-    }
-  });
-
-  it("WhatsApp segue intocado", () => {
-    expect(resolveReportOrigin("WhatsApp", "whatsapp-webhook")).toBe("WhatsApp");
-    expect(REPORT_ORIGIN_ICON["WhatsApp"]).toBe("MessageCircle");
-  });
-
-  it("origem 'system' é transição sem origem comprovada, não 'Sistema'", () => {
-    // O banco grava origin='system' quando a transição física é real mas
-    // nenhuma correlação a explicou. Antes isso virava "Local / Acionamento
-    // local" — afirmação sobre o mundo físico sem prova. A tela precisa dizer
-    // o que de fato se sabe.
-    expect(resolveReportOrigin("Sistema", "auto-trigger")).toBe("Origem não identificada");
-    expect(resolveReportOrigin("Sistema", null)).toBe("Origem não identificada");
-    expect(REPORT_ORIGIN_ICON["Origem não identificada"]).toBe("Server");
-  });
-
-  it("origem crua desconhecida não vira rótulo inventado", () => {
-    expect(resolveReportOrigin("QualquerCoisa", "x")).toBe("QualquerCoisa");
-  });
-});
-
-describe("9 e 10. nome e layout", () => {
-  it("9. a resolução de ORIGEM não toca no NOME do evento", () => {
-    // resolveReportOrigin só recebe origin e source_device — não há caminho
-    // pelo qual ela possa alterar actor/nome da automação.
-    expect(resolveReportOrigin.length).toBe(2);
-  });
-
-  it("10. o tab renderiza ORIGEM pelos helpers, sem coluna nova", () => {
-    const tab = fs.readFileSync(path.resolve(__dirname,
-      "../components/reports/AutomacaoReportTab.tsx"), "utf8");
-    // a decisão vem do módulo puro, não de if solto no componente
-    expect(tab).toContain("resolveReportOrigin");
-    expect(tab).not.toContain('if (origin === "Automático") return "Automação"');
-    // continua passando item.sourceDevice em todos os pontos de origem
-    expect(tab).toContain("getOriginLabel(item.origin, item.sourceDevice)");
-    expect(tab).toContain("getOriginIcon(item.origin, item.sourceDevice)");
+  it("origem desconhecida não inventa categoria: cai em Remoto só se veio do sistema", () => {
+    // qualquer coisa que não seja Manual/Sistema representa comando do sistema
+    expect(resolveReportOrigin("QualquerCoisa", "x")).toBe("Remoto");
   });
 });

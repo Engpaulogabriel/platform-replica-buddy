@@ -329,10 +329,15 @@ const getActorLabel = (r: DbRow): string | null => {
  * - origin=local sem usuário → "Local (painel)" (acionamento físico anônimo)
  * - Sem nada acima → "Sistema" (será filtrado no relatório)
  */
+/** "WhatsApp · Yuri" → "Yuri". O canal é como a ordem chegou; a coluna NOME
+ *  responde QUEM agiu, e a coluna ORIGEM já diz que foi remoto. */
+const semCanal = (s: string): string =>
+  s.replace(/^\s*WhatsApp\s*(?:·|:|-|\u2013)\s*/i, "").trim();
+
 const resolveUser = (r: DbRow): string => {
   const actorLabel = getActorLabel(r);
   // actor_label já pronto no formato "WhatsApp · Nome" (insert direto do webhook) → usa.
-  if (actorLabel && actorLabel.startsWith("WhatsApp")) return actorLabel;
+  if (actorLabel && actorLabel.startsWith("WhatsApp")) return semCanal(actorLabel);
 
   // Comando WhatsApp gravado via trigger: o actor_label pode estar MIS-ATRIBUÍDO ao
   // owner (fallback do bot quando o operador WhatsApp não tem user_id vinculado — ex.:
@@ -342,7 +347,7 @@ const resolveUser = (r: DbRow): string => {
   if (waSrc.toLowerCase().startsWith("whatsapp:")) {
     const who = waSrc.slice(waSrc.indexOf(":") + 1).split("|")[0].trim();
     // só usa se for um nome (não só telefone/dígitos)
-    if (who && !/^\+?[\d\s()-]+$/.test(who)) return `WhatsApp · ${who}`;
+    if (who && !/^\+?[\d\s()-]+$/.test(who)) return who;
   }
 
   if (actorLabel) return actorLabel;

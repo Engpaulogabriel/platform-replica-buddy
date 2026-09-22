@@ -99,7 +99,12 @@ function getUserLabel(user?: string | null) {
  *  autoria provada não chega mais ao relatório oficial — ele fica na fila
  *  administrativa até o platform_admin decidir. Não há fallback genérico. */
 function UserCell({ item }: { item: AutomationLogEntry }) {
-  const label = getUserLabel(item.user);
+  const bruto = getUserLabel(item.user);
+  // Transição sem comando correlacionado não tem pessoa: o NOME diz o que
+  // aconteceu ("Acionamento local"), não quem foi — não inventamos ninguém.
+  const label = bruto === "—" && resolveReportOrigin(item.origin, item.sourceDevice) === "Local"
+    ? "Acionamento local"
+    : bruto;
   return <span className="text-foreground" title={item.confirmationMethod ?? undefined}>{label}</span>;
 }
 
