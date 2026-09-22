@@ -53,10 +53,12 @@ describe("freshness centralizada", () => {
     expect(corpoDe("function semComunicacao(")).toMatch(/if \(!\(ms > 0\)\) return true;/);
   });
 
-  it("as quatro decisões de comunicação passam pelo mesmo helper", () => {
-    // 1 definição + 4 consumidores: classificação, rótulo de listagem,
-    // bloqueio de comando e sufixo de não-confirmação.
-    expect([...src.matchAll(/semComunicacao\(/g)].length).toBe(5);
+  it("as cinco decisões de comunicação passam pelo mesmo helper", () => {
+    // 1 definição + 5 consumidores: classificação de bomba, rótulo de
+    // listagem, bloqueio de comando, sufixo de não-confirmação e linha de
+    // nível. Se este número subir sem um consumidor novo declarado aqui,
+    // alguém abriu uma sexta decisão de comunicação fora do helper.
+    expect([...src.matchAll(/semComunicacao\(/g)].length).toBe(6);
   });
 
   it("communication_status não decide mais nada em lugar nenhum", () => {
@@ -96,8 +98,8 @@ describe("janela de comunicação", () => {
     expect(src).toMatch(/async function timeoutsDasFazendas\(ids: string\[\]\)/);
     expect(src).toMatch(/\.in\("id", unicos\)/);
     expect(src).not.toMatch(/\.map\([^)]*await timeoutsDasFazendas/);
-    // 1 definição + 6 call sites, todos FORA de laço por equipamento.
-    expect([...src.matchAll(/timeoutsDasFazendas\(/g)].length).toBe(7);
+    // 1 definição + 7 call sites, todos FORA de laço por equipamento.
+    expect([...src.matchAll(/timeoutsDasFazendas\(/g)].length).toBe(8);
     // o sufixo de não-confirmação reaproveita a janela já carregada para o
     // comando, em vez de consultar uma vez por bomba dentro de polls.push
     expect(src).toMatch(/semComunicacao\(finalEq, __janelaCmd\)/);
@@ -179,5 +181,54 @@ describe("bloqueio de comando", () => {
 
   it("computeEqState não participa de nenhuma decisão de atuação", () => {
     expect(src).not.toMatch(/computeEqState\([^)]*\)[\s\S]{0,80}enqueue_remote_command/);
+  });
+});
+
+// ── 6 — níveis: comunicação separada da última medição ─────────────────────
+// Até 22/09/2026 a seção de níveis não tinha checagem de comunicação NENHUMA —
+// nem a regra antiga do flag. O RESERVATÓRIO 03 da Semear, mudo desde 13/08,
+// era renderizado igual aos que haviam lido segundos antes.
+describe("níveis", () => {
+  it("existe UM renderizador de linha de nível, compartilhado", () => {
+    expect(src).toMatch(/function linhasDeNivel\(/);
+    // usado nos dois caminhos: status geral e consulta de níveis
+    expect([...src.matchAll(/linhasDeNivel\(/g)].length).toBe(3);
+  });
+
+  it("a decisão de offline do nível usa o helper central, não uma regra nova", () => {
+    const corpo = corpoDe("function linhasDeNivel(");
+    expect(corpo).toMatch(/semComunicacao\(e, timeoutMin\)/);
+    expect(corpo).not.toMatch(/communication_status/);
+    expect(corpo).not.toMatch(/30\s*\*\s*60/);
+  });
+
+  it("offline mostra o estado primeiro e preserva a medição como histórico", () => {
+    const corpo = corpoDe("function linhasDeNivel(");
+    expect(corpo).toMatch(/⚫ \$\{e\.name\} — OFFLINE/);
+    expect(corpo).toMatch(/Última medição conhecida: \$\{curStr\} \/ \$\{maxStr\}/);
+    expect(corpo).toMatch(/Última leitura: \$\{fmt\(e\.level_last_raw_at\)\}/);
+  });
+
+  it("sem leitura alguma não inventa medição", () => {
+    expect(corpoDe("function linhasDeNivel(")).toMatch(/Sem leitura disponível\./);
+  });
+
+  it("comunicando mantém exatamente o formato anterior", () => {
+    const corpo = corpoDe("function linhasDeNivel(");
+    expect(corpo).toMatch(/• \$\{e\.name\}: \$\{curStr\} \/ \$\{maxStr\} \(\$\{pctStr\}\)/);
+    expect(corpo).toMatch(/\$\{bar\(percent\)\} \$\{pctStr\}/);
+  });
+
+  it("as duas consultas de nível trazem last_communication", () => {
+    const selects = [...src.matchAll(/\.select\("id[^"]*level_last_raw_at"\)/g)].map((m) => m[0]);
+    expect(selects.length).toBe(2);
+    for (const sel of selects) expect(sel).toMatch(/last_communication/);
+  });
+
+  it("offline não contamina o Resumo de Captação", () => {
+    // percent devolvido é null quando offline, então não entra em média nem
+    // em taxa de variação por hora.
+    expect(corpoDe("function linhasDeNivel(")).toMatch(/offline: true, percent: null/);
+    expect(src).toMatch(/if \(r0\.offline\) continue;/);
   });
 });

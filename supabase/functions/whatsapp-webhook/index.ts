@@ -2130,6 +2130,53 @@ async function timeoutsDasFazendas(ids: string[]): Promise<Map<string, number>> 
 }
 
 /**
+ * Uma linha de nível. Separa duas perguntas que antes eram respondidas juntas:
+ * "está comunicando?" e "qual foi a última medição?".
+ *
+ * Até 22/09/2026 os níveis não tinham checagem de comunicação NENHUMA — nem a
+ * regra antiga do flag persistido. O RESERVATÓRIO 03 da Semear, mudo desde
+ * 13/08, aparecia como "2.58m / 5.00m (52%)" idêntico aos que haviam lido
+ * segundos antes. O valor estava certo; o que faltava era dizer que ele é
+ * histórico.
+ *
+ * A medição NÃO é apagada quando offline: o operador precisa saber qual foi a
+ * última leitura conhecida e quando ela chegou.
+ */
+function linhasDeNivel(
+  e: any,
+  timeoutMin: number,
+  computeLevel: (x: any) => { meters: number | null; percent: number | null },
+  bar: (p: number) => string,
+  fmt: (iso?: string | null) => string,
+): { linhas: string[]; offline: boolean; percent: number | null } {
+  const { meters, percent } = computeLevel(e);
+  const maxM = Number(e.level_max_meters);
+  const hasMax = Number.isFinite(maxM) && maxM > 0;
+  const curStr = meters !== null ? `${meters.toFixed(2)}m` : "—";
+  const maxStr = hasMax ? `${maxM.toFixed(2)}m` : "—";
+  const pctStr = percent !== null ? `${percent.toFixed(0)}%` : "—";
+  const temMedicao = meters !== null || percent !== null;
+
+  if (!semComunicacao(e, timeoutMin)) {
+    const linhas = [`• ${e.name}: ${curStr} / ${maxStr} (${pctStr})`];
+    if (percent !== null) linhas.push(`  ${bar(percent)} ${pctStr}`);
+    linhas.push(`  Última leitura: ${fmt(e.level_last_raw_at)}`);
+    return { linhas, offline: false, percent };
+  }
+
+  // OFFLINE: o estado de comunicação vem primeiro, a medição vira histórico.
+  const linhas = [`• ⚫ ${e.name} — OFFLINE`];
+  if (temMedicao) {
+    linhas.push(`  Última medição conhecida: ${curStr} / ${maxStr} (${pctStr})`);
+    linhas.push(`  Última leitura: ${fmt(e.level_last_raw_at)}`);
+  } else {
+    linhas.push("  Sem leitura disponível.");
+  }
+  // percent null: offline não entra em média nem em taxa de variação.
+  return { linhas, offline: true, percent: null };
+}
+
+/**
  * ÚNICA definição de "sem comunicação" do WhatsApp. Toda decisão que dependa
  * de comunicação — classificação, bloqueio de comando, rótulo de listagem —
  * passa por aqui, para não existirem três regras divergentes dentro da mesma
@@ -9601,7 +9648,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
       });
       const { data: levelRows, error: levelErr } = await supabase
         .from("equipments")
-        .select("id, farm_id, name, level_cal_digital, level_cal_meters, level_max_meters, max_height, level_last_raw, level_last_raw_at")
+        .select("id, farm_id, name, last_communication, level_cal_digital, level_cal_meters, level_max_meters, max_height, level_last_raw, level_last_raw_at")
         .in("farm_id", farmIds)
         .eq("type", "nivel")
         .order("name", { ascending: true });
@@ -9652,16 +9699,11 @@ async function processMessage(from: string, text: string, location: WaLocation =
             const farmLevels = levelList.filter((e) => e.farm_id === farm.id);
             if (!farmLevels.length) continue;
             const lines: string[] = [`💧 Níveis — ${farm.name}:`, ""];
+            const janelaNivel = __janelas.get(farm.id) ?? DEFAULT_COMM_TIMEOUT_MIN;
             for (const e of farmLevels) {
-              const { meters, percent } = computeLevel(e);
-              const maxM = Number(e.level_max_meters);
-              const hasMax = Number.isFinite(maxM) && maxM > 0;
-              const curStr = meters !== null ? `${meters.toFixed(2)}m` : "—";
-              const maxStr = hasMax ? `${maxM.toFixed(2)}m` : "—";
-              const pctStr = percent !== null ? `${percent.toFixed(0)}%` : "—";
-              lines.push(`• ${e.name}: ${curStr} / ${maxStr} (${pctStr})`);
-              if (percent !== null) lines.push(`  ${bar(percent)} ${pctStr}`);
-              lines.push(`  Última leitura: ${fmtLevelTime(e.level_last_raw_at)}`);
+              lines.push(
+                ...linhasDeNivel(e, janelaNivel, computeLevel, bar, fmtLevelTime).linhas,
+              );
             }
             levelBlocks.push(lines.join("\n"));
           }
@@ -9746,7 +9788,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
     }
     const { data: rows } = await supabase
       .from("equipments")
-      .select("id, name, type, level_cal_digital, level_cal_meters, level_max_meters, max_height, level_last_raw, level_last_raw_at")
+      .select("id, name, type, last_communication, level_cal_digital, level_cal_meters, level_max_meters, max_height, level_last_raw, level_last_raw_at")
       .eq("farm_id", targetFarmId)
       .eq("type", "nivel")
       .order("name", { ascending: true });
@@ -9861,20 +9903,18 @@ async function processMessage(from: string, text: string, location: WaLocation =
     const rateSamples: number[] = [];
     const lastPctById = new Map<string, number>();
 
+    const janelaNiveis = (await timeoutsDasFazendas([targetFarmId])).get(targetFarmId)
+      ?? DEFAULT_COMM_TIMEOUT_MIN;
     for (const e of list) {
-      const { meters, percent } = computeLevel(e);
-      const maxM = Number(e.level_max_meters);
-      const hasMax = Number.isFinite(maxM) && maxM > 0;
-      const curStr = meters !== null ? `${meters.toFixed(2)}m` : "—";
-      const maxStr = hasMax ? `${maxM.toFixed(2)}m` : "—";
-      const pctStr = percent !== null ? `${percent.toFixed(0)}%` : "—";
-      lines.push(`• ${e.name}: ${curStr} / ${maxStr} (${pctStr})`);
-      if (percent !== null) {
-        lines.push(`  ${bar(percent)} ${pctStr}`);
-        pctSamples.push(percent);
-        lastPctById.set(e.id, percent);
+      const r0 = linhasDeNivel(e, janelaNiveis, computeLevel, bar, fmtLevelTime);
+      lines.push(...r0.linhas);
+      // Offline não entra no Resumo de Captação: média e taxa de variação só
+      // fazem sentido sobre leituras atuais.
+      if (r0.percent !== null) {
+        pctSamples.push(r0.percent);
+        lastPctById.set(e.id, r0.percent);
       }
-      lines.push(`  Última leitura: ${fmtLevelTime(e.level_last_raw_at)}`);
+      if (r0.offline) continue;
       const r = ratePerHour(e.id);
       if (r !== null && Number.isFinite(r)) rateSamples.push(r);
     }
