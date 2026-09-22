@@ -169,6 +169,12 @@ BEGIN
      WHERE c.equipment_id = _equipment_id
        AND c.type = 'manual'::public.command_type
        AND COALESCE(c.source_device,'') NOT LIKE 'backend-reset:%'
+       -- comando que terminou SEM confirmar não explica transição nenhuma:
+       -- depois do timeout, uma mudança física é espontânea até prova em
+       -- contrário, e o relatório deve dizer Local.
+       AND c.status NOT IN ('timeout'::public.command_status,
+                            'error'::public.command_status,
+                            'cancelled'::public.command_status)
        AND c.created_at BETWEEN _at - _window AND _at + _window
     UNION ALL
     SELECT ca.command_id, ca.command_created_at, ca.source_device,
@@ -176,6 +182,7 @@ BEGIN
       FROM public.command_audit ca
      WHERE ca.equipment_id = _equipment_id
        AND COALESCE(ca.source_device,'') NOT LIKE 'backend-reset:%'
+       AND COALESCE(ca.status_final,'') NOT IN ('timeout','error','cancelled')
        AND ca.command_created_at BETWEEN _at - _window AND _at + _window
   )
   SELECT cand.cid, cand.src, cand.uid, p.full_name, p.email

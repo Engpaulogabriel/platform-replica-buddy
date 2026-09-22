@@ -38,6 +38,7 @@ CREATE TYPE public.event_origin AS ENUM ('remote','local','auto','reading','syst
 CREATE TYPE public.event_action AS ENUM ('turn_on','turn_off','pump_on','pump_off','status_read');
 CREATE TYPE public.event_result AS ENUM ('success','fail','pending','timeout');
 CREATE TYPE public.command_type AS ENUM ('manual','polling','config');
+CREATE TYPE public.command_status AS ENUM ('pending','sent','delivered','executed','timeout','error','cancelled');
 
 CREATE TABLE public.profiles (
   id uuid PRIMARY KEY, email text, full_name text);
@@ -51,7 +52,7 @@ CREATE TABLE public.equipments (
 
 CREATE TABLE public.commands (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), farm_id uuid, equipment_id uuid,
-  client_event_id uuid, type public.command_type, frame text, status text DEFAULT 'pending',
+  client_event_id uuid, type public.command_type, frame text, status public.command_status DEFAULT 'pending',
   source_device text, created_by uuid, created_at timestamptz DEFAULT now(),
   sent_at timestamptz, responded_at timestamptz);
 

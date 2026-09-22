@@ -93,27 +93,11 @@ describe("TESTE D — comando não confirmado", () => {
     expect(await linhasDoRelatorio(db)).toHaveLength(0);
   });
 
-  it("o TX 0 de segurança sem confirmação também não é acionamento", async () => {
-    // Assinatura real da Sossego/POÇO 04: 13 linhas "Desligada / Local" em uma
-    // noite, todas de 'backend-reset:turn_on_timeout', com command_status
-    // 'error' e "TX 0 de seguranca sem confirmacao apos 60s" no próprio
-    // details — e mesmo assim result='success' na linha do log.
-    // Condição REAL: o eco do comando já tinha marcado a bomba como ligada,
-    // então o TX 0 de segurança parece mudança de estado. Num banco limpo a
-    // linha seria descartada como repetição e o teste passaria por engano.
-    const db = await preparar(ON);
-    await db.query(`
-      INSERT INTO public.automation_log
-        (farm_id, equipment_id, equipment_name, occurred_at, origin, action, result,
-         source_device, details)
-      VALUES ($1,$2,'POÇO 04', now(), 'system','turn_off','success',
-              'backend-reset:turn_on_timeout',
-              jsonb_build_object('systemic', true, 'command_status','error',
-                                 'error_message','TX 0 de seguranca sem confirmacao apos 60s'))`,
-      [UUID.fazenda, UUID.poco]);
-
-    expect(await linhasDoRelatorio(db)).toHaveLength(0);
-  });
+  // O TX 0 de segurança sem confirmação e o eco do comando passaram a ser
+  // T11 e T12 de ledger-canonical.integration: lá a telemetria entra por
+  // `apply_pump_telemetry`, que é onde esses dois casos realmente nascem.
+  // Aqui o harness dirige `UPDATE last_outputs_state` e não vê o segundo
+  // produtor — foi essa diferença que me escondeu o problema.
 });
 
 // ── TESTE E — transição realmente local ────────────────────────────────────
@@ -130,18 +114,3 @@ describe("TESTE E — transição espontânea sem comando", () => {
 });
 
 // ── o caso que realmente aconteceu na Sossego ──────────────────────────────
-describe("eco do comando seguido do estado real", () => {
-  it("ACK 1 e depois RX 0 com alvo 1 não pode virar 'Desligada'", async () => {
-    // POÇO 02 da Sossego, 16/09: 09:14:39 Ligada/Automático e 09:14:41
-    // Desligada/Local — dois segundos. Bomba nenhuma liga e desliga em 2s.
-    const db = await preparar(OFF);
-    await comandar(db, frameOn, "cloud-automation");
-    await telemetria(db, ON);    // eco/ACK do comando
-    await telemetria(db, OFF);   // estado real: ainda não partiu
-    await telemetria(db, ON);    // partiu de verdade
-
-    const linhas = await linhasDoRelatorio(db);
-    expect(acoes(linhas)).toEqual(["turn_on/remote"]);
-    expect(acoes(linhas)).not.toContain("turn_off/local");
-  });
-});
