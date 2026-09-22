@@ -1439,6 +1439,92 @@ function parseCommand(text: string): ParsedCmd {
 
 
 // Extrai todos os inteiros do nome (ex: "Poço 02" → [2]).
+// ─────────────────────────────────────────────────────────────────────────────
+// IDENTIDADE NUMÉRICA DO EQUIPAMENTO
+// ─────────────────────────────────────────────────────────────────────────────
+// Em 22/09/2026, de madrugada, três bombas erradas foram LIGADAS na Semear:
+//
+//   "Ligar poço 01"            → comandou POÇO 02 R1   (pegou o 1 do sufixo R1)
+//   "Ligar poço 03, 12, 13…"   → comandou POÇO 15 R3   (pegou o 3 do sufixo R3)
+//   "Ligar poço 4"             → comandou POÇO 16 R4   (pegou o 4 do sufixo R4)
+//
+// A causa: o casamento usava `extractNumbers(nome).includes(n)` — QUALQUER
+// número em QUALQUER posição do nome. "POÇO 15 R3" devolve [15, 3], então
+// casava com o pedido "3". Pior: quem escolhia era `pool.find`, o primeiro da
+// lista. No pool da Semear, POÇO 15 R3 vem na posição 2 e POÇO 03 R2 na 16.
+//
+// O sufixo R1/R2/R3/R4/R1-R4 é nomenclatura de rádio, não identidade. O número
+// do equipamento é o que vem IMEDIATAMENTE depois da palavra-base.
+const BASES_DE_IDENTIDADE =
+  "po[çc]o|bomba|booster|conjunto|reservat[óo]rio|canal|recalque|pivo|piv[ôo]";
+
+/**
+ * Número LÓGICO do equipamento: o que vem logo após a palavra-base do nome.
+ *
+ *   "POÇO 15 R3"              → 15   (não 3)
+ *   "POÇO 03 R2"              →  3
+ *   "POÇO 04 R1/R4"           →  4
+ *   "RESERVATÓRIO 02 POÇO 02" →  2   (é reservatório; a base é a primeira)
+ *   "POÇO 17 NV15/16"         → 17
+ *   "Bomba 1" / "Conjunto 01" →  1
+ *
+ * Sem número após a base, cai no primeiro número do nome — preserva casos como
+ * "Canal Velho - Pivô 18", onde a identidade está adiante. Sem número nenhum,
+ * devolve null e o equipamento simplesmente não casa por número.
+ */
+function numeroLogicoDoEquipamento(nome: string): number | null {
+  const n = String(nome ?? "");
+  const apos = n.match(new RegExp(`(?:${BASES_DE_IDENTIDADE})\\s*0*(\\d+)`, "i"));
+  if (apos) return parseInt(apos[1], 10);
+  const primeiro = n.match(/0*(\d+)/);
+  return primeiro ? parseInt(primeiro[1], 10) : null;
+}
+
+/**
+ * Resolve UM equipamento pelo número lógico dentro do pool. Fail-closed:
+ * devolve o equipamento só quando há exatamente um candidato. Com dois ou
+ * mais, devolve a lista para desambiguar — escolher sozinho aqui significaria
+ * acionar bomba por sorteio de ordem, que foi o defeito original.
+ */
+function resolverPorNumeroLogico(
+  pool: any[],
+  n: number,
+  base?: string | null,
+): { eq: any | null; ambiguos: any[] } {
+  const cands = (pool ?? []).filter((e) => casaNumeroLogico(e?.name ?? "", n, base));
+  if (cands.length === 1) return { eq: cands[0], ambiguos: [] };
+  return { eq: null, ambiguos: cands };
+}
+
+/** Base PRIMÁRIA do nome: a primeira palavra-base que aparece. */
+function basePrimariaDoEquipamento(nome: string): string | null {
+  const m = String(nome ?? "").match(new RegExp(`(${BASES_DE_IDENTIDADE})`, "i"));
+  if (!m) return null;
+  const b = stripAccents(m[1].toLowerCase());
+  return b === "poco" ? "poço" : b === "reservatorio" ? "reservatório" : b;
+}
+
+/**
+ * O equipamento é o de número `n`? Compara identidade com identidade — nunca
+ * um número solto do nome. É o guard que separa "poço 3" de "POÇO 15 R3".
+ *
+ * Com `base` informada, exige também que a base PRIMÁRIA do nome seja aquela.
+ * Sem isso, "RESERVATÓRIO 02 POÇO 02" (São Miguel) e "Canal Novo - Poço 13"
+ * (Terra Norte) entram no pool de "poço" e disputam o número com o poço de
+ * verdade — um deles é sensor de nível.
+ */
+function casaNumeroLogico(nome: string, n: number, base?: string | null): boolean {
+  if (numeroLogicoDoEquipamento(nome) !== n) return false;
+  if (!base) return true;
+  const alvo = stripAccents(String(base).toLowerCase());
+  const prim = basePrimariaDoEquipamento(nome);
+  if (!prim) return true;                      // nome sem base: não descarta
+  const primN = stripAccents(prim);
+  // "poço" e "bomba" são intercambiáveis em fala de operador.
+  const equivalentes = (x: string) => (x === "poco" || x === "bomba") ? "poco|bomba" : x;
+  return equivalentes(primN) === equivalentes(alvo);
+}
+
 function extractNumbers(s: string): number[] {
   return Array.from(String(s ?? "").matchAll(/\d+/g)).map((m) =>
     parseInt(m[0], 10),
@@ -2070,8 +2156,7 @@ async function resolveEquipmentsForBase(
   }
   if (nums.length === 0) return pool;
   return pool.filter((e) => {
-    const ns = extractNumbers(e.name);
-    return nums.some((n) => ns.includes(n));
+    return nums.some((n) => casaNumeroLogico(e.name, n, base));
   });
 }
 
@@ -2084,7 +2169,7 @@ async function suggestEquipments(farmId: string, base: string, nums: number[]): 
     if (!names.length) return "";
     let cand = names;
     if (nums.length) {
-      const byNum = names.filter((n) => nums.some((x) => extractNumbers(n).includes(x)));
+      const byNum = names.filter((n) => nums.some((x) => casaNumeroLogico(n, x)));
       if (byNum.length) cand = byNum;
     } else if (base) {
       const b = stripAccents(String(base).toLowerCase());
@@ -8280,7 +8365,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
           bulkMatches = pool;
         } else if (nums.length > 0) {
           bulkMatches = nums
-            .map((n) => pool.find((e) => extractNumbers(e.name).includes(n)))
+            .map((n) => pool.find((e) => casaNumeroLogico(e.name, n)))
             .filter(Boolean) as any[];
         } else {
           await sendWhatsAppText(
@@ -8895,7 +8980,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
         matches = pool;
       } else if (nums.length > 0) {
         matches = nums
-          .map((n) => pool.find((e) => extractNumbers(e.name).includes(n)))
+          .map((n) => pool.find((e) => casaNumeroLogico(e.name, n)))
           .filter(Boolean) as any[];
       } else if (isBlock && isPluralBaseWithoutNumbers(rest)) {
         // "parar bombas para manutenção" → pergunta quais.
@@ -9810,8 +9895,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
     }
     if (cmd.nums.length) {
       list = list.filter((e) => {
-        const ns = extractNumbers(e.name);
-        return cmd.nums.some((n) => ns.includes(n));
+        return cmd.nums.some((n) => casaNumeroLogico(e.name, n));
       });
     }
 
@@ -10182,13 +10266,11 @@ async function processMessage(from: string, text: string, location: WaLocation =
         const name = String(eqMap.get(r.equipment_id) ?? "").toLowerCase();
         if (!variants.some((v) => name.includes(v))) return false;
         if (cmd.nums.length === 0) return true;
-        const ns = extractNumbers(eqMap.get(r.equipment_id) ?? "");
-        return cmd.nums.some((n) => ns.includes(n));
+        return cmd.nums.some((n) => casaNumeroLogico(eqMap.get(r.equipment_id) ?? "", n));
       });
     } else if (cmd.nums.length) {
       rows = rows.filter((r) => {
-        const ns = extractNumbers(eqMap.get(r.equipment_id) ?? "");
-        return cmd.nums.some((n) => ns.includes(n));
+        return cmd.nums.some((n) => casaNumeroLogico(eqMap.get(r.equipment_id) ?? "", n));
       });
     }
     if (!rows.length) {
@@ -10269,7 +10351,10 @@ async function processMessage(from: string, text: string, location: WaLocation =
     let notFoundLines: string[] = [];
     if (cmd.nums.length > 0) {
       const foundNums = new Set<number>();
-      for (const eq of eqs) for (const n of extractNumbers(eq.name)) foundNums.add(n);
+      for (const eq of eqs) {
+        const ln = numeroLogicoDoEquipamento(eq.name);
+        if (ln !== null) foundNums.add(ln);
+      }
       const missing = cmd.nums.filter((n) => !foundNums.has(n));
       if (missing.length) {
         const baseLabel = cmd.base.charAt(0).toUpperCase() + cmd.base.slice(1);
@@ -10652,7 +10737,7 @@ async function processMessage(from: string, text: string, location: WaLocation =
   console.log(`WA EQ LOOKUP — base="${op0.base}" pool=${pool.length} nums=${JSON.stringify(op0.nums)}`);
 
   const findByNum = (num: number): any | null => {
-    return pool.find((e) => extractNumbers(e.name).includes(num)) ?? null;
+    return pool.find((e) => casaNumeroLogico(e.name, num)) ?? null;
   };
 
   // Regra "dígitos colados": se o usuário enviou UM número de 3+ dígitos
@@ -11388,9 +11473,31 @@ async function createAutomacaoFromText(
           if (!seen.has(r.id)) { seen.add(r.id); pool.push(r); }
         }
       }
-      const matches: any[] = nums.length
-        ? nums.map((n) => pool.find((e) => extractNumbers(e.name).includes(n))).filter(Boolean) as any[]
-        : pool;
+      const matches: any[] = [];
+      const ambiguidades: Array<{ n: number; nomes: string[] }> = [];
+      if (nums.length) {
+        for (const n of nums) {
+          const r = resolverPorNumeroLogico(pool, n, base);
+          if (r.eq) matches.push(r.eq);
+          else if (r.ambiguos.length > 1) {
+            ambiguidades.push({ n, nomes: r.ambiguos.map((e) => e.name) });
+          }
+        }
+      } else {
+        matches.push(...pool);
+      }
+      // Ambiguidade NÃO vira comando: isto liga bomba. Pergunta e para.
+      if (ambiguidades.length) {
+        const linhas = ambiguidades.map((a) =>
+          `• Número ${a.n}: ${a.nomes.join(" | ")}`).join("\n");
+        await sendWhatsAppText(
+          from,
+          `❓ Mais de um equipamento com esse número:\n\n${linhas}\n\n` +
+          "Responda com o nome completo do equipamento. Nenhum comando foi enviado.",
+          farmId,
+        );
+        return true;
+      }
       if (matches.length === 0) {
         await sendWhatsAppText(from, "❌ Nenhum equipamento encontrado. Verifique o nome/número.", farmId);
         return true;
