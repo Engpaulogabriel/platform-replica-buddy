@@ -1,0 +1,102 @@
+[
+ {
+  "origin": "Automático",
+  "user": "Automático 21:02",
+  "n": 7
+ },
+ {
+  "origin": "Automático",
+  "user": "Automático 21:03",
+  "n": 31
+ },
+ {
+  "origin": "Automático",
+  "user": "Automático 21:04",
+  "n": 9
+ },
+ {
+  "origin": "Automático",
+  "user": "Automático 21:05",
+  "n": 8
+ },
+ {
+  "origin": "Automático",
+  "user": "Desligamento 17h Semear",
+  "n": 283
+ },
+ {
+  "origin": "Automático",
+  "user": "Desligamento 17h45 Sossego",
+  "n": 7
+ },
+ {
+  "origin": "Automático",
+  "user": "Desligamento 17h58 Sossego",
+  "n": 26
+ },
+ {
+  "origin": "Manual",
+  "user": "Acionamento local",
+  "n": 5454
+ },
+ {
+  "origin": "Remoto",
+  "user": "Admin Renov",
+  "n": 68
+ },
+ {
+  "origin": "Remoto",
+  "user": "Alcione",
+  "n": 22
+ },
+ {
+  "origin": "Remoto",
+  "user": "Irrigação",
+  "n": 12
+ },
+ {
+  "origin": "Remoto",
+  "user": "Irrigação Sykue",
+  "n": 31
+ },
+ {
+  "origin": "Remoto",
+  "user": "Irrigação Terra Norte",
+  "n": 934
+ },
+ {
+  "origin": "Remoto",
+  "user": "Jailton",
+  "n": 165
+ },
+ {
+  "origin": "Remoto",
+  "user": "Jonatan poczwardowski",
+  "n": 3
+ },
+ {
+  "origin": "Remoto",
+  "user": "Kennedy Souza Luz",
+  "n": 1
+ },
+ {
+  "origin": "Remoto",
+  "user": "Perola",
+  "n": 221
+ },
+ {
+  "origin": "Remoto",
+  "user": "Yuri Seibert",
+  "n": 406
+ },
+ {
+  "origin": "Sistema",
+  "user": "Sistema",
+  "n": 4
+ },
+ {
+  "origin": "WhatsApp",
+  "user": "Alcione",
+  "n": 9
+ }
+]

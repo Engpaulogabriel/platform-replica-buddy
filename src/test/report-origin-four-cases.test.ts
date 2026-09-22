@@ -70,8 +70,10 @@ describe("o canal nunca vira categoria visual", () => {
     expect(new Set(icones.map((o) => REPORT_ORIGIN_ICON[o])).size).toBe(2);
   });
 
-  it("origem desconhecida não inventa categoria: cai em Remoto só se veio do sistema", () => {
-    // qualquer coisa que não seja Manual/Sistema representa comando do sistema
-    expect(resolveReportOrigin("QualquerCoisa", "x")).toBe("Remoto");
+  it("origem desconhecida NÃO vira Remoto", () => {
+    // Remoto significa responsabilidade remota COMPROVADA. Um rótulo que não
+    // conhecemos não é prova de comando; tratá-lo como Remoto era inventar
+    // responsável. Sem prova, a linha é Local.
+    expect(resolveReportOrigin("QualquerCoisa", "x")).toBe("Local");
   });
 });

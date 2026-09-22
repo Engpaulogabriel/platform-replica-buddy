@@ -9,7 +9,8 @@ import { useFarmAccess } from "@/hooks/useFarmAccess";
 import { exportAutomacaoCSV, exportAutomacaoPDF } from "@/lib/reportExport";
 import { notifyReport } from "@/lib/notify";
 import {
-  resolveReportOrigin, REPORT_ORIGIN_ICON, REPORT_ORIGIN_ICON_CLASS, REPORT_ORIGIN_BADGE,
+  deriveReportAttribution, resolveReportOrigin,
+  REPORT_ORIGIN_ICON, REPORT_ORIGIN_ICON_CLASS, REPORT_ORIGIN_BADGE,
 } from "@/lib/reportOrigin";
 import { guardExport } from "@/lib/securityClient";
 import { toast } from "sonner";
@@ -99,12 +100,10 @@ function getUserLabel(user?: string | null) {
  *  autoria provada não chega mais ao relatório oficial — ele fica na fila
  *  administrativa até o platform_admin decidir. Não há fallback genérico. */
 function UserCell({ item }: { item: AutomationLogEntry }) {
-  const bruto = getUserLabel(item.user);
-  // Transição sem comando correlacionado não tem pessoa: o NOME diz o que
-  // aconteceu ("Acionamento local"), não quem foi — não inventamos ninguém.
-  const label = bruto === "—" && resolveReportOrigin(item.origin, item.sourceDevice) === "Local"
-    ? "Acionamento local"
-    : bruto;
+  // O nome já vem de deriveReportAttribution, junto com a origem. Aqui não se
+  // decide nada: Remoto sem ator comprovável mostra travessão, nunca
+  // "Acionamento local".
+  const label = item.user?.trim() ? item.user : "—";
   return <span className="text-foreground" title={item.confirmationMethod ?? undefined}>{label}</span>;
 }
 
@@ -258,12 +257,17 @@ export default function AutomacaoReportTab({ farmId, fromDate, toDate, selectedP
   // Tela, CSV e PDF consomem ESTE array. Não existe mais transformação de
   // rótulo separada por formato: a origem e o usuário são resolvidos uma única
   // vez, então os três mostram exatamente as mesmas linhas e os mesmos IDs.
+  // ORIGEM e NOME saem juntos, de uma única derivação semântica. Antes eram
+  // dois caminhos independentes, e a origem ainda era resolvida DE NOVO na
+  // renderização — a segunda passada recebia "Local", que não casava com
+  // nenhum rótulo interno, e devolvia "Remoto". A tela mostrou
+  // "Remoto · Acionamento local" na Sykue. Agora existe um valor só, calculado
+  // uma vez, e a derivação é idempotente.
   const canonicalRows = useMemo(
-    () => filteredLog.map(r => ({
-      ...r,
-      origin: getOriginLabel(r.origin, r.sourceDevice) as AutomationLogEntry["origin"],
-      user: getUserLabel(r.user),
-    })),
+    () => filteredLog.map(r => {
+      const { origin, name } = deriveReportAttribution(r);
+      return { ...r, origin: origin as AutomationLogEntry["origin"], user: name };
+    }),
     [filteredLog],
   );
 
