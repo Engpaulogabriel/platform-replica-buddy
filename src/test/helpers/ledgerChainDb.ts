@@ -16,6 +16,7 @@ import { PGlite } from "@electric-sql/pglite";
 
 const FIXTURE = "src/test/fixtures/new-live-functions.sql";
 const MIGRATION = "supabase/migrations/20260922170000_canonical_ledger_single_writer.sql";
+const AUTORIA = "supabase/migrations/20260922210000_remote_mechanism_authorship.sql";
 
 const SCHEMA = `
 CREATE TYPE public.event_origin  AS ENUM ('remote','local','auto','reading','system','whatsapp');
@@ -87,6 +88,19 @@ CREATE TABLE public.automation_log_noise_stats (
   farm_id uuid, equipment_id uuid, day date, reason text, hits int DEFAULT 0,
   updated_at timestamptz DEFAULT now(), PRIMARY KEY (farm_id, equipment_id, day, reason));
 
+CREATE TABLE public.automation_execution_log (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), schedule_id uuid, equipment_id uuid,
+  farm_id uuid, action text, scheduled_time text, executed_at timestamptz,
+  status text, origin text, details jsonb DEFAULT '{}'::jsonb);
+
+CREATE FUNCTION public.automatic_mode_actor_label(_command_id uuid)
+RETURNS text LANGUAGE sql STABLE AS $f$
+  SELECT COALESCE(
+    (SELECT 'Automático ' || l.scheduled_time FROM public.automation_execution_log l
+      WHERE l.details->>'command_id' = _command_id::text AND l.scheduled_time IS NOT NULL
+      ORDER BY l.executed_at DESC LIMIT 1), 'Modo Automático');
+$f$;
+
 CREATE TABLE public.scheduled_automations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), farm_id uuid, name text,
   is_active boolean DEFAULT true, time_brt text, days_of_week text[],
@@ -137,7 +151,12 @@ export async function bancoDoLedger(comCorrecao = true): Promise<PGlite> {
   await db.exec(SCHEMA);
   await db.exec(semGrants(readFileSync(FIXTURE, "utf8")));
   await db.exec(GATILHOS);
-  if (comCorrecao) await db.exec(semGrants(readFileSync(MIGRATION, "utf8")));
+  if (comCorrecao) {
+    await db.exec(semGrants(readFileSync(MIGRATION, "utf8")));
+    // só o bloco do classificador: a correção histórica é por ID de produção
+    const autoria = readFileSync(AUTORIA, "utf8");
+    await db.exec(semGrants(autoria.slice(0, autoria.indexOf("-- ── 2) CORREÇÃO HISTÓRICA"))));
+  }
 
   // PLC de uma saída, como as bombas da Sossego
   await db.exec(`

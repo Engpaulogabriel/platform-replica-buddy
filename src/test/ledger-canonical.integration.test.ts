@@ -212,3 +212,79 @@ describe("ledger canônico", () => {
     expect(await violacoesDaInvariante(db)).toBe(0);
   });
 });
+
+// ── autoria de mecanismo remoto sem usuário humano ────────────────────────
+describe("Modo Automático é responsabilidade remota comprovada", () => {
+  it("T15 — comando cloud-automation + transição física → Remoto com nome da regra", async () => {
+    const db = await bancoDoLedger();
+    // o motor cria o comando sem created_by, como em produção
+    const r = await db.query<any>(
+      `INSERT INTO public.commands
+         (farm_id, equipment_id, plc_hw_id, type, frame, source_device, created_by, status, sent_at)
+       VALUES ($1,$2,'1101','manual','[1101_1_]{1}[1101_ETX_]','cloud-automation',NULL,'sent',now())
+       RETURNING id`, [ID.fazenda, ID.poco]);
+    const cmd = r.rows[0].id;
+    await db.query(`UPDATE public.equipments SET pending_command_id=$1, desired_running=true WHERE id=$2`,
+      [cmd, ID.poco]);
+    await db.query(
+      `INSERT INTO public.automation_execution_log
+         (equipment_id, farm_id, action, scheduled_time, executed_at, status, details)
+       VALUES ($1,$2,'liga','21:02', now(),'success', jsonb_build_object('command_id',$3::text))`,
+      [ID.poco, ID.fazenda, cmd]);
+
+    await rx(db, "1");
+
+    const l = await ledger(db);
+    expect(resumo(l)).toEqual(["turn_on/auto"]);
+    expect(l[0].actor_label).toBe("Automático 21:02");
+    expect(l[0].actor_label).not.toBe("Acionamento local");
+  });
+
+  it("T16 — sem regra nomeada, o rótulo é 'Modo Automático', nunca inventado", async () => {
+    const db = await bancoDoLedger();
+    const r = await db.query<any>(
+      `INSERT INTO public.commands
+         (farm_id, equipment_id, plc_hw_id, type, frame, source_device, created_by, status, sent_at)
+       VALUES ($1,$2,'1101','manual','[1101_1_]{1}[1101_ETX_]','cloud-automation',NULL,'sent',now())
+       RETURNING id`, [ID.fazenda, ID.poco]);
+    await db.query(`UPDATE public.equipments SET pending_command_id=$1, desired_running=true WHERE id=$2`,
+      [r.rows[0].id, ID.poco]);
+    await rx(db, "1");
+
+    const l = await ledger(db);
+    expect(l[0].origem).toBe("auto");
+    expect(l[0].actor_label).toBe("Modo Automático");
+  });
+
+  it("T17 — mecanismo técnico NÃO vira autoria operacional", async () => {
+    // backend-reset:local_shutdown_detected é CONSEQUÊNCIA de desligamento
+    // local; atribuí-lo como remoto inverteria causa e efeito.
+    const db = await bancoDoLedger();
+    await rx(db, "1", { origin: "local" });
+    await db.query(`DELETE FROM public.automation_log`);
+    await db.query(
+      `INSERT INTO public.commands
+         (farm_id, equipment_id, plc_hw_id, type, frame, source_device, created_by, status, sent_at)
+       VALUES ($1,$2,'1101','manual','[1101_1_]{0}[1101_ETX_]','backend-reset:local_shutdown_detected',
+               NULL,'sent',now())`, [ID.fazenda, ID.poco]);
+    await rx(db, "0", { origin: "local" });
+
+    const l = await ledger(db);
+    expect(resumo(l)).toEqual(["turn_off/local"]);
+    expect(l[0].actor_label).toBe("Acionamento local");
+  });
+
+  it("T18 — comando de automação que não confirmou não atribui nada", async () => {
+    const db = await bancoDoLedger();
+    await db.query(
+      `INSERT INTO public.commands
+         (farm_id, equipment_id, plc_hw_id, type, frame, source_device, created_by, status, sent_at, responded_at)
+       VALUES ($1,$2,'1101','manual','[1101_1_]{1}[1101_ETX_]','cloud-automation',NULL,'timeout',now(),now())`,
+      [ID.fazenda, ID.poco]);
+    await rx(db, "1", { origin: "local" });
+
+    const l = await ledger(db);
+    expect(l[0].origem).toBe("local");          // sem mecanismo responsável válido
+    expect(l[0].actor_label).toBe("Acionamento local");
+  });
+});

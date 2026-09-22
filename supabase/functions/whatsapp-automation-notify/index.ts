@@ -4,6 +4,18 @@
 // aos operadores ativos. Não interfere com whatsapp_pending_actions.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+
+// ── MIGRATION AWARENESS (fail-closed) ────────────────────────────────────────
+// Durante a convivência de dois backends, esta função roda nos DOIS e as duas
+// cópias do banco contêm as mesmas fazendas. Sem filtro, a instância do backend
+// NOVO notificaria sobre fazenda que ainda opera no ANTIGO — mensagem duplicada
+// para o operador, com dados velhos. Só processa fazenda cujo backend
+// operacional é ESTE; ausência de registro = não elegível.
+async function fazendasOperacionaisAqui(sb: any): Promise<Set<string>> {
+  const { data } = await sb.from("farm_operational_backend").select("farm_id").eq("backend", "new");
+  return new Set((data ?? []).map((r: any) => r.farm_id));
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -540,6 +552,24 @@ async function sendSingleWhatsAppMessage(args: {
   return true;
 }
 
+/**
+ * A execução foi no INÍCIO da janela ou é RECONCILIAÇÃO dentro de uma janela
+ * que já estava aberta?
+ *
+ * O motor é reconciliador: enquanto o estado desejado existir, ele religa a
+ * bomba — tenha passado 1 minuto ou 15 horas do horário programado. Em 22/09 a
+ * Sossego recebeu "Horário programado: 21:02 · Data: Ter, 22/09/2026" às
+ * 12:18, e 21:02 era de ONTEM: a janela 21:02→17:50 atravessa a meia-noite.
+ * O motor estava certo; a mensagem é que afirmava um horário do próprio dia.
+ *
+ * `late_minutes` é gravado pelo tick (run_automation_tick) e diz há quanto
+ * tempo o horário passou. Acima de 10 minutos não é disparo pontual: é
+ * restauração de estado dentro de uma janela ativa.
+ */
+function ehReconciliacao(rows: any[]): boolean {
+  return rows.some((r) => Number(r?.details?.late_minutes ?? 0) > 10);
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -623,13 +653,20 @@ Deno.serve(async (req) => {
   const sinceISO = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
 
-  const { data: rows, error } = await supabase
+  const elegiveis = await fazendasOperacionaisAqui(supabase);
+  const { data: rowsTodas, error } = await supabase
     .from("automation_execution_log")
     .select("id, farm_id, equipment_id, schedule_id, action, scheduled_time, executed_at, status, failure_reason, origin, details")
     .is("notified_at", null)
     .gte("executed_at", sinceISO)
     .in("status", ["success", "expired", "failed"])
     .order("executed_at", { ascending: true });
+
+  const rows = (rowsTodas ?? []).filter((r: any) => elegiveis.has(r.farm_id));
+  const ignoradas = (rowsTodas ?? []).length - rows.length;
+  if (ignoradas > 0) {
+    console.log(`[whatsapp-automation-notify] ${ignoradas} execução(ões) ignorada(s): fazenda não operacional neste backend`);
+  }
 
   if (error) {
     return new Response(JSON.stringify({ error: error.message }), {
@@ -912,21 +949,29 @@ Deno.serve(async (req) => {
       if (g.rows.length === 1) {
         const r = g.rows[0];
         const eqName = eqById.get(r.equipment_id)?.name ?? "Equipamento";
+        const reconcilia = ehReconciliacao(g.rows);
         message =
           `🤖 *Modo Automático executou:*\n\n` +
           `${icon} ${eqName} — ${actionVerb}\n\n` +
-          `⏰ Horário programado: ${g.sched_hhmm}\n` +
-          `📅 ${dateLine}` +
-          (progLine ? `\n\n${progLine}` : "");
+          (reconcilia
+            // janela já estava aberta: não afirmar que o horário é de hoje
+            ? `♻️ Motivo: janela automática ativa\n` +
+              (progLine ? `⏰ ${progLine.replace("Programação ativa: ", "Programação: ")}\n` : "") +
+              `📅 Restaurado em ${dateLine}`
+            : `⏰ Horário programado: ${g.sched_hhmm}\n` +
+              `📅 ${dateLine}` +
+              (progLine ? `\n\n${progLine}` : ""));
       } else {
         const lines = g.rows
           .map((r) => `${icon} ${eqById.get(r.equipment_id)?.name ?? "Equipamento"} — ${actionVerb} (${hhmm(r.scheduled_time)})`)
           .join("\n");
         const progSimple = progLine ? progLine.replace("Programação ativa:", "Programação:") : "";
+        const reconciliaLote = ehReconciliacao(g.rows);
         message =
           `🤖 *Modo Automático executou:*\n\n` +
           `${lines}\n\n` +
-          `📅 ${dateLine}` +
+          (reconciliaLote ? `♻️ Motivo: janela automática ativa\n` : "") +
+          `📅 ${reconciliaLote ? "Restaurado em " : ""}${dateLine}` +
           (progSimple ? `\n\n${progSimple}` : "");
       }
     }
