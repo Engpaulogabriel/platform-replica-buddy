@@ -11270,22 +11270,26 @@ async function executeTurnCommands(args: {
     return;
   }
 
-  // created_by: user_id do operador → fallback 1º admin/owner da fazenda.
-  let createdBy: string | null = (op as any).user_id ?? null;
-  if (!createdBy && farmId) {
-    const { data: roleRow } = await supabase
-      .from("user_roles")
-      .select("user_id")
-      .eq("farm_id", farmId)
-      .in("role", ["admin", "owner"])
-      .limit(1)
-      .maybeSingle();
-    createdBy = (roleRow as any)?.user_id ?? null;
-  }
+  // created_by: SOMENTE o user_id do próprio operador.
+  //
+  // Existia aqui um fallback para o primeiro admin/owner da fazenda. Ele não
+  // "resolvia" a falta de vínculo: gravava o comando no nome de OUTRA pessoa.
+  // Foi assim que o relatório da Semear creditou ao "Admin Renov" acionamentos
+  // feitos pelo Yuri — e o dado ficou errado na origem, não na exibição.
+  // Identidade de terceiro nunca é fallback.
+  //
+  // Recusar é obrigatório enquanto `guard_manual_command_without_user`
+  // (trigger BEFORE INSERT em commands) rejeitar comando manual com
+  // created_by nulo cujo source_device não seja 'cloud-automation',
+  // 'cloud-protective-off' ou 'backend-reset:%'. Sem esse vínculo o INSERT
+  // falharia no banco de qualquer forma; a diferença é que agora o operador
+  // recebe o motivo em vez de um erro de constraint — e ninguém é acusado no
+  // lugar dele.
+  const createdBy: string | null = (op as any).user_id ?? null;
   if (!createdBy) {
     await sendWhatsAppText(
       from,
-      `❌ Operador ${op.name} não está vinculado a um usuário da plataforma. Peça para o administrador vincular em Integrações → WhatsApp.`,
+      `❌ ${op.name}, seu WhatsApp ainda não está vinculado a um usuário da plataforma, e eu não vou registrar este comando no nome de outra pessoa.\n\nPeça para o administrador vincular em Integrações → WhatsApp.`,
       farmId,
     );
     return;

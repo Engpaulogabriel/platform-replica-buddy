@@ -17,7 +17,8 @@ import type { AutomationOrigin } from "./automationLog";
 /** Rótulos exibidos na coluna ORIGEM. Superset de AutomationOrigin: "Automático"
  *  se desdobra em dois, o resto é 1:1. */
 export type ReportOrigin =
-  | "Remoto" | "Local" | "Automação" | "Modo Automático" | "WhatsApp" | "Sistema";
+  | "Remoto" | "Local" | "Automação" | "Modo Automático" | "WhatsApp" | "Sistema"
+  | "Origem não identificada";
 
 /** Ícone por origem exibida. O nome é resolvido para o componente lucide no
  *  componente — aqui fica só a decisão, que é o que precisa de teste. */
@@ -49,7 +50,11 @@ export function resolveReportOrigin(
     const src = String(sourceDevice ?? "").trim().toLowerCase();
     return src === AUTO_ENGINE_SOURCE ? "Modo Automático" : "Automação";
   }
-  if (origin === "Remoto" || origin === "WhatsApp" || origin === "Sistema") return origin;
+  // Transição física confirmada que nenhuma correlação explicou. O banco grava
+  // origin='system'; chamar isso de "Local" afirmaria que alguém mexeu no
+  // painel — foi o que o relatório da Sossego passou a noite dizendo sem prova.
+  if (origin === "Sistema") return "Origem não identificada";
+  if (origin === "Remoto" || origin === "WhatsApp") return origin;
   // Valor cru e desconhecido: mostra como veio, sem inventar rótulo. Mesma
   // política do getOriginLabel anterior.
   return origin as ReportOrigin;
@@ -64,6 +69,7 @@ export const REPORT_ORIGIN_ICON: Record<ReportOrigin, ReportOriginIcon> = {
   "Modo Automático": "Bot",            // motor da nuvem (cloud-automation)
   "WhatsApp":        "MessageCircle",
   "Sistema":         "Server",
+  "Origem não identificada": "Server",
 };
 
 /** Classe de COR do ícone. Remoto, Automação e Modo Automático são AZUL
@@ -75,6 +81,7 @@ export const REPORT_ORIGIN_ICON_CLASS: Record<ReportOrigin, string> = {
   "Modo Automático": "text-info",
   "WhatsApp":        "text-[#25D366]",
   "Sistema":         "text-muted-foreground",
+  "Origem não identificada": "text-muted-foreground",
 };
 
 /** Classe do badge (pílula) na tabela. */
@@ -85,4 +92,5 @@ export const REPORT_ORIGIN_BADGE: Record<ReportOrigin, string> = {
   "Modo Automático": "bg-info/10 text-info",
   "WhatsApp":        "bg-[#25D366]/10 text-[#1ea952] border border-[#25D366]/30",
   "Sistema":         "bg-secondary text-muted-foreground",
+  "Origem não identificada": "bg-secondary text-muted-foreground",
 };

@@ -168,6 +168,34 @@ describe("regressão — sufixo de rádio não é identidade", () => {
   });
 });
 
+// ── identidade: nunca a de outra pessoa ───────────────────────────────────
+describe("TEST H — operador sem vínculo não vira comando de outro usuário", () => {
+  it("recusa e explica, em vez de gravar no nome do admin da fazenda", async () => {
+    const banco = bancoDeTeste();
+    // o operador existe e pode controlar, mas não está vinculado a um usuário
+    for (const o of banco.whatsapp_operators) o.user_id = null;
+    // e a fazenda TEM admin — era exatamente esse que o fallback usava
+    banco.user_roles = [{ user_id: "u-admin", role: "admin", farm_id: "f-semear" }];
+    banco.whatsapp_pending_actions = [{
+      id: "p1", operator_phone: "5577999608294", action_type: "desliga",
+      equipment_id: "e-semear-11", equipment_name: "POÇO 11 R4", farm_id: "f-semear",
+      operator_id: "op-2", created_at: new Date().toISOString(),
+    }];
+
+    const r = await enviarMensagem({
+      texto: "sim", banco,
+      decisaoDoLLM: { decision: "confirm", confidence: 1 },
+    });
+    const txt = juntou(r);
+
+    expect(txt).toMatch(/não vou registrar este comando no nome de outra pessoa/i);
+    expect(comandosCriados(r)).toHaveLength(0);
+    // e nada foi gravado com o usuário do admin
+    const cmds = comandosCriados(r).flatMap((c: any) => c.linhas);
+    expect(cmds.some((c: any) => c.created_by === "u-admin")).toBe(false);
+  });
+});
+
 // ── o teste não alcança produção ──────────────────────────────────────────
 describe("isolamento", () => {
   it("nenhuma chamada sai para Supabase, Meta ou Gemini de verdade", async () => {

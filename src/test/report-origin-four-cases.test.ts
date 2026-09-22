@@ -82,10 +82,19 @@ describe("7 a 9. o que NÃO pode mudar", () => {
     }
   });
 
-  it("WhatsApp e Sistema seguem intocados", () => {
+  it("WhatsApp segue intocado", () => {
     expect(resolveReportOrigin("WhatsApp", "whatsapp-webhook")).toBe("WhatsApp");
-    expect(resolveReportOrigin("Sistema", "agent-restart")).toBe("Sistema");
     expect(REPORT_ORIGIN_ICON["WhatsApp"]).toBe("MessageCircle");
+  });
+
+  it("origem 'system' é transição sem origem comprovada, não 'Sistema'", () => {
+    // O banco grava origin='system' quando a transição física é real mas
+    // nenhuma correlação a explicou. Antes isso virava "Local / Acionamento
+    // local" — afirmação sobre o mundo físico sem prova. A tela precisa dizer
+    // o que de fato se sabe.
+    expect(resolveReportOrigin("Sistema", "auto-trigger")).toBe("Origem não identificada");
+    expect(resolveReportOrigin("Sistema", null)).toBe("Origem não identificada");
+    expect(REPORT_ORIGIN_ICON["Origem não identificada"]).toBe("Server");
   });
 
   it("origem crua desconhecida não vira rótulo inventado", () => {
