@@ -74,7 +74,9 @@ const ONLINE_WINDOW_MS = 60_000;
 const MIGRATED_REFRESH_MS = 30_000;
 
 function isCommunicating(eq: Equipment): boolean {
-  if (eq.communication_status === "offline") return false;
+  // Ver PeakHourBanner: `communication_status` é flag persistido e congelado.
+  // Frescor de last_communication é a única fonte. Sem mudança de comportamento
+  // hoje — o flag só podia restringir, nunca liberar.
   if (!eq.last_communication) return false;
   const age = Date.now() - new Date(eq.last_communication).getTime();
   return !Number.isNaN(age) && age <= ONLINE_WINDOW_MS;

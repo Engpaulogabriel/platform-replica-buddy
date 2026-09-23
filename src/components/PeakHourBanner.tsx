@@ -30,7 +30,14 @@ const ONLINE_WINDOW_MS = 60_000; // 60s sem RX = offline para alerta de custo
 const MIGRATED_REFRESH_MS = 30_000;
 
 function isCommunicating(eq: EqRow): boolean {
-  if (eq.communication_status === "offline") return false;
+  // `communication_status` é flag PERSISTIDO e está congelado: nada no NEW o
+  // escreve por passagem de tempo (só o trigger auto_flip_online_on_telemetry,
+  // que apenas promove 'offline'→'online'). Em 22/09/2026, 64 de 128
+  // equipamentos ativos estavam marcados 'online' e 9 não comunicavam havia
+  // dias. Comunicação aqui é decidida SÓ por frescor de last_communication,
+  // mesma regra da tela e do WhatsApp. Remover o flag não muda nada hoje: não
+  // existe equipamento com flag 'offline' e RX dentro da janela (diff das 10
+  // fazendas em 22/09: 0 reclassificações nesse sentido).
   if (!eq.last_communication) return false;
   const age = Date.now() - new Date(eq.last_communication).getTime();
   if (Number.isNaN(age) || age > ONLINE_WINDOW_MS) return false;

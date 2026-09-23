@@ -8,6 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { WifiOff, Wifi, Radio, Download, Loader2 } from "lucide-react";
 import { tryGetSupabaseForFarm } from "@/lib/supabaseRouter";
 import { guardExport } from "@/lib/securityClient";
+import { isEquipmentOnline } from "@/hooks/useDashboardEquipment";
 
 type Cycle = {
   id: string;
@@ -100,7 +101,7 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
           .limit(2000),
         db
           .from("equipments")
-          .select("name, communication_status, last_communication")
+          .select("name, last_communication")
           .eq("farm_id", farmId),
       ]);
       if (cancelled) return;
@@ -110,9 +111,17 @@ export default function CommunicationReport({ farmId, fromDate, toDate, equipmen
       // Estado atual de comunicação por nome de equipamento (usado para
       // auto-fechar ciclos "em andamento" cujo equipamento já está online).
       const equipStatus = new Map<string, { online: boolean; lastComm: string | null }>();
-      for (const e of (equipRes.data ?? []) as Array<{ name: string; communication_status: string | null; last_communication: string | null }>) {
+      // `communication_status` NÃO é usado: é flag persistido e congelado. Nada
+      // no NEW o escreve por passagem de tempo — só o trigger
+      // auto_flip_online_on_telemetry, que apenas promove 'offline'→'online'.
+      // Em 22/09/2026 ele marcava 64 de 128 equipamentos como 'online', nove
+      // deles calados havia semanas: era justamente ESTE relatório, que existe
+      // para denunciar os mudos, quem mais os escondia. A verdade é o frescor
+      // de last_communication contra a janela da fazenda — a mesma regra do
+      // PumpCard e do WhatsApp (isEquipmentOnline).
+      for (const e of (equipRes.data ?? []) as Array<{ name: string; last_communication: string | null }>) {
         equipStatus.set(e.name, {
-          online: e.communication_status !== "offline",
+          online: isEquipmentOnline(e.last_communication),
           lastComm: e.last_communication ?? null,
         });
       }
