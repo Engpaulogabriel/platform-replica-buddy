@@ -79,7 +79,15 @@ describe("Realtime por fazenda", () => {
 
   it("o hook de dados marca Realtime degradado para fazenda migrada (sem mentir 'conectado')", () => {
     expect(CADASTROS).toMatch(/if \(!isRealtimeAvailableForFarm\(farmId\)\)/);
-    expect(CADASTROS).toMatch(/realtimeConnected: false, realtimeHealth: "degraded"/);
+    // A gravação inline virou a função pura onRealtimeUnavailable(), que devolve
+    // health='degraded' + safetyNet=false + deliveryProven=false — e é o
+    // applyDelivery quem escreve realtimeConnected/realtimeHealth. O
+    // comportamento (degradado, sem mentir 'conectado') está coberto por
+    // comportamento em src/test/realtime-delivery-health.test.ts.
+    expect(CADASTROS).toMatch(/applyDelivery\(onRealtimeUnavailable\(\)\)/);
+    expect(CADASTROS).toMatch(/realtimeConnected: next\.deliveryProven/);
+    // E SUBSCRIBED não pode voltar a desligar a rede de segurança.
+    expect(CADASTROS).not.toMatch(/if \(ok\) \{[\s\S]{0,120}stopDegradedSafetyNet\(\)/);
     // e informa a fazenda ao pedir canal — nos DOIS canais (postgres_changes e broadcast)
     expect((CADASTROS.match(/undefined, farmId\)/g) ?? []).length).toBe(2);
     expect(CADASTROS).toMatch(/getRealtimeChannel\(`cadastros-/);

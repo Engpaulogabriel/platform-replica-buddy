@@ -18,6 +18,10 @@ import { isFarmMigrated } from "@/lib/migrationRegistry";
 // Realtime real em `public.equipments` — é onde apply_pump_telemetry grava
 // last_outputs_state a cada RX físico. Os demais módulos seguem bloqueados.
 import { getRealtimeChannel, removeRealtimeChannel, isRealtimeAvailableForFarm } from "@/lib/realtimeKillSwitch";
+import {
+  initialDeliveryState, onChannelStatus, onChannelEvent, onRealtimeUnavailable, uiHealth,
+  type DeliveryState,
+} from "@/lib/realtimeDeliveryHealth";
 import { useAuth } from "@/contexts/AuthContext";
 import { notifyRegistry } from "@/lib/notify";
 import { enqueue, isOnline } from "@/lib/offlineQueue";
@@ -234,6 +238,7 @@ export function useCadastrosCloud() {
     let reconnectAttempts = 0;
 
     const handleEquipmentChange = (payload: any) => {
+      noteRealtimeEvent();
       const evt = payload?.eventType;
       if (evt === "UPDATE" && payload?.new?.id) {
         const next = payload.new as CloudEquipamento;
@@ -288,6 +293,28 @@ export function useCadastrosCloud() {
       }, 30_000);
     };
 
+    // ── v3.26.3: SUBSCRIBED NÃO É PROVA DE ENTREGA ─────────────────────────
+    // Antes, `if (ok) stopDegradedSafetyNet()` desligava a rede no primeiro
+    // SUBSCRIBED. Com a publicação `supabase_realtime` vazia no NEW (medido em
+    // 25/09/2026) o canal conecta e nunca entrega — a tela ficava sem Realtime
+    // E sem rede, atualizando só ao voltar o foco da aba.
+    // Agora quem decide é lib/realtimeDeliveryHealth (puro, testado): a rede só
+    // desliga depois de UM EVENTO REAL.
+    let delivery: DeliveryState = initialDeliveryState();
+    const applyDelivery = (next: DeliveryState) => {
+      delivery = next;
+      if (next.safetyNet) startDegradedSafetyNet(); else stopDegradedSafetyNet();
+      const health = uiHealth(next);
+      setState((s) => (s.realtimeConnected === next.deliveryProven && s.realtimeHealth === health
+        ? s
+        : { ...s, realtimeConnected: next.deliveryProven, realtimeHealth: health }));
+    };
+    /** Todo handler de evento passa por aqui — é a prova de que o canal entrega. */
+    const noteRealtimeEvent = () => { applyDelivery(onChannelEvent(delivery)); };
+    /** Cadastro (plc_groups/sectors): evento real + refetch. */
+    const onCadastroChange = () => { noteRealtimeEvent(); scheduleReload(); };
+    applyDelivery(delivery);
+
     const subscribePostgresChanges = (farmId: string) => {
       if (cancelled) return;
       if (channel) { try { void removeRealtimeChannel(channel); } catch { /* ignore */ } channel = null; }
@@ -298,41 +325,36 @@ export function useCadastrosCloud() {
       // dedicado abaixo; por isso NÃO ligamos também a rede de segurança,
       // que duplicaria requisições no mesmo backend.
       if (!isRealtimeAvailableForFarm(farmId)) {
-        setState((s) => (s.realtimeConnected === false && s.realtimeHealth === "degraded"
-          ? s
-          : { ...s, realtimeConnected: false, realtimeHealth: "degraded" }));
+        applyDelivery(onRealtimeUnavailable());
         return;
       }
       const ch = getRealtimeChannel(`cadastros-${farmId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, undefined, farmId)
-        .on("postgres_changes", { event: "*", schema: "public", table: "plc_groups", filter: `farm_id=eq.${farmId}` }, scheduleReload)
+        // Cada tabela é um binding próprio. Só `equipments` está publicada em
+        // supabase_realtime (migration 20260925030000) — plc_groups e sectors
+        // continuam aqui porque são cadastro e o handler é um refetch; se um dia
+        // forem publicadas, passam a chegar sem nenhuma mudança de código.
+        .on("postgres_changes", { event: "*", schema: "public", table: "plc_groups", filter: `farm_id=eq.${farmId}` }, onCadastroChange)
         .on("postgres_changes", { event: "*", schema: "public", table: "equipments", filter: `farm_id=eq.${farmId}` }, handleEquipmentChange)
-        .on("postgres_changes", { event: "*", schema: "public", table: "sectors", filter: `farm_id=eq.${farmId}` }, scheduleReload)
+        .on("postgres_changes", { event: "*", schema: "public", table: "sectors", filter: `farm_id=eq.${farmId}` }, onCadastroChange)
         .subscribe((status) => {
           if (cancelled) { try { void removeRealtimeChannel(ch); } catch { /* ignore */ } return; }
           const ok = status === "SUBSCRIBED";
-          setState((s) => (s.realtimeConnected === ok && s.realtimeHealth === (ok ? "connected" : s.realtimeHealth)
-            ? s
-            : { ...s, realtimeConnected: ok,
-                realtimeHealth: ok ? "connected"
-                  : (reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED ? "degraded" : "reconnecting") }));
+          // A decisão de rede/saúde é do módulo puro: SUBSCRIBED entra em
+          // PROBATION (rede LIGADA) e só um evento real leva a CONNECTED.
+          applyDelivery(onChannelStatus(delivery, status, MAX_RECONNECT_BEFORE_DEGRADED));
           if (ok) {
             reconnectAttempts = 0;
-            stopDegradedSafetyNet();   // canal vivo → nada de rede de segurança
-            // Sincroniza estado pós-reconexão
+            // Sincroniza estado pós-reconexão. A rede de segurança NÃO é
+            // desligada aqui — conexão não é prova de entrega.
             void refresh();
           } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR" || status === "CLOSED") {
             // Reconexão com backoff exponencial: 2s, 4s, 8s, 16s, máx 30s
             const delay = Math.min(2000 * Math.pow(2, reconnectAttempts), 30_000);
             reconnectAttempts += 1;
-            setState((s) => {
-              const h = reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED ? "degraded" : "reconnecting";
-              return s.realtimeHealth === h ? s : { ...s, realtimeHealth: h };
-            });
             if (import.meta.env.DEV) {
               console.warn(`[useCadastrosCloud] realtime ${status} — reconectando em ${delay}ms (tentativa ${reconnectAttempts})`);
             }
             void refresh();
-            if (reconnectAttempts >= MAX_RECONNECT_BEFORE_DEGRADED) startDegradedSafetyNet();
             if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
               // Desiste de reinscrever em laço; a rede de segurança e o retorno
               // de aba continuam atualizando a tela.
